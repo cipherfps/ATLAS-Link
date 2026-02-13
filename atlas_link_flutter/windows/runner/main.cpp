@@ -1,6 +1,10 @@
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter_windows.h>
 #include <windows.h>
+
+#include <algorithm>
+#include <cmath>
 
 #include "flutter_window.h"
 #include "utils.h"
@@ -17,6 +21,82 @@ struct SavedWindowBounds {
   LONG width;
   LONG height;
 };
+
+double GetScaleFactorForMonitor(HMONITOR monitor) {
+  const UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+  if (dpi == 0) {
+    return 1.0;
+  }
+  return dpi / 96.0;
+}
+
+bool GetWorkAreaForMonitor(HMONITOR monitor, RECT* work_area) {
+  if (work_area == nullptr) {
+    return false;
+  }
+
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(monitor_info);
+  if (!GetMonitorInfoW(monitor, &monitor_info)) {
+    return false;
+  }
+
+  *work_area = monitor_info.rcWork;
+  return true;
+}
+
+int PhysicalToLogical(LONG physical, double scale_factor) {
+  if (scale_factor <= 0.0) {
+    return static_cast<int>(physical);
+  }
+  return static_cast<int>(std::lround(physical / scale_factor));
+}
+
+unsigned int PhysicalToLogicalUnsigned(LONG physical, double scale_factor) {
+  if (scale_factor <= 0.0) {
+    return static_cast<unsigned int>(std::max<LONG>(1, physical));
+  }
+  const auto logical =
+      static_cast<long>(std::lround(static_cast<double>(physical) / scale_factor));
+  return static_cast<unsigned int>(std::max<long>(1, logical));
+}
+
+void ClampPhysicalBoundsToWorkArea(const RECT& work_area,
+                                  SavedWindowBounds* bounds) {
+  if (bounds == nullptr) {
+    return;
+  }
+
+  const LONG work_width = work_area.right - work_area.left;
+  const LONG work_height = work_area.bottom - work_area.top;
+  if (work_width <= 0 || work_height <= 0) {
+    return;
+  }
+
+  bounds->width = std::max<LONG>(1, bounds->width);
+  bounds->height = std::max<LONG>(1, bounds->height);
+
+  if (bounds->width > work_width) {
+    bounds->width = work_width;
+  }
+  if (bounds->height > work_height) {
+    bounds->height = work_height;
+  }
+
+  if (bounds->x < work_area.left) {
+    bounds->x = work_area.left;
+  }
+  if (bounds->y < work_area.top) {
+    bounds->y = work_area.top;
+  }
+
+  if (bounds->x + bounds->width > work_area.right) {
+    bounds->x = work_area.right - bounds->width;
+  }
+  if (bounds->y + bounds->height > work_area.bottom) {
+    bounds->y = work_area.bottom - bounds->height;
+  }
+}
 
 bool LoadWindowBounds(SavedWindowBounds* bounds) {
   if (bounds == nullptr) {
@@ -77,23 +157,62 @@ void SaveWindowBounds(HWND hwnd) {
   RegCloseKey(key);
 }
 
-Win32Window::Point CenteredOrigin(const Win32Window::Size& size) {
-  HMONITOR primary_monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
-  MONITORINFO monitor_info{};
-  monitor_info.cbSize = sizeof(monitor_info);
-  if (!GetMonitorInfoW(primary_monitor, &monitor_info)) {
+Win32Window::Size FitSizeToWorkArea(HMONITOR monitor,
+                                    const Win32Window::Size& requested) {
+  RECT work_area{};
+  if (!GetWorkAreaForMonitor(monitor, &work_area)) {
+    return requested;
+  }
+
+  const double scale_factor = GetScaleFactorForMonitor(monitor);
+  const double available_width =
+      (work_area.right - work_area.left) / scale_factor;
+  const double available_height =
+      (work_area.bottom - work_area.top) / scale_factor;
+
+  // Keep a small margin so the window doesn't exactly hug the work area.
+  constexpr double kPadding = 32.0;
+  const double max_width = std::max(1.0, std::floor(available_width - kPadding));
+  const double max_height = std::max(1.0, std::floor(available_height - kPadding));
+
+  unsigned int width =
+      static_cast<unsigned int>(std::min<double>(requested.width, max_width));
+  unsigned int height =
+      static_cast<unsigned int>(std::min<double>(requested.height, max_height));
+
+  if (width < 640 && max_width >= 640) {
+    width = 640;
+  }
+  if (height < 480 && max_height >= 480) {
+    height = 480;
+  }
+
+  return Win32Window::Size(width, height);
+}
+
+Win32Window::Point CenteredOrigin(HMONITOR monitor,
+                                  const Win32Window::Size& logical_size) {
+  RECT work_area{};
+  if (!GetWorkAreaForMonitor(monitor, &work_area)) {
     return Win32Window::Point(50, 50);
   }
-  const RECT work_area = monitor_info.rcWork;
 
-  const LONG available_width = work_area.right - work_area.left;
-  const LONG available_height = work_area.bottom - work_area.top;
+  const double scale_factor = GetScaleFactorForMonitor(monitor);
+  const double work_left = work_area.left / scale_factor;
+  const double work_top = work_area.top / scale_factor;
+  const double work_width =
+      (work_area.right - work_area.left) / scale_factor;
+  const double work_height =
+      (work_area.bottom - work_area.top) / scale_factor;
 
-  LONG centered_x =
-      work_area.left + (available_width - static_cast<LONG>(size.width)) / 2;
-  LONG centered_y =
-      work_area.top + (available_height - static_cast<LONG>(size.height)) / 2;
-  return Win32Window::Point(centered_x, centered_y);
+  const double centered_x =
+      work_left + (work_width - logical_size.width) / 2.0;
+  const double centered_y =
+      work_top + (work_height - logical_size.height) / 2.0;
+
+  return Win32Window::Point(
+      static_cast<int>(std::lround(centered_x)),
+      static_cast<int>(std::lround(centered_y)));
 }
 
 }  // namespace
@@ -118,16 +237,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
+  HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
   Win32Window::Size size(1250, 1080);
-  Win32Window::Point origin = CenteredOrigin(size);
+  Win32Window::Point origin(50, 50);
   SavedWindowBounds restored_bounds{};
   if (LoadWindowBounds(&restored_bounds)) {
-    origin = Win32Window::Point(restored_bounds.x, restored_bounds.y);
-    size = Win32Window::Size(static_cast<unsigned int>(restored_bounds.width),
-                             static_cast<unsigned int>(restored_bounds.height));
+    POINT restore_point{restored_bounds.x, restored_bounds.y};
+    monitor = MonitorFromPoint(restore_point, MONITOR_DEFAULTTONEAREST);
+
+    RECT work_area{};
+    if (GetWorkAreaForMonitor(monitor, &work_area)) {
+      ClampPhysicalBoundsToWorkArea(work_area, &restored_bounds);
+    }
+
+    const double scale_factor = GetScaleFactorForMonitor(monitor);
+    origin =
+        Win32Window::Point(PhysicalToLogical(restored_bounds.x, scale_factor),
+                           PhysicalToLogical(restored_bounds.y, scale_factor));
+    size = Win32Window::Size(
+        PhysicalToLogicalUnsigned(restored_bounds.width, scale_factor),
+        PhysicalToLogicalUnsigned(restored_bounds.height, scale_factor));
+  } else {
+    size = FitSizeToWorkArea(monitor, size);
+    origin = CenteredOrigin(monitor, size);
   }
 
-  if (!window.Create(L"ATLAS Link", origin, size)) {
+  if (!window.Create(L"ATLAS Link", origin, size, monitor)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
