@@ -45,7 +45,7 @@ flutter build windows
 
 ## Build Installer (Windows EXE)
 
-ATLAS Link installer uses **Inno Setup** (same style as Reboot's installer flow).
+ATLAS Link installer uses **Inno Setup**
 
 Requirements:
 - Flutter SDK on PATH
