@@ -4,8 +4,8 @@ An Enhanced OGFN Launcher designed for ease-of-use
 
 ## Modules
 
-- `Play`: import versions, select builds, launch/stop Fortnite client
-- `Host`: client launch/stop, host launch/stop
+- `Library`: import versions, select builds, launch/stop Fortnite client
+- `Launching`: client launch/stop, host launch/stop
 - `Backend`: backend config
 - `Settings`: profile, apperance, and internal files
 
