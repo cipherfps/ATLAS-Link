@@ -7384,6 +7384,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         ? 'Preparing ATLAS Backend...'
         : _atlasBackendProcess != null
         ? 'ATLAS Backend running'
+        : _settings.backendConnectionType == BackendConnectionType.local &&
+              _backendOnline
+        ? 'Backend already running'
         : 'Launch ATLAS Backend';
 
     return _menuItemEntrance(
@@ -7534,7 +7537,8 @@ class _LauncherScreenState extends State<LauncherScreen>
                       _settings.backendConnectionType ==
                           BackendConnectionType.local &&
                       !_atlasBackendActionBusy &&
-                      _atlasBackendProcess == null;
+                      _atlasBackendProcess == null &&
+                      !_backendOnline;
                   const buttonTextStyle = TextStyle(
                     fontWeight: FontWeight.w700,
                     fontSize: 15,
