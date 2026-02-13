@@ -1,0 +1,35 @@
+# OS / filesystem
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# Local/reference folders
+.refs/
+node_modules/
+
+# Logs / temp
+*.log
+*.tmp
+*.cache
+
+# Build outputs
+dist/
+coverage/
+
+# Flutter desktop project outputs
+atlas_link_flutter/.dart_tool/
+atlas_link_flutter/.flutter-plugins-dependencies
+atlas_link_flutter/.pub/
+atlas_link_flutter/.pub-cache/
+atlas_link_flutter/build/
+atlas_link_flutter/windows/flutter/ephemeral/
+atlas_link_flutter/windows/flutter/generated_plugin_registrant.cc
+atlas_link_flutter/windows/flutter/generated_plugin_registrant.h
+atlas_link_flutter/windows/flutter/generated_plugins.cmake
