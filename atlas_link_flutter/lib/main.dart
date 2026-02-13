@@ -2991,7 +2991,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 const SizedBox(height: 14),
                                 settingTile(
                                   icon: Icons.play_circle_outline_rounded,
-                                  title: 'Play launch arguments',
+                                  title: 'Play Launch Arguments',
                                   subtitle:
                                       'Additional arguments to use with the Launch button',
                                   trailing: SizedBox(
@@ -3020,7 +3020,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 const SizedBox(height: 8),
                                 settingTile(
                                   icon: Icons.tune_rounded,
-                                  title: 'Host launch arguments',
+                                  title: 'Host Launch Arguments',
                                   subtitle:
                                       'Additional arguments to use with the Host button',
                                   trailing: SizedBox(
@@ -3049,7 +3049,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 const SizedBox(height: 8),
                                 settingTile(
                                   icon: Icons.badge_rounded,
-                                  title: 'Host client name',
+                                  title: 'Host Client Name',
                                   subtitle:
                                       'Username used for the hosted client',
                                   trailing: SizedBox(
@@ -3091,7 +3091,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 const SizedBox(height: 8),
                                 settingTile(
                                   icon: Icons.groups_rounded,
-                                  title: 'Multi-Client launching',
+                                  title: 'Multi-Client Launching',
                                   subtitle:
                                       'Allows Launch to open additional game clients while one is already running',
                                   trailing: Switch(
@@ -3106,7 +3106,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 const SizedBox(height: 8),
                                 settingTile(
                                   icon: Icons.restart_alt_rounded,
-                                  title: 'Automatic restart',
+                                  title: 'Automatic Restart',
                                   subtitle:
                                       'Automatically restarts the game server when it exits',
                                   trailing: Switch(
@@ -5903,7 +5903,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _pickUnrealEnginePatcher() async {
     final path = await _pickSingleFile(
-      dialogTitle: 'Select Unreal engine patcher',
+      dialogTitle: 'Select Unreal Engine Patcher',
       allowedExtensions: const ['dll'],
     );
     if (path == null) return;
@@ -9011,7 +9011,7 @@ foreach ($app in $appPaths) {
                 const SizedBox(height: 14),
                 _backendSettingTile(
                   icon: Icons.description_outlined,
-                  title: 'Unreal engine patcher',
+                  title: 'Unreal Engine Patcher',
                   subtitle: 'Unlocks the Unreal Engine Console',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
@@ -9032,7 +9032,7 @@ foreach ($app in $appPaths) {
                 const SizedBox(height: 8),
                 _backendSettingTile(
                   icon: Icons.description_outlined,
-                  title: 'Authentication patcher',
+                  title: 'Authentication Patcher',
                   subtitle: 'Redirects all HTTP requests to the backend',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
@@ -9053,7 +9053,7 @@ foreach ($app in $appPaths) {
                 const SizedBox(height: 8),
                 _backendSettingTile(
                   icon: Icons.description_outlined,
-                  title: 'Memory patcher',
+                  title: 'Memory Patcher',
                   subtitle:
                       'Prevents the client from crashing because of a memory leak',
                   trailingWidth: 500,
@@ -9075,7 +9075,7 @@ foreach ($app in $appPaths) {
                 const SizedBox(height: 8),
                 _backendSettingTile(
                   icon: Icons.description_outlined,
-                  title: 'Game server',
+                  title: 'Game Server',
                   subtitle: 'The file injected to create the game server',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
