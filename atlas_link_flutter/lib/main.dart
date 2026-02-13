@@ -7384,9 +7384,6 @@ class _LauncherScreenState extends State<LauncherScreen>
         ? 'Preparing ATLAS Backend...'
         : _atlasBackendProcess != null
         ? 'ATLAS Backend running'
-        : _settings.backendConnectionType == BackendConnectionType.local &&
-              _backendOnline
-        ? 'Backend already running'
         : 'Launch ATLAS Backend';
 
     return _menuItemEntrance(
