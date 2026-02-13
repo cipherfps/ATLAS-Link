@@ -1,15 +1,13 @@
 # ATLAS Link Launcher
 
-ATLAS Link is now a Flutter-first desktop launcher.
+An Enhanced OGFN Launcher designed for ease-of-use
 
 ## Modules
 
 - `Play`: import versions, select builds, launch/stop Fortnite client
-- `Host`: server metadata, host launch/stop, copy share link/public IP
-- `Browser`: connect to Reboot server browser, search entries, join/copy target IP
-- `Backend`: backend config, start/stop/test, runtime logs
-- `Info`: quick links for Discord/issues/docs
-- `Settings`: profile, visuals, and launcher behavior
+- `Host`: client launch/stop, host launch/stop
+- `Backend`: backend config
+- `Settings`: profile, apperance, and internal files
 
 ## Requirements
 
