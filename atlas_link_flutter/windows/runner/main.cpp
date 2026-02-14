@@ -11,7 +11,12 @@
 
 namespace {
 
-constexpr wchar_t kWindowBoundsRegKey[] =
+// Keep ATLAS Link's window bounds aligned with ATLAS Backend by sharing bounds
+// via the backend key (while also writing to the legacy ATLAS Link key for
+// backwards compatibility).
+constexpr wchar_t kBackendWindowBoundsRegKey[] =
+    L"Software\\ATLAS-Backend\\ATLAS-Backend-Flutter";
+constexpr wchar_t kLinkWindowBoundsRegKey[] =
     L"Software\\ATLAS-Link\\ATLAS-Link-Flutter";
 constexpr wchar_t kWindowBoundsRegValue[] = L"WindowBounds";
 
@@ -98,15 +103,15 @@ void ClampPhysicalBoundsToWorkArea(const RECT& work_area,
   }
 }
 
-bool LoadWindowBounds(SavedWindowBounds* bounds) {
-  if (bounds == nullptr) {
+bool LoadWindowBoundsFromKey(const wchar_t* reg_key, SavedWindowBounds* bounds) {
+  if (reg_key == nullptr || bounds == nullptr) {
     return false;
   }
 
   SavedWindowBounds loaded{};
   DWORD loaded_size = sizeof(loaded);
   const LSTATUS status =
-      RegGetValueW(HKEY_CURRENT_USER, kWindowBoundsRegKey, kWindowBoundsRegValue,
+      RegGetValueW(HKEY_CURRENT_USER, reg_key, kWindowBoundsRegValue,
                    RRF_RT_REG_BINARY, nullptr, &loaded, &loaded_size);
   if (status != ERROR_SUCCESS || loaded_size != sizeof(loaded)) {
     return false;
@@ -117,6 +122,14 @@ bool LoadWindowBounds(SavedWindowBounds* bounds) {
 
   *bounds = loaded;
   return true;
+}
+
+bool LoadWindowBounds(SavedWindowBounds* bounds) {
+  // Prefer ATLAS Backend's bounds so both apps stay aligned by default.
+  if (LoadWindowBoundsFromKey(kBackendWindowBoundsRegKey, bounds)) {
+    return true;
+  }
+  return LoadWindowBoundsFromKey(kLinkWindowBoundsRegKey, bounds);
 }
 
 void SaveWindowBounds(HWND hwnd) {
@@ -144,17 +157,27 @@ void SaveWindowBounds(HWND hwnd) {
     return;
   }
 
-  HKEY key = nullptr;
-  const LSTATUS open_status = RegCreateKeyExW(
-      HKEY_CURRENT_USER, kWindowBoundsRegKey, 0, nullptr, 0, KEY_SET_VALUE,
-      nullptr, &key, nullptr);
-  if (open_status != ERROR_SUCCESS || key == nullptr) {
-    return;
-  }
+  auto save_to_key = [&](const wchar_t* reg_key) {
+    if (reg_key == nullptr) {
+      return;
+    }
 
-  RegSetValueExW(key, kWindowBoundsRegValue, 0, REG_BINARY,
-                 reinterpret_cast<const BYTE*>(&bounds), sizeof(bounds));
-  RegCloseKey(key);
+    HKEY key = nullptr;
+    const LSTATUS open_status = RegCreateKeyExW(
+        HKEY_CURRENT_USER, reg_key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
+        nullptr);
+    if (open_status != ERROR_SUCCESS || key == nullptr) {
+      return;
+    }
+
+    RegSetValueExW(key, kWindowBoundsRegValue, 0, REG_BINARY,
+                   reinterpret_cast<const BYTE*>(&bounds), sizeof(bounds));
+    RegCloseKey(key);
+  };
+
+  // Write to both keys so ATLAS Link and ATLAS Backend stay in sync.
+  save_to_key(kBackendWindowBoundsRegKey);
+  save_to_key(kLinkWindowBoundsRegKey);
 }
 
 Win32Window::Size FitSizeToWorkArea(HMONITOR monitor,
@@ -237,29 +260,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
+  POINT cursor_position{};
   HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+  if (GetCursorPos(&cursor_position)) {
+    monitor = MonitorFromPoint(cursor_position, MONITOR_DEFAULTTONEAREST);
+  }
+
   Win32Window::Size size(1250, 1080);
-  Win32Window::Point origin(50, 50);
+  size = FitSizeToWorkArea(monitor, size);
+  Win32Window::Point origin = CenteredOrigin(monitor, size);
   SavedWindowBounds restored_bounds{};
   if (LoadWindowBounds(&restored_bounds)) {
     POINT restore_point{restored_bounds.x, restored_bounds.y};
     monitor = MonitorFromPoint(restore_point, MONITOR_DEFAULTTONEAREST);
-
     RECT work_area{};
     if (GetWorkAreaForMonitor(monitor, &work_area)) {
       ClampPhysicalBoundsToWorkArea(work_area, &restored_bounds);
     }
 
     const double scale_factor = GetScaleFactorForMonitor(monitor);
-    origin =
-        Win32Window::Point(PhysicalToLogical(restored_bounds.x, scale_factor),
-                           PhysicalToLogical(restored_bounds.y, scale_factor));
+    origin = Win32Window::Point(
+        PhysicalToLogical(restored_bounds.x, scale_factor),
+        PhysicalToLogical(restored_bounds.y, scale_factor));
     size = Win32Window::Size(
         PhysicalToLogicalUnsigned(restored_bounds.width, scale_factor),
         PhysicalToLogicalUnsigned(restored_bounds.height, scale_factor));
-  } else {
     size = FitSizeToWorkArea(monitor, size);
-    origin = CenteredOrigin(monitor, size);
   }
 
   if (!window.Create(L"ATLAS Link", origin, size, monitor)) {

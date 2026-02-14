@@ -246,6 +246,8 @@ enum GameServerInjectType { custom }
 
 enum _GameActionState { idle, launching, closing }
 
+enum _GameServerPromptAction { ignore, start }
+
 enum BackendConnectionType { local, remote }
 
 extension _BackendConnectionTypeLabel on BackendConnectionType {
@@ -278,6 +280,8 @@ class _FortniteProcessState {
   bool corrupted = false;
   bool killed = false;
   bool postLoginInjected = false;
+  bool largePakInjected = false;
+  bool gameServerInjected = false;
 
   void killAuxiliary() {
     final launcher = launcherPid;
@@ -368,6 +372,16 @@ class _InjectionReport {
   bool get hasFailure => firstFailure != null;
 }
 
+class _ProfileSetupResult {
+  const _ProfileSetupResult({
+    required this.username,
+    required this.profileAvatarPath,
+  });
+
+  final String username;
+  final String profileAvatarPath;
+}
+
 class LauncherScreen extends StatefulWidget {
   const LauncherScreen({super.key, required this.onDarkModeChanged});
 
@@ -378,9 +392,9 @@ class LauncherScreen extends StatefulWidget {
 }
 
 class _LauncherScreenState extends State<LauncherScreen>
-    with SingleTickerProviderStateMixin {
-  static const String _launcherVersion = '0.0.1';
-  static const String _launcherBuildLabel = 'Stable Build 0.0.1';
+    with TickerProviderStateMixin {
+  static const String _launcherVersion = '0.0.2';
+  static const String _launcherBuildLabel = 'Stable 0.0.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -390,6 +404,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _authInjectionInitialDelayMs = 900;
   static const int _authInjectionRetryDelayMs = 1200;
   static const int _authInjectionMaxAttempts = 3;
+  static const int _gameServerInjectionRetryDelayMs = 900;
+  static const int _gameServerInjectionMaxAttempts = 3;
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _atlasLinkRepository =
       'https://github.com/cipherfps/ATLAS-Link';
@@ -424,10 +440,12 @@ class _LauncherScreenState extends State<LauncherScreen>
   ];
   static const String _calderaToken =
       'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
-  static const List<String> _loggedInMarkers = <String>[
-    '[UOnlineAccountCommon::ContinueLoggingIn]',
-    '(Completed)',
-  ];
+  static const String _loginContinueMarker =
+      '[UOnlineAccountCommon::ContinueLoggingIn]';
+  static const String _loginCompleteStepMarker = 'Login: Completing Sign-in';
+  static const String _loginCompletedMarker = '(Completed)';
+  static const String _loginUiStateTransitionMarker =
+      'UI State changing from [UI.State.Startup.Login]';
   static const List<String> _corruptedBuildErrors = <String>[
     'Critical error',
     'when 0 bytes remain',
@@ -467,8 +485,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _authenticationPatcherController = TextEditingController();
   final _memoryPatcherController = TextEditingController();
   final _gameServerFileController = TextEditingController();
+  final _largePakPatcherController = TextEditingController();
 
   LauncherTab _tab = LauncherTab.home;
+  LauncherTab _settingsReturnTab = LauncherTab.home;
   SettingsSection _settingsSection = SettingsSection.profile;
   LauncherSettings _settings = LauncherSettings.defaults();
   int _homeHeroIndex = 0;
@@ -483,6 +503,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _atlasBackendActionBusy = false;
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
+  bool _profileSetupDialogVisible = false;
+  bool _profileSetupDialogQueued = false;
   String _versionSearchQuery = '';
 
   Process? _gameProcess;
@@ -520,10 +542,15 @@ class _LauncherScreenState extends State<LauncherScreen>
   late final AnimationController _shellEntranceController;
   late final Animation<double> _shellEntranceFade;
   late final Animation<double> _shellEntranceScale;
+  late final AnimationController _libraryActionsNudgeController;
+  late final Animation<double> _libraryActionsNudgePulse;
 
   late Directory _dataDir;
   late File _settingsFile;
+  late File _installStateFile;
   late File _logFile;
+
+  LauncherInstallState _installState = LauncherInstallState.defaults();
 
   @override
   void initState() {
@@ -543,6 +570,15 @@ class _LauncherScreenState extends State<LauncherScreen>
       ),
     );
 
+    _libraryActionsNudgeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+    _libraryActionsNudgePulse = CurvedAnimation(
+      parent: _libraryActionsNudgeController,
+      curve: Curves.easeInOut,
+    );
+
     unawaited(_bootstrap());
     _startHomeHeroAutoRotate();
   }
@@ -555,6 +591,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _logFlushTimer?.cancel();
     _flushLogBuffer();
     _shellEntranceController.dispose();
+    _libraryActionsNudgeController.dispose();
     _usernameController.dispose();
     _backendDirController.dispose();
     _backendCommandController.dispose();
@@ -565,6 +602,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _authenticationPatcherController.dispose();
     _memoryPatcherController.dispose();
     _gameServerFileController.dispose();
+    _largePakPatcherController.dispose();
     _atlasBackendInstallProgress.dispose();
     unawaited(_stopBackendProxy());
     super.dispose();
@@ -573,7 +611,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _bootstrap() async {
     try {
       await _initStorage();
+      await _loadInstallState();
       await _loadSettings();
+      await _reconcileInstallState();
       if (mounted) {
         setState(() {
           _showStartup = _settings.startupAnimationEnabled;
@@ -598,6 +638,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
         unawaited(_refreshRuntime());
       });
+
+      _queueFirstRunProfileSetup();
     } catch (error) {
       debugPrint('ATLAS Link bootstrap failed: $error');
     } finally {
@@ -617,6 +659,510 @@ class _LauncherScreenState extends State<LauncherScreen>
       _showStartup = false;
     });
     _shellEntranceController.forward(from: 0);
+    _queueFirstRunProfileSetup();
+  }
+
+  void _queueFirstRunProfileSetup() {
+    if (_settings.profileSetupComplete) return;
+    if (_profileSetupDialogQueued) return;
+    _profileSetupDialogQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _profileSetupDialogQueued = false;
+      unawaited(_maybeShowFirstRunProfileSetup());
+    });
+  }
+
+  Future<void> _maybeShowFirstRunProfileSetup() async {
+    if (!mounted) return;
+    if (_profileSetupDialogVisible) return;
+    if (_settings.profileSetupComplete) return;
+    if (!_startupConfigResolved) return;
+    if (_showStartup) return;
+
+    _profileSetupDialogVisible = true;
+    try {
+      final result = await _promptFirstRunProfileSetup();
+      if (result == null) return;
+      if (!mounted) return;
+
+      final resolvedUsername = result.username.trim().isEmpty
+          ? 'Player'
+          : result.username.trim();
+      setState(() {
+        _settings = _settings.copyWith(
+          username: resolvedUsername,
+          profileAvatarPath: result.profileAvatarPath.trim(),
+          profileSetupComplete: true,
+        );
+        _installState = _installState.copyWith(profileSetupComplete: true);
+        _usernameController.text = resolvedUsername;
+      });
+      await _saveSettings(toast: false);
+      try {
+        await _saveInstallState();
+      } catch (error) {
+        _log('settings', 'Failed to persist install state: $error');
+      }
+    } catch (error) {
+      _log('settings', 'First-run profile setup failed: $error');
+    } finally {
+      _profileSetupDialogVisible = false;
+    }
+  }
+
+  Future<_ProfileSetupResult?> _promptFirstRunProfileSetup() async {
+    if (!mounted) return null;
+
+    // Start blank so profile setup always feels like a fresh choice (especially
+    // after a Reset Launcher) and never pre-fills from environment/usernames.
+    final usernameController = TextEditingController();
+    final usernameFocusNode = FocusNode();
+    try {
+      return await showGeneralDialog<_ProfileSetupResult>(
+        context: context,
+        barrierDismissible: false,
+        barrierLabel:
+            MaterialLocalizations.of(context).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 240),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          var selectedAvatarPath = _settings.profileAvatarPath.trim();
+          var validation = '';
+          var submitted = false;
+          var focusRequested = false;
+
+          ImageProvider<Object> avatarProvider() {
+            final selected = selectedAvatarPath.trim();
+            if (selected.isNotEmpty && File(selected).existsSync()) {
+              return FileImage(File(selected));
+            }
+            return const AssetImage('assets/images/default_pfp.png');
+          }
+
+          Future<void> pickAvatar() async {
+            if (!Platform.isWindows) return;
+            final picked = await FilePicker.platform.pickFiles(
+              type: FileType.image,
+              dialogTitle: 'Select profile picture',
+            );
+            final path = picked?.files.single.path?.trim() ?? '';
+            if (path.isEmpty) return;
+            selectedAvatarPath = path;
+          }
+
+          void setDefaultAvatar() {
+            selectedAvatarPath = '';
+          }
+
+          void submitDialog(StateSetter setDialogState) {
+            if (submitted) return;
+            final name = usernameController.text.trim();
+            if (name.isEmpty) {
+              setDialogState(() {
+                validation = 'Enter a display name.';
+              });
+              return;
+            }
+            setDialogState(() {
+              validation = '';
+              submitted = true;
+            });
+
+            FocusManager.instance.primaryFocus?.unfocus();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop(
+                _ProfileSetupResult(
+                  username: name,
+                  profileAvatarPath: selectedAvatarPath,
+                ),
+              );
+            });
+          }
+
+          return StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              if (!focusRequested) {
+                focusRequested = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!dialogContext.mounted) return;
+                  usernameFocusNode.requestFocus();
+                  usernameController.selection = TextSelection(
+                    baseOffset: 0,
+                    extentOffset: usernameController.text.length,
+                  );
+                });
+              }
+
+              final onSurface = _onSurface(dialogContext, 0.92);
+              final onSurfaceMuted = _onSurface(dialogContext, 0.70);
+              final compact = MediaQuery.of(dialogContext).size.width < 720;
+              final avatarSize = compact ? 104.0 : 124.0;
+
+              final avatar = SizedBox(
+                width: avatarSize,
+                height: avatarSize,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Material(
+                      color: Colors.transparent,
+                      shape: CircleBorder(
+                        side: BorderSide(color: _onSurface(dialogContext, 0.16)),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Ink.image(
+                        image: avatarProvider(),
+                        width: avatarSize,
+                        height: avatarSize,
+                        fit: BoxFit.cover,
+                        child: InkWell(
+                          onTap: () async {
+                            await pickAvatar();
+                            setDialogState(() {});
+                          },
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: -6,
+                      bottom: -6,
+                      child: Material(
+                        color: Colors.transparent,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(999),
+                          onTap: () async {
+                            await pickAvatar();
+                            setDialogState(() {});
+                          },
+                          child: Container(
+                            width: 34,
+                            height: 34,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: _adaptiveScrimColor(
+                                dialogContext,
+                                darkAlpha: 0.22,
+                                lightAlpha: 0.26,
+                              ),
+                              border: Border.all(
+                                color: _onSurface(dialogContext, 0.16),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _dialogShadowColor(dialogContext)
+                                      .withValues(alpha: 0.45),
+                                  blurRadius: 14,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: Icon(
+                              Icons.edit_rounded,
+                              size: 18,
+                              color: _onSurface(dialogContext, 0.9),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+
+              final nameField = TextField(
+                controller: usernameController,
+                focusNode: usernameFocusNode,
+                onChanged: (_) {
+                  if (validation.isEmpty) return;
+                  setDialogState(() => validation = '');
+                },
+                onSubmitted: (_) => submitDialog(setDialogState),
+                textInputAction: TextInputAction.done,
+                decoration: InputDecoration(
+                  labelText: 'Display name',
+                  hintText: 'Player',
+                  isDense: true,
+                  filled: true,
+                  fillColor: _onSurface(dialogContext, 0.06),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: Theme.of(dialogContext).colorScheme.secondary,
+                      width: 1.2,
+                    ),
+                  ),
+                  errorText: validation.isEmpty ? null : validation,
+                ),
+                style: TextStyle(color: onSurface),
+              );
+
+              final mainRow = compact
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Center(child: avatar),
+                        const SizedBox(height: 14),
+                        nameField,
+                        const SizedBox(height: 10),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: submitted
+                                  ? null
+                                  : () async {
+                                      await pickAvatar();
+                                      setDialogState(() {});
+                                    },
+                              icon: const Icon(Icons.image_rounded, size: 18),
+                              label: Text(
+                                selectedAvatarPath.trim().isEmpty
+                                    ? 'Choose PFP'
+                                    : 'Change PFP',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed:
+                                  submitted || selectedAvatarPath.trim().isEmpty
+                                      ? null
+                                      : () => setDialogState(setDefaultAvatar),
+                              icon:
+                                  const Icon(Icons.restore_rounded, size: 18),
+                              label: const Text('Default'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        avatar,
+                        const SizedBox(width: 18),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              nameField,
+                              const SizedBox(height: 10),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  OutlinedButton.icon(
+                                    onPressed: submitted
+                                        ? null
+                                        : () async {
+                                            await pickAvatar();
+                                            setDialogState(() {});
+                                          },
+                                    icon: const Icon(Icons.image_rounded, size: 18),
+                                    label: Text(
+                                      selectedAvatarPath.trim().isEmpty
+                                          ? 'Choose PFP'
+                                          : 'Change PFP',
+                                    ),
+                                  ),
+                                  OutlinedButton.icon(
+                                    onPressed: submitted ||
+                                            selectedAvatarPath.trim().isEmpty
+                                        ? null
+                                        : () => setDialogState(setDefaultAvatar),
+                                    icon: const Icon(Icons.restore_rounded, size: 18),
+                                    label: const Text('Default'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+
+              return Shortcuts(
+                shortcuts: const <ShortcutActivator, Intent>{
+                  SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+                },
+                child: Actions(
+                  actions: <Type, Action<Intent>>{
+                    ActivateIntent: CallbackAction<ActivateIntent>(
+                      onInvoke: (intent) {
+                        submitDialog(setDialogState);
+                        return null;
+                      },
+                    ),
+                  },
+                  child: SafeArea(
+                    child: Center(
+                      child: Material(
+                        type: MaterialType.transparency,
+                        child: Container(
+                          constraints: const BoxConstraints(maxWidth: 680),
+                          margin: const EdgeInsets.symmetric(horizontal: 24),
+                          padding: const EdgeInsets.fromLTRB(26, 24, 26, 22),
+                          decoration: BoxDecoration(
+                            color: _dialogSurfaceColor(dialogContext),
+                            borderRadius: BorderRadius.circular(28),
+                            border: Border.all(
+                              color: _onSurface(dialogContext, 0.10),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: _dialogShadowColor(dialogContext),
+                                blurRadius: 40,
+                                offset: const Offset(0, 20),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 34,
+                                    height: 34,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: Theme.of(
+                                        dialogContext,
+                                      ).colorScheme.secondary
+                                          .withValues(alpha: 0.18),
+                                      border: Border.all(
+                                        color: _onSurface(dialogContext, 0.18),
+                                      ),
+                                    ),
+                                    child: Icon(
+                                      Icons.person_rounded,
+                                      size: 18,
+                                      color: _onSurface(dialogContext, 0.9),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    'PROFILE SETUP',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      letterSpacing: 0.8,
+                                      fontWeight: FontWeight.w800,
+                                      color: _onSurface(dialogContext, 0.66),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Choose your name and PFP',
+                                style: TextStyle(
+                                  fontSize: 38,
+                                  fontWeight: FontWeight.w800,
+                                  color: _onSurface(dialogContext, 0.96),
+                                  height: 1.04,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'This is only shown once. You can change your profile later in Settings.',
+                                style: TextStyle(
+                                  fontSize: 15.5,
+                                  height: 1.38,
+                                  color: onSurfaceMuted,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              mainRow,
+                              const SizedBox(height: 18),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      submitted ? 'Saving...' : '',
+                                      style: TextStyle(
+                                        color: onSurfaceMuted,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                  FilledButton.icon(
+                                    onPressed: submitted
+                                        ? null
+                                        : () => submitDialog(setDialogState),
+                                    icon: const Icon(Icons.check_rounded),
+                                    label: const Text('Continue'),
+                                    style: FilledButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 18,
+                                        vertical: 12,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+        transitionBuilder: (dialogContext, animation, _, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: _settings.popupBackgroundBlurEnabled
+                    ? BackdropFilter(
+                        filter: ImageFilter.blur(
+                          sigmaX: 3.2 * curved.value,
+                          sigmaY: 3.2 * curved.value,
+                        ),
+                        child: Container(
+                          color: _dialogBarrierColor(dialogContext, curved.value),
+                        ),
+                      )
+                    : Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+              ),
+              FadeTransition(
+                opacity: curved,
+                child: ScaleTransition(
+                  scale:
+                      Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                  child: child,
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      usernameFocusNode.dispose();
+      usernameController.dispose();
+    }
   }
 
   void _startHomeHeroAutoRotate() {
@@ -658,6 +1204,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _dataDir = preferredDataDir;
     await _dataDir.create(recursive: true);
     _settingsFile = File(_joinPath([_dataDir.path, 'settings.json']));
+    _installStateFile = File(_joinPath([_dataDir.path, 'install_state.json']));
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
     if (!await _logFile.exists()) {
       await _logFile.create(recursive: true);
@@ -804,6 +1351,26 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
+    final bundledLargePakPath = await _ensureBundledDll(
+      bundledAssetPath: 'assets/dlls/LargePakPatch.dll',
+      bundledFileName: 'LargePakPatch.dll',
+      label: 'large pak patcher',
+    );
+    if (bundledLargePakPath != null && bundledLargePakPath.trim().isNotEmpty) {
+      final configuredLargePak = _settings.largePakPatcherFilePath.trim();
+      final shouldAdoptBundledLargePak =
+          configuredLargePak.isEmpty ||
+          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatch.dll') ||
+          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatcher.dll');
+      if (shouldAdoptBundledLargePak) {
+        nextSettings = nextSettings.copyWith(
+          largePakPatcherFilePath: bundledLargePakPath,
+        );
+        _largePakPatcherController.text = bundledLargePakPath;
+        changed = true;
+      }
+    }
+
     final bundledMemoryPath = await _ensureBundledDll(
       bundledAssetPath: 'assets/dlls/memory.dll',
       bundledFileName: 'memory.dll',
@@ -866,6 +1433,80 @@ class _LauncherScreenState extends State<LauncherScreen>
     await _saveSettings(toast: false);
   }
 
+  Future<void> _loadInstallState() async {
+    if (!await _installStateFile.exists()) {
+      _installState = LauncherInstallState.defaults();
+      return;
+    }
+    try {
+      final raw = await _installStateFile.readAsString();
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        _installState = LauncherInstallState.fromJson(decoded);
+      } else if (decoded is Map) {
+        _installState =
+            LauncherInstallState.fromJson(decoded.cast<String, dynamic>());
+      } else {
+        _installState = LauncherInstallState.defaults();
+      }
+    } catch (error) {
+      _installState = LauncherInstallState.defaults();
+      _log('settings', 'Invalid install state file. Loaded defaults. $error');
+    }
+  }
+
+  Future<void> _saveInstallState() async {
+    final pretty = const JsonEncoder.withIndent(
+      '  ',
+    ).convert(_installState.toJson());
+    await _installStateFile.writeAsString(pretty, flush: true);
+  }
+
+  Future<void> _reconcileInstallState() async {
+    final resolvedProfileSetup =
+        _settings.profileSetupComplete || _installState.profileSetupComplete;
+    final resolvedLibraryNudge =
+        _settings.libraryActionsNudgeComplete ||
+        _installState.libraryActionsNudgeComplete;
+
+    var installStateChanged = false;
+    var settingsChanged = false;
+
+    if (_installState.profileSetupComplete != resolvedProfileSetup ||
+        _installState.libraryActionsNudgeComplete != resolvedLibraryNudge) {
+      _installState = _installState.copyWith(
+        profileSetupComplete: resolvedProfileSetup,
+        libraryActionsNudgeComplete: resolvedLibraryNudge,
+      );
+      installStateChanged = true;
+    }
+
+    if (_settings.profileSetupComplete != resolvedProfileSetup ||
+        _settings.libraryActionsNudgeComplete != resolvedLibraryNudge) {
+      _settings = _settings.copyWith(
+        profileSetupComplete: resolvedProfileSetup,
+        libraryActionsNudgeComplete: resolvedLibraryNudge,
+      );
+      settingsChanged = true;
+    }
+
+    if (installStateChanged) {
+      try {
+        await _saveInstallState();
+      } catch (error) {
+        _log('settings', 'Failed to save install state: $error');
+      }
+    }
+
+    if (settingsChanged) {
+      try {
+        await _saveSettings(toast: false, applyControllers: false);
+      } catch (error) {
+        _log('settings', 'Failed to persist reconciled settings: $error');
+      }
+    }
+  }
+
   Future<void> _loadSettings() async {
     if (!await _settingsFile.exists()) {
       _settings = LauncherSettings.defaults();
@@ -887,8 +1528,11 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
-  Future<void> _saveSettings({bool toast = true}) async {
-    _applyControllers();
+  Future<void> _saveSettings({
+    bool toast = true,
+    bool applyControllers = true,
+  }) async {
+    if (applyControllers) _applyControllers();
     final pretty = const JsonEncoder.withIndent(
       '  ',
     ).convert(_settings.toJson());
@@ -909,6 +1553,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _authenticationPatcherController.text = _settings.authenticationPatcherPath;
     _memoryPatcherController.text = _settings.memoryPatcherPath;
     _gameServerFileController.text = _settings.gameServerFilePath;
+    _largePakPatcherController.text = _settings.largePakPatcherFilePath;
   }
 
   void _applyControllers() {
@@ -1375,7 +2020,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _showLauncherNotesDialog({
     required String version,
     required String notes,
-    String title = 'Update Notes',
+    String title = "What's New",
   }) async {
     await showGeneralDialog<void>(
       context: context,
@@ -1442,6 +2087,14 @@ class _LauncherScreenState extends State<LauncherScreen>
                                     p: TextStyle(
                                       color: _onSurface(dialogContext, 0.9),
                                       height: 1.35,
+                                    ),
+                                    horizontalRuleDecoration: BoxDecoration(
+                                      border: Border(
+                                        top: BorderSide(
+                                          width: 2.0,
+                                          color: _onSurface(dialogContext, 0.12),
+                                        ),
+                                      ),
                                     ),
                                   ),
                               onTapLink: (text, href, title) async {
@@ -1777,19 +2430,28 @@ class _LauncherScreenState extends State<LauncherScreen>
                             child: SingleChildScrollView(
                               child: MarkdownBody(
                                 data: notes,
-                                styleSheet:
-                                    MarkdownStyleSheet.fromTheme(
-                                      Theme.of(dialogContext),
-                                    ).copyWith(
-                                      p: TextStyle(
-                                        color: _onSurface(dialogContext, 0.9),
-                                        height: 1.35,
-                                      ),
-                                    ),
-                                onTapLink: (text, href, title) async {
-                                  if (href == null || href.trim().isEmpty) {
-                                    return;
-                                  }
+                                 styleSheet:
+                                     MarkdownStyleSheet.fromTheme(
+                                       Theme.of(dialogContext),
+                                     ).copyWith(
+                                       p: TextStyle(
+                                         color: _onSurface(dialogContext, 0.9),
+                                         height: 1.35,
+                                       ),
+                                       horizontalRuleDecoration: BoxDecoration(
+                                         border: Border(
+                                           top: BorderSide(
+                                             width: 2.0,
+                                             color:
+                                                 _onSurface(dialogContext, 0.12),
+                                           ),
+                                         ),
+                                       ),
+                                     ),
+                                 onTapLink: (text, href, title) async {
+                                   if (href == null || href.trim().isEmpty) {
+                                     return;
+                                   }
                                   await _openUrl(href);
                                 },
                               ),
@@ -1981,7 +2643,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (running) {
       if (_gameUiStatus != null) return _gameUiStatus;
       if (_runningGameClients().any((client) => client.launched)) {
-        return const _UiStatus('Fortnite running.', _UiStatusSeverity.success);
+        return const _UiStatus('Fortnite running', _UiStatusSeverity.success);
       }
       return const _UiStatus('Fortnite starting...', _UiStatusSeverity.info);
     }
@@ -1996,7 +2658,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (_gameServerUiStatus != null) return _gameServerUiStatus;
       if (_gameServerInstance?.launched == true) {
         return const _UiStatus(
-          'Game server running.',
+          'Game server running',
           _UiStatusSeverity.success,
         );
       }
@@ -2009,10 +2671,60 @@ class _LauncherScreenState extends State<LauncherScreen>
   Widget _buildLibraryGameStatusLine() {
     final onSurface = Theme.of(context).colorScheme.onSurface;
 
-    // Only show a single banner (Reboot-style). We pick the most relevant one
-    // (errors/warnings win; otherwise prefer the Fortnite status).
+    // Show the most relevant status while launching. When both Fortnite and the
+    // game server are active, show both during action phases so injections
+    // (like Large Pak Patcher) are visible.
     final gameStatus = _currentLibraryGameStatus();
     final serverStatus = _currentLibraryGameServerStatus();
+
+    String cleanLabeledMessage({
+      required String label,
+      required String message,
+    }) {
+      var text = message.trim();
+      if (text.isEmpty) return text;
+
+      final labelLower = label.toLowerCase();
+      var lower = text.toLowerCase();
+
+      // When the label is already shown, avoid repeating it in the message.
+      if (lower.startsWith(labelLower)) {
+        text = text.substring(label.length).trimLeft();
+        text = text.replaceFirst(RegExp(r'^[:\\-\\s]+'), '');
+        lower = text.toLowerCase();
+      }
+
+      if (labelLower == 'fortnite' &&
+          (lower.startsWith('starting fortnite') ||
+              lower.startsWith('fortnite starting'))) {
+        return 'Starting...';
+      }
+      if (labelLower == 'game server' &&
+          (lower.startsWith('starting game server') ||
+              lower.startsWith('game server starting'))) {
+        return 'Starting...';
+      }
+
+      // Sentence-case when we stripped a leading label.
+      if (text.isNotEmpty && RegExp(r'^[a-z]').hasMatch(text)) {
+        text = '${text[0].toUpperCase()}${text.substring(1)}';
+      }
+
+      if (text.endsWith('.') && !text.endsWith('...')) {
+        text = text.substring(0, text.length - 1).trimRight();
+      }
+
+      final actionLower = text.toLowerCase();
+      final isAction = actionLower.contains('inject') ||
+          actionLower.contains('starting') ||
+          actionLower.contains('launching') ||
+          actionLower.contains('preparing') ||
+          actionLower.contains('waiting');
+      if (isAction && !text.endsWith('...')) {
+        text = '$text...';
+      }
+      return text;
+    }
 
     bool showGame(_UiStatus status) {
       return switch (status.severity) {
@@ -2032,19 +2744,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       };
     }
 
-    final candidates = <({bool host, _UiStatus status})>[
-      if (gameStatus != null &&
-          gameStatus.message.trim().isNotEmpty &&
-          showGame(gameStatus))
-        (host: false, status: gameStatus),
-      if (serverStatus != null &&
-          serverStatus.message.trim().isNotEmpty &&
-          showServer(serverStatus))
-        (host: true, status: serverStatus),
-    ];
-
-    if (candidates.isEmpty) return const SizedBox.shrink();
-
     int severityRank(_UiStatusSeverity severity) {
       return switch (severity) {
         _UiStatusSeverity.error => 3,
@@ -2054,24 +2753,54 @@ class _LauncherScreenState extends State<LauncherScreen>
       };
     }
 
-    final chosen = candidates.reduce((a, b) {
-      final rankA = severityRank(a.status.severity);
-      final rankB = severityRank(b.status.severity);
-      if (rankA != rankB) return rankA > rankB ? a : b;
+    final showGameLine =
+        gameStatus != null &&
+        gameStatus.message.trim().isNotEmpty &&
+        showGame(gameStatus);
+    final showServerLine =
+        serverStatus != null &&
+        serverStatus.message.trim().isNotEmpty &&
+        showServer(serverStatus);
+    if (!showGameLine && !showServerLine) return const SizedBox.shrink();
 
-      // Same severity: prefer Fortnite status (host: false).
-      if (a.host != b.host) return a.host ? b : a;
+    String formatStatusLine() {
+      if (showGameLine && showServerLine) {
+        final gameText = cleanLabeledMessage(
+          label: 'Fortnite',
+          message: gameStatus.message,
+        );
+        final serverText = cleanLabeledMessage(
+          label: 'Game server',
+          message: serverStatus.message,
+        );
+        return 'Fortnite: $gameText | Game server: $serverText';
+      }
+      if (showServerLine) {
+        final serverText = cleanLabeledMessage(
+          label: 'Game server',
+          message: serverStatus.message,
+        );
+        return 'Game server: $serverText';
+      }
+      final gameText = cleanLabeledMessage(
+        label: 'Fortnite',
+        message: gameStatus!.message,
+      );
+      return 'Fortnite: $gameText';
+    }
 
-      // If both are the same host, keep the first.
-      return a;
-    });
+    _UiStatusSeverity worstSeverity() {
+      final severities = <_UiStatusSeverity>[
+        if (showGameLine) gameStatus.severity,
+        if (showServerLine) serverStatus.severity,
+      ];
+      return severities.reduce((a, b) {
+        return severityRank(a) >= severityRank(b) ? a : b;
+      });
+    }
 
-    final chosenStatus = chosen.status;
-    final displayMessage = chosen.host
-        ? 'Game server: ${chosenStatus.message}'
-        : chosenStatus.message;
-
-    final accent = _statusAccentColor(context, chosenStatus.severity);
+    final worst = worstSeverity();
+    final accent = _statusAccentColor(context, worst);
     return Align(
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
@@ -2086,12 +2815,12 @@ class _LauncherScreenState extends State<LauncherScreen>
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(_statusIcon(chosenStatus.severity), size: 18, color: accent),
+              Icon(_statusIcon(worst), size: 18, color: accent),
               const SizedBox(width: 10),
               Flexible(
                 fit: FlexFit.loose,
                 child: Text(
-                  displayMessage,
+                  formatStatusLine(),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -2107,6 +2836,28 @@ class _LauncherScreenState extends State<LauncherScreen>
     );
   }
 
+  bool _isLoginCompleteSignal(String line) {
+    final lower = line.toLowerCase();
+
+    // Most reliable marker across builds.
+    if (lower.contains(_loginContinueMarker.toLowerCase()) &&
+        lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
+        lower.contains(_loginCompletedMarker.toLowerCase())) {
+      return true;
+    }
+
+    // Fallback marker some builds emit immediately after finishing login.
+    if (lower.contains(_loginUiStateTransitionMarker.toLowerCase())) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /// Marker that aligns with the client loading screen completing.
+  static const _clientLoadingCompleteMarker =
+      'UI.State.Startup.SubgameSelect';
+
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed) return;
 
@@ -2119,18 +2870,32 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
-    if (!state.postLoginInjected &&
-        _loggedInMarkers.every((marker) => line.contains(marker))) {
+    if (!state.postLoginInjected && _isLoginCompleteSignal(line)) {
       state.launched = true;
       state.postLoginInjected = true;
+      _log(
+        state.host ? 'gameserver' : 'game',
+        'Login complete detected. Scheduling post-login injections...',
+      );
       _setUiStatus(
         host: state.host,
         message: state.host
-            ? 'Logged in. Starting game server...'
+            ? 'Logged in. Waiting for host to finish loading...'
             : 'Logged in. Finalizing launch...',
         severity: _UiStatusSeverity.info,
       );
       unawaited(_performPostLoginInjections(state));
+    }
+
+
+    // Inject the large pak patcher for the client after the loading screen.
+    if (!state.host &&
+        !state.largePakInjected &&
+        state.postLoginInjected &&
+        line.contains(_clientLoadingCompleteMarker)) {
+      state.largePakInjected = true;
+      _log('game', 'Client fully loaded. Scheduling large pak injection...');
+      unawaited(_performDeferredLargePakInjection(state));
     }
   }
 
@@ -2140,58 +2905,170 @@ class _LauncherScreenState extends State<LauncherScreen>
     await Future.delayed(const Duration(milliseconds: 900));
     if (state.killed) return;
 
+    if (!state.host) {
+      if (_gameServerInstance == null) {
+        await _killExistingProcessByPort(
+          _effectiveGameServerPort(),
+          exceptPid: state.pid,
+        );
+      }
+    }
+
     if (state.host) {
+      // For the host, inject memory patcher now (post-login), then inject
+      // the game server DLL immediately after login (Reboot-style).
+      _setUiStatus(
+        host: true,
+        message: 'Injecting post-login patchers...',
+        severity: _UiStatusSeverity.info,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      final report = await _injectConfiguredPatchers(
+        state.pid,
+        state.gameVersion,
+        includeAuth: false,
+        includeMemory: true,
+        includeLargePak: false,
+        includeUnreal: false,
+        includeGameServer: false,
+      );
+
+      final failure = report.firstRequiredFailure;
+      if (failure != null) {
+        _setUiStatus(
+          host: true,
+          message: 'Failed to inject ${failure.name}.',
+          severity: _UiStatusSeverity.error,
+        );
+        return;
+      }
       await _killExistingProcessByPort(
         _effectiveGameServerPort(),
         exceptPid: state.pid,
       );
+
+      _setUiStatus(
+        host: true,
+        message: 'Injecting game server DLL...',
+        severity: _UiStatusSeverity.info,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      final serverReport = await _injectConfiguredPatchers(
+        state.pid,
+        state.gameVersion,
+        includeAuth: false,
+        includeMemory: false,
+        includeLargePak: false,
+        includeUnreal: false,
+        includeGameServer: true,
+      );
+
+      final serverFailure = serverReport.firstRequiredFailure;
+      if (serverFailure != null) {
+        _setUiStatus(
+          host: true,
+          message: 'Failed to inject ${serverFailure.name}.',
+          severity: _UiStatusSeverity.error,
+        );
+        return;
+      }
+
+      state.gameServerInjected = true;
+      _setUiStatus(
+        host: true,
+        message: 'Game server running.',
+        severity: _UiStatusSeverity.success,
+      );
+    } else {
+      _setUiStatus(
+        host: false,
+        message: 'Injecting launch patchers...',
+        severity: _UiStatusSeverity.info,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      final report = await _injectConfiguredPatchers(
+        state.pid,
+        state.gameVersion,
+        includeAuth: false,
+        includeMemory: true,
+        includeUnreal: true,
+        includeGameServer: false,
+      );
+
+      final requiredFailure = report.firstRequiredFailure;
+      if (requiredFailure != null) {
+        _setUiStatus(
+          host: false,
+          message: 'Failed to inject ${requiredFailure.name}.',
+          severity: _UiStatusSeverity.error,
+        );
+        return;
+      }
+
+      final optionalFailure = report.firstOptionalFailure;
+      if (optionalFailure != null) {
+        _setUiStatus(
+          host: false,
+          message: 'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
+          severity: _UiStatusSeverity.warning,
+        );
+        return;
+      }
+
+      _setUiStatus(
+        host: false,
+        message: 'Fortnite running.',
+        severity: _UiStatusSeverity.success,
+      );
     }
+  }
+
+  Future<void> _performDeferredLargePakInjection(
+    _FortniteProcessState state,
+  ) async {
+    if (state.killed || !_settings.largePakPatcherEnabled) return;
+
+    // Give the frontend a moment to settle after the loading screen.
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    if (state.killed) return;
 
     _setUiStatus(
-      host: state.host,
-      message: state.host
-          ? 'Injecting game server DLL...'
-          : 'Injecting launch patchers...',
+      host: false,
+      message: 'Injecting large pak patcher...',
       severity: _UiStatusSeverity.info,
     );
+    await Future<void>.delayed(const Duration(milliseconds: 80));
 
     final report = await _injectConfiguredPatchers(
       state.pid,
       state.gameVersion,
       includeAuth: false,
-      includeMemory: true,
-      includeUnreal: !state.host,
-      includeGameServer: state.host,
+      includeMemory: false,
+      includeLargePak: true,
+      includeUnreal: false,
+      includeGameServer: false,
     );
-
-    final failure = report.firstRequiredFailure;
-    if (failure != null) {
-      _setUiStatus(
-        host: state.host,
-        message: 'Failed to inject ${failure.name}.',
-        severity: _UiStatusSeverity.error,
-      );
-      return;
-    }
 
     final optionalFailure = report.firstOptionalFailure;
     if (optionalFailure != null) {
       _setUiStatus(
-        host: state.host,
-        message: state.host
-            ? 'Game server running (optional patcher issue: ${optionalFailure.name}).'
-            : 'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
+        host: false,
+        message: 'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
         severity: _UiStatusSeverity.warning,
       );
       return;
     }
 
     _setUiStatus(
-      host: state.host,
-      message: state.host ? 'Game server running.' : 'Fortnite running.',
+      host: false,
+      message: 'Fortnite running.',
       severity: _UiStatusSeverity.success,
     );
   }
+
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
     if (!Platform.isWindows) return;
@@ -2306,6 +3183,54 @@ class _LauncherScreenState extends State<LauncherScreen>
     await _startHosting(overrideVersion: version, triggeredByAutoRestart: true);
   }
 
+  Future<bool> _ensureBackendReadyForSession({
+    required bool host,
+    bool toastOnFailure = true,
+  }) async {
+    if (_backendOnline) return true;
+
+    _setUiStatus(
+      host: host,
+      message: 'Checking backend connection...',
+      severity: _UiStatusSeverity.info,
+    );
+    await _refreshRuntime();
+    if (_backendOnline) return true;
+
+    final shouldLaunchManagedBackend =
+        _settings.launchBackendOnSessionStart &&
+        _settings.backendConnectionType == BackendConnectionType.local &&
+        Platform.isWindows;
+    if (shouldLaunchManagedBackend) {
+      _setUiStatus(
+        host: host,
+        message: 'Launching ATLAS Backend...',
+        severity: _UiStatusSeverity.info,
+      );
+      await _launchManagedAtlasBackend();
+      if (!mounted) return false;
+
+      // Give the backend time to bind/listen before proceeding to game processes.
+      const attempts = 18;
+      for (var attempt = 0; attempt < attempts; attempt++) {
+        await _refreshRuntime();
+        if (_backendOnline) return true;
+        if (!mounted) return false;
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+      }
+    }
+
+    final msg =
+        'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}.';
+    if (toastOnFailure && mounted) _toast(msg);
+    _setUiStatus(
+      host: host,
+      message: msg,
+      severity: _UiStatusSeverity.error,
+    );
+    return false;
+  }
+
   Future<void> _startFortnite({
     String? usernameOverride,
     bool launchingAdditionalClient = false,
@@ -2336,32 +3261,40 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       final exeDir = File(exe).parent.path;
 
-      if (!_backendOnline) {
-        _setUiStatus(
-          host: false,
-          message: 'Checking backend connection...',
-          severity: _UiStatusSeverity.info,
-        );
-        await _refreshRuntime();
-        if (!_backendOnline) {
-          _toast(
-            'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}.',
-          );
-          return;
-        }
-      }
-      final startAutomaticGameServer =
+      final backendReady = await _ensureBackendReadyForSession(host: false);
+      if (!backendReady) return;
+      final gameServerPrompt =
           !launchingAdditionalClient && _shouldOfferGameServerPrompt()
           ? await _promptAutomaticGameServerStart()
-          : false;
+          : _GameServerPromptAction.ignore;
       if (!mounted) return;
-      if (startAutomaticGameServer) {
+      if (gameServerPrompt == null) {
+        _log('game', 'Launch cancelled at game server prompt.');
+        if (mounted) _toast('Launch cancelled.');
+        _clearUiStatus(host: false);
+        return;
+      }
+      if (gameServerPrompt == _GameServerPromptAction.start) {
+        if (mounted) {
+          setState(() => _gameServerLaunching = true);
+        } else {
+          _gameServerLaunching = true;
+        }
         _setUiStatus(
-          host: false,
-          message: 'Starting automatic game server...',
+          host: true,
+          message: 'Starting game server...',
           severity: _UiStatusSeverity.info,
         );
         linkedHosting = await _startImplicitGameServer(version);
+        if (!mounted) return;
+        setState(() => _gameServerLaunching = false);
+        if (linkedHosting == null) {
+          _setUiStatus(
+            host: true,
+            message: 'Failed to start game server.',
+            severity: _UiStatusSeverity.warning,
+          );
+        }
       }
 
       _setUiStatus(
@@ -2538,10 +3471,14 @@ class _LauncherScreenState extends State<LauncherScreen>
         transitionDuration: const Duration(milliseconds: 220),
         pageBuilder: (dialogContext, animation, secondaryAnimation) {
           var validation = '';
+          var dismissQueued = false;
 
           void dismissDialogSafely([String? result]) {
+            if (dismissQueued) return;
+            dismissQueued = true;
             FocusManager.instance.primaryFocus?.unfocus();
             WidgetsBinding.instance.addPostFrameCallback((_) {
+              dismissQueued = false;
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop(result);
             });
@@ -2784,27 +3721,11 @@ class _LauncherScreenState extends State<LauncherScreen>
         severity: _UiStatusSeverity.info,
       );
 
-      if (!_backendOnline) {
-        _setUiStatus(
-          host: true,
-          message: 'Checking backend connection...',
-          severity: _UiStatusSeverity.info,
-        );
-        await _refreshRuntime();
-        if (!_backendOnline) {
-          final msg =
-              'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}.';
-          if (!triggeredByAutoRestart) {
-            _toast(msg);
-          }
-          _setUiStatus(
-            host: true,
-            message: msg,
-            severity: _UiStatusSeverity.error,
-          );
-          return;
-        }
-      }
+      final backendReady = await _ensureBackendReadyForSession(
+        host: true,
+        toastOnFailure: !triggeredByAutoRestart,
+      );
+      if (!backendReady) return;
 
       final instance = await _startImplicitGameServer(version);
       if (instance == null) {
@@ -2833,6 +3754,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final playLaunchArgsFocusNode = FocusNode();
     final hostLaunchArgsFocusNode = FocusNode();
     final portFocusNode = FocusNode();
+    final dialogScrollController = ScrollController();
     final hostUsernameController = TextEditingController(
       text: _settings.hostUsername.trim().isEmpty
           ? 'host'
@@ -2850,6 +3772,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     var headless = _settings.hostHeadlessEnabled;
     var autoRestart = _settings.hostAutoRestartEnabled;
     var allowMultipleClients = _settings.allowMultipleGameClients;
+    var launchBackend = _settings.launchBackendOnSessionStart;
+    var largePakPatcherEnabled = _settings.largePakPatcherEnabled;
     try {
       final shouldSave = await showGeneralDialog<bool>(
         context: context,
@@ -2860,6 +3784,12 @@ class _LauncherScreenState extends State<LauncherScreen>
         barrierColor: Colors.transparent,
         transitionDuration: const Duration(milliseconds: 220),
         pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          var dismissQueued = false;
+          final maxDialogHeight = min(
+            MediaQuery.of(dialogContext).size.height * 0.92,
+            720.0,
+          );
+
           Widget settingTile({
             required IconData icon,
             required String title,
@@ -2911,46 +3841,47 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
 
           void dismissDialogSafely([bool? result]) {
+            if (dismissQueued) return;
+            dismissQueued = true;
             FocusManager.instance.primaryFocus?.unfocus();
             WidgetsBinding.instance.addPostFrameCallback((_) {
+              dismissQueued = false;
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop(result);
             });
           }
 
-          return Shortcuts(
-            shortcuts: const <ShortcutActivator, Intent>{
-              SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
+          return Focus(
+            autofocus: true,
+            onKeyEvent: (_, event) {
+              if ((event is KeyDownEvent) &&
+                  event.logicalKey == LogicalKeyboardKey.escape) {
+                if (hostUsernameFocusNode.hasFocus ||
+                    playLaunchArgsFocusNode.hasFocus ||
+                    hostLaunchArgsFocusNode.hasFocus ||
+                    portFocusNode.hasFocus) {
+                  hostUsernameFocusNode.unfocus();
+                  playLaunchArgsFocusNode.unfocus();
+                  hostLaunchArgsFocusNode.unfocus();
+                  portFocusNode.unfocus();
+                  return KeyEventResult.handled;
+                }
+                dismissDialogSafely(false);
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
             },
-            child: Actions(
-              actions: <Type, Action<Intent>>{
-                DismissIntent: CallbackAction<DismissIntent>(
-                  onInvoke: (intent) {
-                    if (hostUsernameFocusNode.hasFocus ||
-                        playLaunchArgsFocusNode.hasFocus ||
-                        hostLaunchArgsFocusNode.hasFocus ||
-                        portFocusNode.hasFocus) {
-                      hostUsernameFocusNode.unfocus();
-                      playLaunchArgsFocusNode.unfocus();
-                      hostLaunchArgsFocusNode.unfocus();
-                      portFocusNode.unfocus();
-                      return null;
-                    }
-                    dismissDialogSafely(false);
-                    return null;
-                  },
-                ),
-              },
-              child: Focus(
-                autofocus: true,
-                child: StatefulBuilder(
+            child: StatefulBuilder(
                   builder: (dialogContext, setDialogState) {
                     return SafeArea(
                       child: Center(
                         child: Material(
                           type: MaterialType.transparency,
                           child: Container(
-                            constraints: const BoxConstraints(maxWidth: 760),
+                            constraints: BoxConstraints(
+                              maxWidth: 760,
+                              maxHeight: maxDialogHeight,
+                            ),
                             margin: const EdgeInsets.symmetric(horizontal: 24),
                             padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
                             decoration: BoxDecoration(
@@ -2989,162 +3920,229 @@ class _LauncherScreenState extends State<LauncherScreen>
                                   ),
                                 ),
                                 const SizedBox(height: 14),
-                                settingTile(
-                                  icon: Icons.play_circle_outline_rounded,
-                                  title: 'Play Launch Arguments',
-                                  subtitle:
-                                      'Additional arguments to use with the Launch button',
-                                  trailing: SizedBox(
-                                    width: 220,
-                                    child: TextField(
-                                      controller: playLaunchArgsController,
-                                      focusNode: playLaunchArgsFocusNode,
-                                      keyboardType: TextInputType.text,
-                                      decoration: InputDecoration(
-                                        isDense: true,
-                                        hintText: 'Arguments...',
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 10,
+                                Flexible(
+                                  fit: FlexFit.loose,
+                                  child: Scrollbar(
+                                    controller: dialogScrollController,
+                                    thumbVisibility: true,
+                                    child: SingleChildScrollView(
+                                      controller: dialogScrollController,
+                                      padding: EdgeInsets.zero,
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          settingTile(
+                                            icon:
+                                                Icons.play_circle_outline_rounded,
+                                            title: 'Play Launch Arguments',
+                                            subtitle:
+                                                'Additional arguments to use with the Launch button',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller:
+                                                    playLaunchArgsController,
+                                                focusNode:
+                                                    playLaunchArgsFocusNode,
+                                                keyboardType: TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'Arguments...',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ),
                                             ),
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
                                           ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.tune_rounded,
-                                  title: 'Host Launch Arguments',
-                                  subtitle:
-                                      'Additional arguments to use with the Host button',
-                                  trailing: SizedBox(
-                                    width: 220,
-                                    child: TextField(
-                                      controller: launchArgsController,
-                                      focusNode: hostLaunchArgsFocusNode,
-                                      keyboardType: TextInputType.text,
-                                      decoration: InputDecoration(
-                                        isDense: true,
-                                        hintText: 'Arguments...',
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.tune_rounded,
+                                            title: 'Host Launch Arguments',
+                                            subtitle:
+                                                'Additional arguments to use with the Host button',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller: launchArgsController,
+                                                focusNode:
+                                                    hostLaunchArgsFocusNode,
+                                                keyboardType: TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'Arguments...',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ),
                                             ),
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
                                           ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.badge_rounded,
-                                  title: 'Host Client Name',
-                                  subtitle:
-                                      'Username used for the hosted client',
-                                  trailing: SizedBox(
-                                    width: 220,
-                                    child: TextField(
-                                      controller: hostUsernameController,
-                                      focusNode: hostUsernameFocusNode,
-                                      keyboardType: TextInputType.text,
-                                      decoration: InputDecoration(
-                                        isDense: true,
-                                        hintText: 'host',
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.badge_rounded,
+                                            title: 'Host Client Name',
+                                            subtitle:
+                                                'Username used for the hosted client',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller:
+                                                    hostUsernameController,
+                                                focusNode: hostUsernameFocusNode,
+                                                keyboardType: TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'host',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ),
                                             ),
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
                                           ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.web_asset_off_rounded,
-                                  title: 'Headless',
-                                  subtitle:
-                                      'Disables game rendering to save resources',
-                                  trailing: Switch(
-                                    value: headless,
-                                    onChanged: (value) {
-                                      setDialogState(() => headless = value);
-                                    },
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.groups_rounded,
-                                  title: 'Multi-Client Launching',
-                                  subtitle:
-                                      'Allows Launch to open additional game clients while one is already running',
-                                  trailing: Switch(
-                                    value: allowMultipleClients,
-                                    onChanged: (value) {
-                                      setDialogState(
-                                        () => allowMultipleClients = value,
-                                      );
-                                    },
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.restart_alt_rounded,
-                                  title: 'Automatic Restart',
-                                  subtitle:
-                                      'Automatically restarts the game server when it exits',
-                                  trailing: Switch(
-                                    value: autoRestart,
-                                    onChanged: (value) {
-                                      setDialogState(() => autoRestart = value);
-                                    },
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                settingTile(
-                                  icon: Icons.numbers_rounded,
-                                  title: 'Port',
-                                  subtitle:
-                                      'The port the launcher expects the game server on',
-                                  trailing: SizedBox(
-                                    width: 120,
-                                    child: TextField(
-                                      controller: portController,
-                                      focusNode: portFocusNode,
-                                      keyboardType: TextInputType.number,
-                                      inputFormatters: [
-                                        FilteringTextInputFormatter.digitsOnly,
-                                      ],
-                                      decoration: InputDecoration(
-                                        isDense: true,
-                                        hintText: _defaultGameServerPort
-                                            .toString(),
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.web_asset_off_rounded,
+                                            title: 'Headless',
+                                            subtitle:
+                                                'Disables game rendering to save resources',
+                                            trailing: Switch(
+                                              value: headless,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => headless = value,
+                                                );
+                                              },
                                             ),
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
                                           ),
-                                        ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.groups_rounded,
+                                            title: 'Multi-Client Launching',
+                                            subtitle:
+                                                'Allows Launch to open additional game clients while one is already running',
+                                            trailing: Switch(
+                                              value: allowMultipleClients,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () =>
+                                                      allowMultipleClients =
+                                                          value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.cloud_rounded,
+                                            title: 'Launch Backend with Game',
+                                            subtitle:
+                                                'Start ATLAS Backend when launching a session',
+                                            trailing: Switch(
+                                              value: launchBackend,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => launchBackend = value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.folder_zip_rounded,
+                                            title: 'Large Pak Patcher',
+                                            subtitle:
+                                                'Inject Large Pak Patcher after the game server starts',
+                                            trailing: Switch(
+                                              value: largePakPatcherEnabled,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => largePakPatcherEnabled =
+                                                          value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.restart_alt_rounded,
+                                            title: 'Automatic Restart',
+                                            subtitle:
+                                                'Automatically restarts the game server when it exits',
+                                            trailing: Switch(
+                                              value: autoRestart,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => autoRestart = value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.numbers_rounded,
+                                            title: 'Port',
+                                            subtitle:
+                                                'The port the launcher expects the game server on',
+                                            trailing: SizedBox(
+                                              width: 120,
+                                              child: TextField(
+                                                controller: portController,
+                                                focusNode: portFocusNode,
+                                                keyboardType:
+                                                    TextInputType.number,
+                                                inputFormatters: [
+                                                  FilteringTextInputFormatter
+                                                      .digitsOnly,
+                                                ],
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText:
+                                                      _defaultGameServerPort
+                                                          .toString(),
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ),
@@ -3187,11 +4185,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                             ),
                           ),
                         ),
-                      ),
-                    );
-                  },
-                ),
-              ),
+                  ),
+                );
+              },
             ),
           );
         },
@@ -3250,6 +4246,8 @@ class _LauncherScreenState extends State<LauncherScreen>
           hostHeadlessEnabled: headless,
           hostAutoRestartEnabled: autoRestart,
           hostPort: resolvedPort,
+          launchBackendOnSessionStart: launchBackend,
+          largePakPatcherEnabled: largePakPatcherEnabled,
         );
       });
       await _saveSettings(toast: false);
@@ -3260,6 +4258,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       playLaunchArgsFocusNode.dispose();
       hostLaunchArgsFocusNode.dispose();
       portFocusNode.dispose();
+      dialogScrollController.dispose();
       hostUsernameController.dispose();
       playLaunchArgsController.dispose();
       launchArgsController.dispose();
@@ -3275,177 +4274,262 @@ class _LauncherScreenState extends State<LauncherScreen>
     return _settings.gameServerFilePath.trim().isNotEmpty;
   }
 
-  Future<bool> _promptAutomaticGameServerStart() async {
-    if (!mounted) return false;
-    final gameServerPath = _settings.gameServerFilePath.trim();
-    final gameServerDll = gameServerPath.isEmpty
+  Future<_GameServerPromptAction?> _promptAutomaticGameServerStart() async {
+    if (!mounted) return null;
+    var selectedGameServerPath = _settings.gameServerFilePath.trim();
+    var selectedGameServerDll = selectedGameServerPath.isEmpty
         ? 'No game server DLL configured'
-        : _basename(gameServerPath);
-    final result = await showGeneralDialog<bool>(
+        : _basename(selectedGameServerPath);
+    final result = await showGeneralDialog<_GameServerPromptAction>(
       context: context,
       barrierDismissible: true,
       barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
       barrierColor: Colors.transparent,
       transitionDuration: const Duration(milliseconds: 240),
       pageBuilder: (dialogContext, animation, secondaryAnimation) {
-        return SafeArea(
-          child: Center(
-            child: Material(
-              type: MaterialType.transparency,
-              child: Container(
-                constraints: const BoxConstraints(maxWidth: 560),
-                margin: const EdgeInsets.symmetric(horizontal: 24),
-                padding: const EdgeInsets.fromLTRB(24, 22, 24, 22),
-                decoration: BoxDecoration(
-                  color: _dialogSurfaceColor(dialogContext),
-                  borderRadius: BorderRadius.circular(28),
-                  border: Border.all(color: _onSurface(dialogContext, 0.1)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _dialogShadowColor(dialogContext),
-                      blurRadius: 34,
-                      offset: const Offset(0, 18),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 34,
-                          height: 34,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Theme.of(
-                              dialogContext,
-                            ).colorScheme.secondary.withValues(alpha: 0.2),
-                            border: Border.all(
-                              color: _onSurface(dialogContext, 0.2),
-                            ),
-                          ),
-                          child: Icon(
-                            Icons.cloud_upload_rounded,
-                            size: 18,
-                            color: _onSurface(dialogContext, 0.9),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          'GAME SERVER',
-                          style: TextStyle(
-                            fontSize: 12,
-                            letterSpacing: 0.8,
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.66),
-                          ),
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Future<void> pickGameServerDll() async {
+              if (!Platform.isWindows) return;
+              final picked = await _pickSingleFile(
+                dialogTitle: 'Select game server DLL',
+                allowedExtensions: const ['dll'],
+              );
+              final trimmed = picked?.trim() ?? '';
+              if (trimmed.isEmpty) return;
+              setDialogState(() {
+                selectedGameServerPath = trimmed;
+                selectedGameServerDll = _basename(trimmed);
+              });
+            }
+
+            void applySelectedDllIfChanged() {
+              final trimmed = selectedGameServerPath.trim();
+              if (trimmed.isEmpty) return;
+              if (trimmed == _settings.gameServerFilePath.trim()) return;
+              if (mounted) {
+                setState(() {
+                  _settings = _settings.copyWith(gameServerFilePath: trimmed);
+                  _gameServerFileController.text = trimmed;
+                });
+              } else {
+                _settings = _settings.copyWith(gameServerFilePath: trimmed);
+                _gameServerFileController.text = trimmed;
+              }
+              unawaited(_saveSettings(toast: false));
+            }
+
+            return SafeArea(
+              child: Center(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    margin: const EdgeInsets.symmetric(horizontal: 24),
+                    padding: const EdgeInsets.fromLTRB(24, 22, 24, 22),
+                    decoration: BoxDecoration(
+                      color: _dialogSurfaceColor(dialogContext),
+                      borderRadius: BorderRadius.circular(28),
+                      border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _dialogShadowColor(dialogContext),
+                          blurRadius: 34,
+                          offset: const Offset(0, 18),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Start game server?',
-                      style: TextStyle(
-                        fontSize: 40,
-                        fontWeight: FontWeight.w700,
-                        color: _onSurface(dialogContext, 0.96),
-                        height: 1.04,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'ATLAS Link can launch an automatic local game server using your configured Game server DLL.',
-                      style: TextStyle(
-                        fontSize: 16,
-                        height: 1.36,
-                        color: _onSurface(dialogContext, 0.84),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        color: _adaptiveScrimColor(
-                          dialogContext,
-                          darkAlpha: 0.10,
-                          lightAlpha: 0.18,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 34,
+                              height: 34,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Theme.of(
+                                  dialogContext,
+                                ).colorScheme.secondary.withValues(alpha: 0.2),
+                                border: Border.all(
+                                  color: _onSurface(dialogContext, 0.2),
+                                ),
+                              ),
+                              child: Icon(
+                                Icons.cloud_upload_rounded,
+                                size: 18,
+                                color: _onSurface(dialogContext, 0.9),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'GAME SERVER',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  letterSpacing: 0.8,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(dialogContext, 0.66),
+                                ),
+                              ),
+                            ),
+                            Tooltip(
+                              message: 'Close',
+                              child: SizedBox(
+                                width: 34,
+                                height: 34,
+                                child: Material(
+                                  color: _adaptiveScrimColor(
+                                    dialogContext,
+                                    darkAlpha: 0.08,
+                                    lightAlpha: 0.14,
+                                  ),
+                                  shape: CircleBorder(
+                                    side: BorderSide(
+                                      color: _onSurface(dialogContext, 0.12),
+                                    ),
+                                  ),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: () =>
+                                        Navigator.of(dialogContext).pop(),
+                                    child: Center(
+                                      child: Icon(
+                                        Icons.close_rounded,
+                                        size: 18,
+                                        color: _onSurface(dialogContext, 0.84),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                        border: Border.all(
-                          color: _onSurface(dialogContext, 0.12),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.description_rounded,
-                            size: 17,
-                            color: _onSurface(dialogContext, 0.72),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Start game server?',
+                          style: TextStyle(
+                            fontSize: 40,
+                            fontWeight: FontWeight.w700,
+                            color: _onSurface(dialogContext, 0.96),
+                            height: 1.04,
                           ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              gameServerDll,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                color: _onSurface(dialogContext, 0.82),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'ATLAS Link can launch an automatic local game server using your configured Game server DLL.',
+                          style: TextStyle(
+                            fontSize: 16,
+                            height: 1.36,
+                            color: _onSurface(dialogContext, 0.84),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Material(
+                          color: _adaptiveScrimColor(
+                            dialogContext,
+                            darkAlpha: 0.10,
+                            lightAlpha: 0.18,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: BorderSide(
+                              color: _onSurface(dialogContext, 0.12),
+                            ),
+                          ),
+                          child: InkWell(
+                            onTap: pickGameServerDll,
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.description_rounded,
+                                    size: 17,
+                                    color: _onSurface(dialogContext, 0.72),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      selectedGameServerDll,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(dialogContext, 0.82),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    Icons.folder_open_rounded,
+                                    size: 18,
+                                    color: _onSurface(dialogContext, 0.72),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        OutlinedButton(
-                          onPressed: () =>
-                              Navigator.of(dialogContext).pop(false),
-                          style: OutlinedButton.styleFrom(
-                            shape: const StadiumBorder(),
-                            side: BorderSide(
-                              color: _onSurface(dialogContext, 0.26),
-                            ),
-                            foregroundColor: _onSurface(dialogContext, 0.92),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 22,
-                              vertical: 12,
-                            ),
-                          ),
-                          child: const Text('Ignore'),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: () =>
-                                Navigator.of(dialogContext).pop(true),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: Theme.of(
-                                dialogContext,
-                              ).colorScheme.secondary.withValues(alpha: 0.92),
-                              foregroundColor: Colors.white,
-                              shape: const StadiumBorder(),
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            OutlinedButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(
+                                    _GameServerPromptAction.ignore,
+                                  ),
+                              style: OutlinedButton.styleFrom(
+                                shape: const StadiumBorder(),
+                                side: BorderSide(
+                                  color: _onSurface(dialogContext, 0.26),
+                                ),
+                                foregroundColor: _onSurface(dialogContext, 0.92),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 22,
+                                  vertical: 12,
+                                ),
+                              ),
+                              child: const Text('Ignore'),
                             ),
-                            icon: const Icon(Icons.play_arrow_rounded),
-                            label: const Text('Start game server'),
-                          ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: () {
+                                  applySelectedDllIfChanged();
+                                  Navigator.of(dialogContext).pop(
+                                    _GameServerPromptAction.start,
+                                  );
+                                },
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: Theme.of(
+                                    dialogContext,
+                                  ).colorScheme.secondary.withValues(alpha: 0.92),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                ),
+                                icon: const Icon(Icons.play_arrow_rounded),
+                                label: const Text('Start game server'),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
       transitionBuilder: (dialogContext, animation, _, child) {
@@ -3481,7 +4565,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         );
       },
     );
-    return result ?? false;
+    return result;
   }
 
   Future<_FortniteProcessState?> _startImplicitGameServer(
@@ -3588,6 +4672,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         version.gameVersion,
         includeAuth: true,
         includeMemory: false,
+        includeLargePak: false,
         includeUnreal: false,
         includeGameServer: false,
       );
@@ -3827,6 +4912,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     String gameVersion, {
     bool includeAuth = true,
     bool includeMemory = true,
+    bool includeLargePak = false,
     bool includeUnreal = true,
     bool includeGameServer = false,
   }) async {
@@ -3882,26 +4968,26 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
-    if (includeGameServer) {
-      final gameServerPath = _settings.gameServerFilePath.trim();
-      if (gameServerPath.isNotEmpty) {
-        attempts.add(
-          await _injectSinglePatcher(
-            gamePid: gamePid,
-            patcherPath: gameServerPath,
-            patcherName: 'game server patcher',
-            required: true,
-          ),
-        );
-      } else {
-        _log('game', 'Game server patcher path is empty.');
+    if (includeLargePak) {
+      final pakPath = _settings.largePakPatcherFilePath.trim();
+      if (pakPath.isEmpty) {
+        _log('gameserver', 'Large pak patcher is enabled but not configured.');
         attempts.add(
           const _InjectionAttempt(
-            name: 'game server patcher',
-            required: true,
+            name: 'large pak patcher',
+            required: false,
             attempted: false,
             success: false,
             error: 'Not configured.',
+          ),
+        );
+      } else {
+        attempts.add(
+          await _injectSinglePatcher(
+            gamePid: gamePid,
+            patcherPath: pakPath,
+            patcherName: 'large pak patcher',
+            required: false,
           ),
         );
       }
@@ -3931,7 +5017,69 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
+    if (includeGameServer) {
+      final gameServerPath = _settings.gameServerFilePath.trim();
+      if (gameServerPath.isNotEmpty) {
+        attempts.add(
+          await _injectGameServerPatcherWithRetry(
+            gamePid: gamePid,
+            gameServerPath: gameServerPath,
+          ),
+        );
+      } else {
+        _log('game', 'Game server patcher path is empty.');
+        attempts.add(
+          const _InjectionAttempt(
+            name: 'game server patcher',
+            required: true,
+            attempted: false,
+            success: false,
+            error: 'Not configured.',
+          ),
+        );
+      }
+    }
+
     return _InjectionReport(attempts);
+  }
+
+  Future<_InjectionAttempt> _injectGameServerPatcherWithRetry({
+    required int gamePid,
+    required String gameServerPath,
+  }) async {
+    _InjectionAttempt attempt = await _injectSinglePatcher(
+      gamePid: gamePid,
+      patcherPath: gameServerPath,
+      patcherName: 'game server patcher',
+      required: true,
+    );
+    if (attempt.success || !attempt.attempted) return attempt;
+
+    for (var retry = 2; retry <= _gameServerInjectionMaxAttempts; retry++) {
+      _log(
+        'game',
+        'Game server patcher injection retry $retry/$_gameServerInjectionMaxAttempts.',
+      );
+      await Future<void>.delayed(
+        const Duration(milliseconds: _gameServerInjectionRetryDelayMs),
+      );
+      attempt = await _injectSinglePatcher(
+        gamePid: gamePid,
+        patcherPath: gameServerPath,
+        patcherName: 'game server patcher',
+        required: true,
+      );
+      if (attempt.success || !attempt.attempted) return attempt;
+    }
+
+    final baseError = attempt.error ?? 'Unknown error.';
+    return _InjectionAttempt(
+      name: attempt.name,
+      required: attempt.required,
+      attempted: attempt.attempted,
+      success: false,
+      error: '$baseError (after $_gameServerInjectionMaxAttempts attempts)',
+    );
   }
 
   Future<_InjectionAttempt> _injectAuthenticationPatcherWithRetry({
@@ -4571,6 +5719,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         barrierColor: Colors.transparent,
         transitionDuration: const Duration(milliseconds: 260),
         pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          var dismissQueued = false;
           return SafeArea(
             child: Center(
               child: StatefulBuilder(
@@ -4589,10 +5738,17 @@ class _LauncherScreenState extends State<LauncherScreen>
                   }
 
                   void dismissDialogSafely([_BuildImportRequest? result]) {
+                    if (dismissQueued) return;
+                    dismissQueued = true;
                     FocusManager.instance.primaryFocus?.unfocus();
+                    // Let focus/overlays settle before popping. Popping on the same
+                    // frame as an Escape key press can intermittently trigger
+                    // `InheritedElement.debugDeactivated` assertions on desktop.
                     WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (!dialogContext.mounted) return;
-                      Navigator.of(dialogContext).pop(result);
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!dialogContext.mounted) return;
+                        Navigator.of(dialogContext).pop(result);
+                      });
                     });
                   }
 
@@ -4609,36 +5765,29 @@ class _LauncherScreenState extends State<LauncherScreen>
                     MediaQuery.sizeOf(dialogContext).height - 40,
                   );
 
-                  return Shortcuts(
-                    shortcuts: const <ShortcutActivator, Intent>{
-                      SingleActivator(LogicalKeyboardKey.escape):
-                          DismissIntent(),
+                  return Focus(
+                    autofocus: true,
+                    onKeyEvent: (_, event) {
+                      if ((event is KeyDownEvent) &&
+                          event.logicalKey == LogicalKeyboardKey.escape) {
+                        if (nameFocusNode.hasFocus || folderFocusNode.hasFocus) {
+                          nameFocusNode.unfocus();
+                          folderFocusNode.unfocus();
+                          return KeyEventResult.handled;
+                        }
+                        dismissDialogSafely();
+                        return KeyEventResult.handled;
+                      }
+                      return KeyEventResult.ignored;
                     },
-                    child: Actions(
-                      actions: <Type, Action<Intent>>{
-                        DismissIntent: CallbackAction<DismissIntent>(
-                          onInvoke: (intent) {
-                            if (nameFocusNode.hasFocus ||
-                                folderFocusNode.hasFocus) {
-                              nameFocusNode.unfocus();
-                              folderFocusNode.unfocus();
-                              return null;
-                            }
-                            dismissDialogSafely();
-                            return null;
-                          },
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: 620,
+                          maxHeight: maxHeight,
                         ),
-                      },
-                      child: Focus(
-                        autofocus: true,
-                        child: Material(
-                          type: MaterialType.transparency,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: 620,
-                              maxHeight: maxHeight,
-                            ),
-                            child: Container(
+                        child: Container(
                               decoration: BoxDecoration(
                                 color: _dialogSurfaceColor(dialogContext),
                                 borderRadius: BorderRadius.circular(28),
@@ -5391,8 +6540,6 @@ class _LauncherScreenState extends State<LauncherScreen>
                                   ],
                                 ),
                               ),
-                            ),
-                          ),
                         ),
                       ),
                     ),
@@ -5887,6 +7034,247 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _openInternalFiles() => _openPath(_dataDir.path);
 
+  Future<void> _resetLauncher() async {
+    if (!mounted) return;
+    if (_gameAction != _GameActionState.idle ||
+        _gameProcess != null ||
+        _gameServerProcess != null ||
+        _atlasBackendProcess != null) {
+      _toast('Close Fortnite, game server, and backend before resetting.');
+      return;
+    }
+
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 34,
+                        offset: const Offset(0, 18),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Reset launcher?',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'This will restore ATLAS Link to a default state and make it feel like a fresh install.',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.86),
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'It will:',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: _onSurface(dialogContext, 0.9),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '- Clear imported builds\n'
+                          '- Reset profile (name + PFP) and show first-run setup again on next launch\n'
+                          '- Reset launch options, backend settings, visuals, and DLL paths\n'
+                          '- Clear internal caches (installer + bundled DLL copies)\n'
+                          '- Clear launcher logs',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.82),
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton.icon(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFB3261E),
+                                foregroundColor: Colors.white,
+                              ),
+                              icon: const Icon(Icons.restart_alt_rounded),
+                              label: const Text('Reset'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await _performLauncherReset();
+  }
+
+  Future<void> _performLauncherReset() async {
+    _log('settings', 'Launcher reset started.');
+
+    try {
+      await _stopBackendProxy();
+    } catch (_) {
+      // Ignore proxy shutdown issues during reset.
+    }
+
+    _pollTimer?.cancel();
+    _pollTimer = null;
+
+    _logFlushTimer?.cancel();
+    _logFlushTimer = null;
+    _flushLogBuffer();
+    try {
+      await _logWriteChain;
+    } catch (_) {
+      // Ignore pending log write failures.
+    }
+
+    Future<void> deleteDir(Directory dir) async {
+      try {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      } catch (_) {
+        // Ignore cleanup failures (locks, permissions, etc.).
+      }
+    }
+
+    Future<void> deleteFile(File file) async {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Ignore cleanup failures (locks, permissions, etc.).
+      }
+    }
+
+    await deleteDir(Directory(_joinPath([_dataDir.path, 'backend-installer'])));
+    await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
+    await deleteFile(_installStateFile);
+    await deleteFile(_settingsFile);
+    await deleteFile(_logFile);
+
+    _logs.clear();
+    _logWriteBuffer.clear();
+    _afterMathCleanedRoots.clear();
+
+    final defaults = LauncherSettings.defaults();
+    if (mounted) {
+      setState(() {
+        _settings = defaults;
+        _installState = LauncherInstallState.defaults();
+        _tab = LauncherTab.home;
+        _settingsSection = SettingsSection.profile;
+        _backendOnline = false;
+        _gameUiStatus = null;
+        _gameServerUiStatus = null;
+        _sortedVersionsSource = null;
+        _sortedVersionsCache = const <VersionEntry>[];
+        _versionSearchQuery = '';
+      });
+    } else {
+      _settings = defaults;
+      _installState = LauncherInstallState.defaults();
+      _tab = LauncherTab.home;
+      _settingsSection = SettingsSection.profile;
+      _backendOnline = false;
+      _gameUiStatus = null;
+      _gameServerUiStatus = null;
+      _sortedVersionsSource = null;
+      _sortedVersionsCache = const <VersionEntry>[];
+      _versionSearchQuery = '';
+    }
+
+    _librarySearchController.clear();
+
+    if (mounted) widget.onDarkModeChanged(_settings.darkModeEnabled);
+    _syncControllers();
+
+    // Restore bundled DLL defaults (Magnesium/memory/Tellurium/console) after
+    // clearing internal files.
+    await _applyBundledDllDefaults();
+    await _saveSettings(toast: false);
+
+    await _refreshRuntime();
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      unawaited(_refreshRuntime());
+    });
+
+    if (mounted) _toast('Launcher reset. Relaunch to run onboarding.');
+    _log('settings', 'Launcher reset completed.');
+  }
+
   Future<String?> _pickSingleFile({
     required String dialogTitle,
     List<String>? allowedExtensions,
@@ -5983,7 +7371,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<void> _pickGameServerFile() async {
-    final path = await _pickSingleFile(dialogTitle: 'Select game server file');
+    final path = await _pickSingleFile(
+      dialogTitle: 'Select game server DLL',
+      allowedExtensions: const ['dll'],
+    );
     if (path == null) return;
     setState(() {
       _settings = _settings.copyWith(gameServerFilePath: path);
@@ -6002,6 +7393,33 @@ class _LauncherScreenState extends State<LauncherScreen>
     setState(() {
       _settings = _settings.copyWith(gameServerFilePath: nextPath);
       _gameServerFileController.text = nextPath;
+    });
+    await _saveSettings(toast: false);
+  }
+
+  Future<void> _pickLargePakPatcherFile() async {
+    final path = await _pickSingleFile(
+      dialogTitle: 'Select large pak patcher DLL',
+      allowedExtensions: const ['dll'],
+    );
+    if (path == null) return;
+    setState(() {
+      _settings = _settings.copyWith(largePakPatcherFilePath: path);
+      _largePakPatcherController.text = path;
+    });
+    await _saveSettings(toast: false);
+  }
+
+  Future<void> _clearLargePakPatcherFile() async {
+    final bundledPath = await _ensureBundledDll(
+      bundledAssetPath: 'assets/dlls/LargePakPatch.dll',
+      bundledFileName: 'LargePakPatch.dll',
+      label: 'large pak patcher',
+    );
+    final nextPath = bundledPath?.trim() ?? '';
+    setState(() {
+      _settings = _settings.copyWith(largePakPatcherFilePath: nextPath);
+      _largePakPatcherController.text = nextPath;
     });
     await _saveSettings(toast: false);
   }
@@ -6243,11 +7661,24 @@ class _LauncherScreenState extends State<LauncherScreen>
       children: [
         if (showRightControls) ...[
           if (_tab == LauncherTab.library) ...[
-            _titleActionButton(Icons.add_rounded, _importVersion),
+            _libraryPulseGlow(
+              _titleActionButton(
+                Icons.add_rounded,
+                () {
+                  _completeLibraryActionsNudge();
+                  unawaited(_importVersion());
+                },
+              ),
+            ),
             const SizedBox(width: 8),
-            _titleActionButton(
-              Icons.download_rounded,
-              () => _openUrl('https://builds.fortforge.dev/builds'),
+            _libraryPulseGlow(
+              _titleActionButton(
+                Icons.download_rounded,
+                () {
+                  _completeLibraryActionsNudge();
+                  unawaited(_openUrl('https://builds.fortforge.dev/builds'));
+                },
+              ),
             ),
             const SizedBox(width: 10),
           ],
@@ -6299,6 +7730,71 @@ class _LauncherScreenState extends State<LauncherScreen>
             Align(alignment: Alignment.centerRight, child: right),
         ],
       ),
+    );
+  }
+
+  bool get _shouldPulseLibraryActions =>
+      _tab == LauncherTab.library && !_settings.libraryActionsNudgeComplete;
+
+  void _syncLibraryActionsNudgePulse() {
+    final shouldPulse = _shouldPulseLibraryActions;
+    if (shouldPulse) {
+      if (!_libraryActionsNudgeController.isAnimating) {
+        _libraryActionsNudgeController.repeat(reverse: true);
+      }
+      return;
+    }
+    if (_libraryActionsNudgeController.isAnimating) {
+      _libraryActionsNudgeController.stop();
+      _libraryActionsNudgeController.value = 0.0;
+    }
+  }
+
+  void _completeLibraryActionsNudge() {
+    if (_settings.libraryActionsNudgeComplete) return;
+    setState(() {
+      _settings = _settings.copyWith(libraryActionsNudgeComplete: true);
+      _installState =
+          _installState.copyWith(libraryActionsNudgeComplete: true);
+    });
+    _syncLibraryActionsNudgePulse();
+    unawaited(_saveInstallState());
+    unawaited(_saveSettings(toast: false));
+  }
+
+  Widget _libraryPulseGlow(Widget child) {
+    if (!_shouldPulseLibraryActions) return child;
+    return AnimatedBuilder(
+      animation: _libraryActionsNudgePulse,
+      child: child,
+      builder: (context, child) {
+        final t = _libraryActionsNudgePulse.value;
+        final outerAlpha = 0.10 + (0.14 * t);
+        final innerAlpha = 0.12 + (0.20 * t);
+        final outerBlur = 26.0 + (28.0 * t);
+        final innerBlur = 10.0 + (14.0 * t);
+        final outerSpread = 0.5 + (2.0 * t);
+        final innerSpread = 0.2 + (0.9 * t);
+
+        return Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.white.withValues(alpha: outerAlpha),
+                blurRadius: outerBlur,
+                spreadRadius: outerSpread,
+              ),
+              BoxShadow(
+                color: Colors.white.withValues(alpha: innerAlpha),
+                blurRadius: innerBlur,
+                spreadRadius: innerSpread,
+              ),
+            ],
+          ),
+          child: child,
+        );
+      },
     );
   }
 
@@ -6530,10 +8026,15 @@ class _LauncherScreenState extends State<LauncherScreen>
         (settingsSection == null || _settingsSection == settingsSection)) {
       return;
     }
+    final previousTab = _tab;
     setState(() {
+      if (tab == LauncherTab.general && previousTab != LauncherTab.general) {
+        _settingsReturnTab = previousTab;
+      }
       _tab = tab;
       if (settingsSection != null) _settingsSection = settingsSection;
     });
+    _syncLibraryActionsNudgePulse();
   }
 
   Widget _homeTab() {
@@ -6947,10 +8448,55 @@ class _LauncherScreenState extends State<LauncherScreen>
       index: 1,
       child: _glass(
         radius: 20,
-        child: const Padding(
-          padding: EdgeInsets.all(18),
-          child: Text(
-            'No imported versions yet. Use the + button near Library to import one.',
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  color: _adaptiveScrimColor(
+                    context,
+                    darkAlpha: 0.1,
+                    lightAlpha: 0.18,
+                  ),
+                  border: Border.all(color: _onSurface(context, 0.1)),
+                ),
+                child: Icon(
+                  Icons.inventory_2_rounded,
+                  color: _onSurface(context, 0.9),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'No Imported Versions Yet',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(context, 0.94),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Import an existing build from the top right of the screen, using the + button or, clicking the download button to browse the build archive.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.25,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.72),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -7658,6 +9204,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (backendExePath == null) {
         final installChoice = await _promptInstallAtlasBackend();
         if (installChoice == 'install' && backendExePath == null) {
+          // Let the dialog finish its close animation before we start I/O work.
+          await Future<void>.delayed(const Duration(milliseconds: 280));
           await _installAtlasBackendNormally();
           return;
         }
@@ -7720,23 +9268,177 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<String> _promptInstallAtlasBackend() async {
     if (!mounted) return 'cancel';
-    final result = await showDialog<String>(
+    final result = await showGeneralDialog<String>(
       context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('ATLAS Backend Not Found'),
-          content: Text(
-            'ATLAS Backend was not found in installed apps.\n\n'
-            'Install it now as a normal standalone app?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop('cancel'),
-              child: const Text('Cancel'),
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 560),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.cloud_off_rounded),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'ATLAS Backend Not Found',
+                                style: TextStyle(
+                                  fontSize: 25,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(dialogContext, 0.95),
+                                ),
+                              ),
+                            ),
+                            _buildVersionTag(
+                              dialogContext,
+                              label: 'Missing',
+                              accent: const Color(0xFFDC3545),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'ATLAS Backend was not found in installed apps. Install it now as a normal standalone app?',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.82),
+                            fontWeight: FontWeight.w600,
+                            height: 1.3,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(14),
+                            color: _adaptiveScrimColor(
+                              dialogContext,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.18,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(dialogContext, 0.1),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.info_outline_rounded,
+                                size: 18,
+                                color: _onSurface(dialogContext, 0.82),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Link will download the latest installer and open setup. After setup finishes, come back and click Launch ATLAS Backend again.',
+                                  style: TextStyle(
+                                    color: _onSurface(dialogContext, 0.78),
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop('cancel'),
+                              child: const Text('Cancel'),
+                            ),
+                            const SizedBox(width: 10),
+                            FilledButton.icon(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop('install'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor:
+                                    secondary.withValues(alpha: 0.92),
+                                foregroundColor: Colors.white,
+                                shape: const StadiumBorder(),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 18,
+                                  vertical: 12,
+                                ),
+                              ),
+                              icon: const Icon(
+                                Icons.download_rounded,
+                                size: 18,
+                              ),
+                              label: const Text('Install Now'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop('install'),
-              child: const Text('Install Now'),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
             ),
           ],
         );
@@ -7747,58 +9449,136 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<bool> _installAtlasBackendNormally() async {
     if (!Platform.isWindows) return false;
-    final installerUrl = await _fetchAtlasBackendInstallerUrl();
-    if (installerUrl == null) {
-      _log('backend', 'Unable to resolve backend installer URL from releases.');
-      if (mounted) _toast('Unable to resolve backend installer URL.');
-      await _openUrl(_atlasBackendLatestReleasePage);
-      return false;
-    }
-
     final tempDir = Directory(_joinPath([_dataDir.path, 'backend-installer']));
     var keepInstallerFolder = false;
+    var downloadedInstaller = false;
+    _showAtlasBackendInstallDialog(message: 'Resolving installer...', progress: null);
     try {
+      final fetchedInstallerUrl = await _fetchAtlasBackendInstallerUrl();
+      if (fetchedInstallerUrl == null) {
+        _log('backend', 'Unable to resolve backend installer URL from releases.');
+        _updateAtlasBackendInstallDialog(
+          message: 'Installer not found. Opening release page...',
+          progress: null,
+        );
+        if (mounted) _toast('Unable to resolve backend installer URL.');
+        await _openUrl(_atlasBackendLatestReleasePage);
+        return false;
+      }
+      var installerUrl = fetchedInstallerUrl;
+
       await tempDir.parent.create(recursive: true);
       if (await tempDir.exists()) {
         await tempDir.delete(recursive: true);
       }
       await tempDir.create(recursive: true);
-      _showAtlasBackendInstallDialog(
+      _updateAtlasBackendInstallDialog(
         message: 'Preparing download...',
         progress: null,
       );
 
-      final lowerUrl = installerUrl.toLowerCase();
-      final extension = lowerUrl.endsWith('.exe')
-          ? '.exe'
-          : lowerUrl.endsWith('.msi')
+      final initialUri = Uri.tryParse(installerUrl);
+      final initialLowerPath = (initialUri?.path ?? installerUrl).toLowerCase();
+      var extension = initialLowerPath.endsWith('.msi')
           ? '.msi'
-          : '.exe';
-      final installerFile = File(
+          : initialLowerPath.endsWith('.exe')
+          ? '.exe'
+          // Prefer MSI if the URL has no usable extension (common with redirects).
+          : '.msi';
+      var installerFile = File(
         _joinPath([tempDir.path, 'atlas-backend-installer$extension']),
       );
 
-      _log('backend', 'Downloading ATLAS Backend installer from $installerUrl');
-      await _downloadToFile(
-        installerUrl,
-        installerFile,
-        onProgress: (receivedBytes, totalBytes) {
-          if (totalBytes == null || totalBytes <= 0) {
-            _updateAtlasBackendInstallDialog(
-              message:
-                  'Downloading installer... ${_formatByteSize(receivedBytes)}',
-              progress: null,
-            );
-            return;
-          }
-          final progress = (receivedBytes / totalBytes).clamp(0.0, 1.0);
+      const maxAttempts = 3;
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
           _updateAtlasBackendInstallDialog(
-            message:
-                'Downloading installer... ${_formatByteSize(receivedBytes)} / ${_formatByteSize(totalBytes)}',
-            progress: progress.toDouble(),
+            message: 'Retrying download... (attempt $attempt/$maxAttempts)',
+            progress: null,
           );
-        },
+          final refreshed = await _fetchAtlasBackendInstallerUrl();
+          if (refreshed != null) installerUrl = refreshed;
+        }
+
+        final uriNow = Uri.tryParse(installerUrl);
+        final lowerPathNow = (uriNow?.path ?? installerUrl).toLowerCase();
+        final nextExtension = lowerPathNow.endsWith('.msi')
+            ? '.msi'
+            : lowerPathNow.endsWith('.exe')
+            ? '.exe'
+            : extension;
+        if (nextExtension != extension) {
+          extension = nextExtension;
+          installerFile = File(
+            _joinPath([tempDir.path, 'atlas-backend-installer$extension']),
+          );
+        }
+
+        _log(
+          'backend',
+          'Downloading ATLAS Backend installer (attempt $attempt/$maxAttempts) from $installerUrl',
+        );
+        try {
+          await _downloadToFile(
+            installerUrl,
+            installerFile,
+            onProgress: (receivedBytes, totalBytes) {
+              if (totalBytes == null || totalBytes <= 0) {
+                _updateAtlasBackendInstallDialog(
+                  message:
+                      'Downloading installer... ${_formatByteSize(receivedBytes)}',
+                  progress: null,
+                );
+                return;
+              }
+              final progress = (receivedBytes / totalBytes).clamp(0.0, 1.0);
+              _updateAtlasBackendInstallDialog(
+                message:
+                    'Downloading installer... ${_formatByteSize(receivedBytes)} / ${_formatByteSize(totalBytes)}',
+                progress: progress.toDouble(),
+              );
+            },
+          );
+          break;
+        } catch (error) {
+          _log('backend', 'Backend installer download attempt $attempt failed: $error');
+          if (attempt >= maxAttempts) rethrow;
+          await Future<void>.delayed(Duration(seconds: 2 * attempt));
+        }
+      }
+
+      final detectedExtension = await _detectWindowsInstallerExtension(
+        installerFile,
       );
+      if (detectedExtension != null && detectedExtension != extension) {
+        _log(
+          'backend',
+          'Installer type mismatch: expected $extension but detected $detectedExtension. Renaming.',
+        );
+        final corrected = File(
+          _joinPath([tempDir.path, 'atlas-backend-installer$detectedExtension']),
+        );
+        try {
+          if (await corrected.exists()) await corrected.delete();
+        } catch (_) {
+          // Ignore pre-clean failures.
+        }
+        try {
+          installerFile = await installerFile.rename(corrected.path);
+          extension = detectedExtension;
+        } catch (_) {
+          try {
+            await installerFile.copy(corrected.path);
+            installerFile = corrected;
+            extension = detectedExtension;
+          } catch (_) {
+            // Keep the original file name; still use the detected type for launch.
+            extension = detectedExtension;
+          }
+        }
+      }
+
+      downloadedInstaller = true;
 
       _updateAtlasBackendInstallDialog(
         message: 'Launching setup...',
@@ -7831,6 +9611,14 @@ class _LauncherScreenState extends State<LauncherScreen>
       await _hideAtlasBackendInstallDialog();
       _log('backend', 'ATLAS Backend install failed: $error');
       if (mounted) _toast('Failed to install ATLAS Backend.');
+      if (!downloadedInstaller) {
+        try {
+          if (mounted) _toast('Opening ATLAS Backend release page...');
+          await _openUrl(_atlasBackendLatestReleasePage);
+        } catch (_) {
+          // Ignore browser launch failures.
+        }
+      }
       return false;
     } finally {
       await _hideAtlasBackendInstallDialog();
@@ -8128,65 +9916,121 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<String?> _fetchAtlasBackendInstallerUrl() async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
     try {
-      final request = await client.getUrl(
-        Uri.parse(_atlasBackendLatestReleaseApi),
-      );
-      request.headers.set('User-Agent', 'ATLAS-Link');
-      request.headers.set('Accept', 'application/vnd.github+json');
-      final response = await request.close();
-      if (response.statusCode != 200) return null;
+      String? pickInstallerFromAssets(dynamic assets) {
+        if (assets is! List) return null;
+        String? atlasInstallerMsi;
+        String? installerMsi;
+        String? atlasMsi;
+        String? firstMsi;
+        String? atlasSetupExe;
+        String? setupExe;
+        String? atlasExe;
+        String? firstExe;
+        for (final asset in assets) {
+          if (asset is! Map<String, dynamic>) continue;
+          final name = (asset['name'] ?? '').toString().toLowerCase();
+          final url = (asset['browser_download_url'] ?? '').toString().trim();
+          if (url.isEmpty) continue;
 
-      final body = await response.transform(utf8.decoder).join();
-      final json = jsonDecode(body);
-      if (json is! Map<String, dynamic>) return null;
-      final assets = json['assets'];
-      if (assets is! List) return null;
-
-      String? atlasSetupExe;
-      String? setupExe;
-      String? atlasMsi;
-      String? firstMsi;
-      String? atlasExe;
-      String? firstExe;
-      for (final asset in assets) {
-        if (asset is! Map<String, dynamic>) continue;
-        final name = (asset['name'] ?? '').toString().toLowerCase();
-        final url = (asset['browser_download_url'] ?? '').toString().trim();
-        if (url.isEmpty) continue;
-        final isAtlasAsset = name.contains('atlas');
-        if (name.endsWith('.exe')) {
-          final isSetupExe =
+          final isAtlasAsset = name.contains('atlas') || name.contains('backend');
+          final isInstaller =
               name.contains('setup') ||
               name.contains('installer') ||
               name.contains('install');
-          if (isSetupExe && isAtlasAsset) {
-            atlasSetupExe ??= url;
-          } else if (isSetupExe) {
-            setupExe ??= url;
-          } else if (isAtlasAsset) {
-            atlasExe ??= url;
-          } else {
-            firstExe ??= url;
+          if (name.endsWith('.msi')) {
+            if (isInstaller && isAtlasAsset) {
+              atlasInstallerMsi ??= url;
+            } else if (isInstaller) {
+              installerMsi ??= url;
+            } else if (isAtlasAsset) {
+              atlasMsi ??= url;
+            } else {
+              firstMsi ??= url;
+            }
+            continue;
           }
-          continue;
+          if (name.endsWith('.exe')) {
+            if (isInstaller && isAtlasAsset) {
+              atlasSetupExe ??= url;
+            } else if (isInstaller) {
+              setupExe ??= url;
+            } else if (isAtlasAsset) {
+              atlasExe ??= url;
+            } else {
+              firstExe ??= url;
+            }
+          }
         }
-        if (name.endsWith('.msi')) {
-          if (isAtlasAsset) {
-            atlasMsi ??= url;
-          } else {
-            firstMsi ??= url;
-          }
+        // Prefer MSI now that backend is distributed as an MSI again.
+        return atlasInstallerMsi ??
+            installerMsi ??
+            atlasMsi ??
+            firstMsi ??
+            atlasSetupExe ??
+            setupExe ??
+            atlasExe ??
+            firstExe;
+      }
+
+      Future<dynamic> fetchGitHubJson(String url) async {
+        final request = await client.getUrl(Uri.parse(url));
+        request.followRedirects = true;
+        request.maxRedirects = 8;
+        request.headers.set('Accept', 'application/vnd.github+json');
+        final response = await request.close();
+        final body = await response.transform(utf8.decoder).join();
+        if (response.statusCode != 200) {
+          final remaining = response.headers.value('x-ratelimit-remaining');
+          final hint =
+              remaining == null || remaining.trim().isEmpty
+                  ? ''
+                  : ' (rate remaining $remaining)';
+          _log(
+            'backend',
+            'GitHub API request failed ($url): HTTP ${response.statusCode}$hint',
+          );
+          return null;
+        }
+        if (body.trim().isEmpty) return null;
+        try {
+          return jsonDecode(body);
+        } catch (_) {
+          return null;
         }
       }
-      return atlasSetupExe ??
-          setupExe ??
-          atlasMsi ??
-          firstMsi ??
-          atlasExe ??
-          firstExe;
-    } catch (_) {
+
+      final latest = await fetchGitHubJson(_atlasBackendLatestReleaseApi);
+      if (latest is Map<String, dynamic>) {
+        final picked = pickInstallerFromAssets(latest['assets']);
+        if (picked != null) return picked;
+      }
+
+      // Fallback: scan recent releases in case /latest is missing assets, points
+      // at an older tag, or the installer was attached to a different release.
+      final recent = await fetchGitHubJson(
+        'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases?per_page=12',
+      );
+      if (recent is! List) return null;
+
+      String? scanReleases({required bool includePrerelease}) {
+        for (final release in recent) {
+          if (release is! Map<String, dynamic>) continue;
+          if (release['draft'] == true) continue;
+          if (!includePrerelease && release['prerelease'] == true) continue;
+          final picked = pickInstallerFromAssets(release['assets']);
+          if (picked != null) return picked;
+        }
+        return null;
+      }
+
+      return scanReleases(includePrerelease: false) ??
+          scanReleases(includePrerelease: true);
+    } catch (error) {
+      _log('backend', 'Failed to resolve backend installer URL: $error');
       return null;
     } finally {
       client.close(force: true);
@@ -8199,11 +10043,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     void Function(int receivedBytes, int? totalBytes)? onProgress,
   }) async {
     final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20);
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..userAgent = 'ATLAS-Link';
     IOSink? sink;
     try {
       final request = await client.getUrl(Uri.parse(url));
-      request.headers.set('User-Agent', 'ATLAS-Link');
+      request.followRedirects = true;
+      request.maxRedirects = 8;
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw 'Download failed (HTTP ${response.statusCode}).';
@@ -8222,6 +10068,46 @@ class _LauncherScreenState extends State<LauncherScreen>
     } finally {
       await sink?.close();
       client.close(force: true);
+    }
+  }
+
+  Future<String?> _detectWindowsInstallerExtension(File file) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await file.open();
+      final header = await raf.read(8);
+      if (header.length >= 2 && header[0] == 0x4D && header[1] == 0x5A) {
+        return '.exe';
+      }
+      const oleMagic = <int>[
+        0xD0,
+        0xCF,
+        0x11,
+        0xE0,
+        0xA1,
+        0xB1,
+        0x1A,
+        0xE1,
+      ];
+      if (header.length >= 8) {
+        var matchesOle = true;
+        for (var i = 0; i < oleMagic.length; i++) {
+          if (header[i] != oleMagic[i]) {
+            matchesOle = false;
+            break;
+          }
+        }
+        if (matchesOle) return '.msi';
+      }
+      return null;
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        await raf?.close();
+      } catch (_) {
+        // Ignore header read close failures.
+      }
     }
   }
 
@@ -8965,19 +10851,39 @@ foreach ($app in $appPaths) {
                         children: [
                           Text('Data Management', style: sectionTitleStyle),
                           const SizedBox(height: 8),
-                          FilledButton.icon(
-                            onPressed: _openInternalFiles,
-                            style: FilledButton.styleFrom(
-                              backgroundColor: const Color(0xFF1E88E5),
-                              foregroundColor: Colors.white,
-                              shape: const StadiumBorder(),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 18,
-                                vertical: 11,
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              FilledButton.icon(
+                                onPressed: _openInternalFiles,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFF1E88E5),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 11,
+                                  ),
+                                ),
+                                icon: const Icon(Icons.folder_rounded),
+                                label: const Text('View internal files'),
                               ),
-                            ),
-                            icon: const Icon(Icons.folder_rounded),
-                            label: const Text('View internal files'),
+                              FilledButton.icon(
+                                onPressed: _resetLauncher,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFB3261E),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 11,
+                                  ),
+                                ),
+                                icon: const Icon(Icons.restart_alt_rounded),
+                                label: const Text('Reset Launcher'),
+                              ),
+                            ],
                           ),
                         ],
                       );
@@ -9004,6 +10910,21 @@ foreach ($app in $appPaths) {
                           ),
                           icon: const Icon(Icons.folder_rounded),
                           label: const Text('View internal files'),
+                        ),
+                        const SizedBox(width: 10),
+                        FilledButton.icon(
+                          onPressed: _resetLauncher,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFB3261E),
+                            foregroundColor: Colors.white,
+                            shape: const StadiumBorder(),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 11,
+                            ),
+                          ),
+                          icon: const Icon(Icons.restart_alt_rounded),
+                          label: const Text('Reset Launcher'),
                         ),
                       ],
                     );
@@ -9092,6 +11013,27 @@ foreach ($app in $appPaths) {
                     },
                     onPick: _pickGameServerFile,
                     onReset: _clearGameServerFile,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _backendSettingTile(
+                  icon: Icons.description_outlined,
+                  title: 'Large Pak Patcher',
+                  subtitle: 'Injected after the game server to support large pak files',
+                  trailingWidth: 500,
+                  trailing: _dataPathPicker(
+                    controller: _largePakPatcherController,
+                    placeholder: 'No file selected',
+                    onChanged: (value) {
+                      setState(() {
+                        _settings = _settings.copyWith(
+                          largePakPatcherFilePath: value.trim(),
+                        );
+                      });
+                      unawaited(_saveSettings(toast: false));
+                    },
+                    onPick: _pickLargePakPatcherFile,
+                    onReset: _clearLargePakPatcherFile,
                   ),
                 ),
               ],
@@ -9339,7 +11281,7 @@ foreach ($app in $appPaths) {
             const SizedBox(height: 12),
             if (!compact)
               OutlinedButton.icon(
-                onPressed: () => unawaited(_switchMenu(LauncherTab.home)),
+                onPressed: () => unawaited(_switchMenu(_settingsReturnTab)),
                 icon: const Icon(Icons.logout_rounded),
                 label: const Text('Back'),
               ),
@@ -10546,10 +12488,72 @@ class LauncherUpdateNotesService {
   }
 }
 
+class LauncherInstallState {
+  const LauncherInstallState({
+    required this.profileSetupComplete,
+    required this.libraryActionsNudgeComplete,
+  });
+
+  final bool profileSetupComplete;
+  final bool libraryActionsNudgeComplete;
+
+  LauncherInstallState copyWith({
+    bool? profileSetupComplete,
+    bool? libraryActionsNudgeComplete,
+  }) {
+    return LauncherInstallState(
+      profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
+      libraryActionsNudgeComplete:
+          libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
+    );
+  }
+
+  static LauncherInstallState defaults() {
+    return const LauncherInstallState(
+      profileSetupComplete: false,
+      libraryActionsNudgeComplete: false,
+    );
+  }
+
+  factory LauncherInstallState.fromJson(Map<String, dynamic> json) {
+    bool asBool(dynamic value, bool fallback) {
+      if (value is bool) return value;
+      if (value is num) return value != 0;
+      if (value is String) {
+        final lowered = value.toLowerCase();
+        if (lowered == 'true' || lowered == '1') return true;
+        if (lowered == 'false' || lowered == '0') return false;
+      }
+      return fallback;
+    }
+
+    return LauncherInstallState(
+      profileSetupComplete: asBool(
+        json['profileSetupComplete'] ?? json['ProfileSetupComplete'],
+        false,
+      ),
+      libraryActionsNudgeComplete: asBool(
+        json['libraryActionsNudgeComplete'] ??
+            json['LibraryActionsNudgeComplete'],
+        false,
+      ),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'profileSetupComplete': profileSetupComplete,
+      'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
+    };
+  }
+}
+
 class LauncherSettings {
   const LauncherSettings({
     required this.username,
     required this.profileAvatarPath,
+    required this.profileSetupComplete,
+    required this.libraryActionsNudgeComplete,
     required this.darkModeEnabled,
     required this.popupBackgroundBlurEnabled,
     required this.backgroundImagePath,
@@ -10561,6 +12565,8 @@ class LauncherSettings {
     required this.backendConnectionType,
     required this.backendHost,
     required this.backendPort,
+    required this.launchBackendOnSessionStart,
+    required this.largePakPatcherEnabled,
     required this.hostUsername,
     required this.playCustomLaunchArgs,
     required this.hostCustomLaunchArgs,
@@ -10573,12 +12579,15 @@ class LauncherSettings {
     required this.memoryPatcherPath,
     required this.gameServerInjectType,
     required this.gameServerFilePath,
+    required this.largePakPatcherFilePath,
     required this.versions,
     required this.selectedVersionId,
   });
 
   final String username;
   final String profileAvatarPath;
+  final bool profileSetupComplete;
+  final bool libraryActionsNudgeComplete;
   final bool darkModeEnabled;
   final bool popupBackgroundBlurEnabled;
   final String backgroundImagePath;
@@ -10590,6 +12599,8 @@ class LauncherSettings {
   final BackendConnectionType backendConnectionType;
   final String backendHost;
   final int backendPort;
+  final bool launchBackendOnSessionStart;
+  final bool largePakPatcherEnabled;
   final String hostUsername;
   final String playCustomLaunchArgs;
   final String hostCustomLaunchArgs;
@@ -10602,6 +12613,7 @@ class LauncherSettings {
   final String memoryPatcherPath;
   final GameServerInjectType gameServerInjectType;
   final String gameServerFilePath;
+  final String largePakPatcherFilePath;
   final List<VersionEntry> versions;
   final String selectedVersionId;
 
@@ -10615,6 +12627,8 @@ class LauncherSettings {
   LauncherSettings copyWith({
     String? username,
     String? profileAvatarPath,
+    bool? profileSetupComplete,
+    bool? libraryActionsNudgeComplete,
     bool? darkModeEnabled,
     bool? popupBackgroundBlurEnabled,
     String? backgroundImagePath,
@@ -10626,6 +12640,8 @@ class LauncherSettings {
     BackendConnectionType? backendConnectionType,
     String? backendHost,
     int? backendPort,
+    bool? launchBackendOnSessionStart,
+    bool? largePakPatcherEnabled,
     String? hostUsername,
     String? playCustomLaunchArgs,
     String? hostCustomLaunchArgs,
@@ -10638,12 +12654,16 @@ class LauncherSettings {
     String? memoryPatcherPath,
     GameServerInjectType? gameServerInjectType,
     String? gameServerFilePath,
+    String? largePakPatcherFilePath,
     List<VersionEntry>? versions,
     String? selectedVersionId,
   }) {
     return LauncherSettings(
       username: username ?? this.username,
       profileAvatarPath: profileAvatarPath ?? this.profileAvatarPath,
+      profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
+      libraryActionsNudgeComplete:
+          libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
       darkModeEnabled: darkModeEnabled ?? this.darkModeEnabled,
       popupBackgroundBlurEnabled:
           popupBackgroundBlurEnabled ?? this.popupBackgroundBlurEnabled,
@@ -10660,6 +12680,10 @@ class LauncherSettings {
           backendConnectionType ?? this.backendConnectionType,
       backendHost: backendHost ?? this.backendHost,
       backendPort: backendPort ?? this.backendPort,
+      launchBackendOnSessionStart:
+          launchBackendOnSessionStart ?? this.launchBackendOnSessionStart,
+      largePakPatcherEnabled:
+          largePakPatcherEnabled ?? this.largePakPatcherEnabled,
       hostUsername: hostUsername ?? this.hostUsername,
       playCustomLaunchArgs: playCustomLaunchArgs ?? this.playCustomLaunchArgs,
       hostCustomLaunchArgs: hostCustomLaunchArgs ?? this.hostCustomLaunchArgs,
@@ -10676,6 +12700,8 @@ class LauncherSettings {
       memoryPatcherPath: memoryPatcherPath ?? this.memoryPatcherPath,
       gameServerInjectType: gameServerInjectType ?? this.gameServerInjectType,
       gameServerFilePath: gameServerFilePath ?? this.gameServerFilePath,
+      largePakPatcherFilePath:
+          largePakPatcherFilePath ?? this.largePakPatcherFilePath,
       versions: versions ?? this.versions,
       selectedVersionId: selectedVersionId ?? this.selectedVersionId,
     );
@@ -10685,6 +12711,8 @@ class LauncherSettings {
     return const LauncherSettings(
       username: 'Player',
       profileAvatarPath: '',
+      profileSetupComplete: false,
+      libraryActionsNudgeComplete: false,
       darkModeEnabled: true,
       popupBackgroundBlurEnabled: true,
       backgroundImagePath: '',
@@ -10696,18 +12724,21 @@ class LauncherSettings {
       backendConnectionType: BackendConnectionType.local,
       backendHost: '127.0.0.1',
       backendPort: 3551,
+      launchBackendOnSessionStart: true,
+      largePakPatcherEnabled: false,
       hostUsername: 'host',
       playCustomLaunchArgs: '',
       hostCustomLaunchArgs: '',
       allowMultipleGameClients: false,
       hostHeadlessEnabled: true,
-      hostAutoRestartEnabled: true,
+      hostAutoRestartEnabled: false,
       hostPort: 7777,
       unrealEnginePatcherPath: '',
       authenticationPatcherPath: '',
       memoryPatcherPath: '',
       gameServerInjectType: GameServerInjectType.custom,
       gameServerFilePath: '',
+      largePakPatcherFilePath: '',
       versions: <VersionEntry>[],
       selectedVersionId: '',
     );
@@ -10768,6 +12799,14 @@ class LauncherSettings {
           ? 'Player'
           : (json['username'] ?? 'Player').toString().trim(),
       profileAvatarPath: (json['profileAvatarPath'] ?? '').toString(),
+      profileSetupComplete: asBool(
+        json['profileSetupComplete'] ?? json['ProfileSetupComplete'],
+        true,
+      ),
+      libraryActionsNudgeComplete: asBool(
+        json['libraryActionsNudgeComplete'],
+        true,
+      ),
       darkModeEnabled: asBool(
         json['darkModeEnabled'] ?? json['darkMode'] ?? json['DarkMode'],
         true,
@@ -10806,6 +12845,14 @@ class LauncherSettings {
       ),
       backendHost: (json['backendHost'] ?? '').toString(),
       backendPort: asInt(json['backendPort'], 3551),
+      launchBackendOnSessionStart: asBool(
+        json['launchBackendOnSessionStart'] ?? json['launchBackend'],
+        false,
+      ),
+      largePakPatcherEnabled: asBool(
+        json['largePakPatcherEnabled'] ?? json['largePakPatcher'],
+        false,
+      ),
       hostUsername: ((json['hostUsername'] ?? '').toString().trim().isEmpty)
           ? 'host'
           : (json['hostUsername'] ?? '').toString().trim(),
@@ -10824,8 +12871,8 @@ class LauncherSettings {
         true,
       ),
       hostAutoRestartEnabled: asBool(
-        json['hostAutoRestartEnabled'] ?? json['hostAutoRestart'] ?? true,
-        true,
+        json['hostAutoRestartEnabled'] ?? json['hostAutoRestart'],
+        false,
       ),
       hostPort: asInt(
         json['hostPort'] ?? json['gameServerPort'],
@@ -10848,6 +12895,11 @@ class LauncherSettings {
       gameServerFilePath:
           (json['gameServerFilePath'] ?? json['GameServerFilePath'] ?? '')
               .toString(),
+      largePakPatcherFilePath:
+          (json['largePakPatcherFilePath'] ??
+                  json['LargePakPatcherFilePath'] ??
+                  '')
+              .toString(),
       versions: parsedVersions,
       selectedVersionId: selected,
     );
@@ -10857,6 +12909,8 @@ class LauncherSettings {
     return <String, dynamic>{
       'username': username,
       'profileAvatarPath': profileAvatarPath,
+      'profileSetupComplete': profileSetupComplete,
+      'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
       'darkModeEnabled': darkModeEnabled,
       'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
       'backgroundImagePath': backgroundImagePath,
@@ -10868,6 +12922,8 @@ class LauncherSettings {
       'backendConnectionType': backendConnectionType.name,
       'backendHost': backendHost,
       'backendPort': backendPort,
+      'launchBackendOnSessionStart': launchBackendOnSessionStart,
+      'largePakPatcherEnabled': largePakPatcherEnabled,
       'hostUsername': hostUsername,
       'playCustomLaunchArgs': playCustomLaunchArgs,
       'hostCustomLaunchArgs': hostCustomLaunchArgs,
@@ -10880,6 +12936,7 @@ class LauncherSettings {
       'memoryPatcherPath': memoryPatcherPath,
       'gameServerInjectType': gameServerInjectType.name,
       'gameServerFilePath': gameServerFilePath,
+      'largePakPatcherFilePath': largePakPatcherFilePath,
       'versions': versions.map((entry) => entry.toJson()).toList(),
       'selectedVersionId': selectedVersionId,
     };
