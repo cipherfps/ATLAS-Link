@@ -404,6 +404,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _authInjectionInitialDelayMs = 900;
   static const int _authInjectionRetryDelayMs = 1200;
   static const int _authInjectionMaxAttempts = 3;
+  // Some machines (especially with AV scanning or heavy disk contention) can
+  // take longer than 5s to finish LoadLibraryW in the target process. Use a
+  // larger timeout to reduce false "Injection timed out" failures.
+  static const int _dllInjectionWaitMs = 20000;
   static const int _gameServerInjectionRetryDelayMs = 900;
   static const int _gameServerInjectionMaxAttempts = 3;
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
@@ -6070,7 +6074,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         }
 
         try {
-          final waitResult = WaitForSingleObject(createThreadResult, 5000);
+          final waitResult = WaitForSingleObject(
+            createThreadResult,
+            _dllInjectionWaitMs,
+          );
           if (waitResult == waitTimeout) {
             throw 'Injection timed out.';
           }
