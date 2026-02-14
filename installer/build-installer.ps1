@@ -119,10 +119,25 @@ $executableName = Get-ReleaseExecutableName -ReleaseDir $releaseDir
 Write-Step "Found executable: $executableName"
 
 # Keep end-user naming consistent in the installed folder.
+#
+# Note: Flutter build output is typically <pubspec name>.exe (atlas_link_flutter.exe).
+# If we previously renamed it to "ATLAS Link.exe" and then built again, both files can
+# exist and the renamed one may be stale. Prefer renaming the fresh Flutter output
+# when present so the installer always packages the latest build.
 $desiredExecutableName = "ATLAS Link.exe"
-if ($executableName -ne $desiredExecutableName) {
+$desiredExecutablePath = Join-Path $releaseDir $desiredExecutableName
+$flutterOutputExecutablePath = Join-Path $releaseDir "atlas_link_flutter.exe"
+
+if (Test-Path $flutterOutputExecutablePath) {
+  if (Test-Path $desiredExecutablePath) {
+    Remove-Item -Path $desiredExecutablePath -Force
+  }
+  Rename-Item -Path $flutterOutputExecutablePath -NewName $desiredExecutableName
+  $executableName = $desiredExecutableName
+  Write-Step "Renamed Flutter output executable to: $executableName"
+}
+elseif ($executableName -ne $desiredExecutableName) {
   $sourceExecutablePath = Join-Path $releaseDir $executableName
-  $desiredExecutablePath = Join-Path $releaseDir $desiredExecutableName
   if (Test-Path $desiredExecutablePath) {
     Remove-Item -Path $desiredExecutablePath -Force
   }
@@ -133,6 +148,17 @@ if ($executableName -ne $desiredExecutableName) {
 else {
   Write-Step "Using executable: $executableName"
 }
+
+# Ensure the installer doesn't accidentally package multiple app exes.
+Get-ChildItem -Path $releaseDir -Filter *.exe -File |
+  Where-Object {
+    $_.Name -ne $desiredExecutableName -and
+    $_.Name -notmatch '^unins[0-9]*\.exe$'
+  } |
+  ForEach-Object {
+    Write-Step "Removing extra executable from release output: $($_.Name)"
+    Remove-Item -Path $_.FullName -Force
+  }
 
 $outputBaseFilename = "ATLAS Link Setup-$version"
 

@@ -12,6 +12,7 @@ Desktop.ini
 
 # Local/reference folders
 .refs/
+.tmp_atlas_backend/
 node_modules/
 
 # Logs / temp

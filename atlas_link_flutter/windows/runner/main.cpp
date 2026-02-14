@@ -11,22 +11,6 @@
 
 namespace {
 
-// Keep ATLAS Link's window bounds aligned with ATLAS Backend by sharing bounds
-// via the backend key (while also writing to the legacy ATLAS Link key for
-// backwards compatibility).
-constexpr wchar_t kBackendWindowBoundsRegKey[] =
-    L"Software\\ATLAS-Backend\\ATLAS-Backend-Flutter";
-constexpr wchar_t kLinkWindowBoundsRegKey[] =
-    L"Software\\ATLAS-Link\\ATLAS-Link-Flutter";
-constexpr wchar_t kWindowBoundsRegValue[] = L"WindowBounds";
-
-struct SavedWindowBounds {
-  LONG x;
-  LONG y;
-  LONG width;
-  LONG height;
-};
-
 double GetScaleFactorForMonitor(HMONITOR monitor) {
   const UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   if (dpi == 0) {
@@ -48,136 +32,6 @@ bool GetWorkAreaForMonitor(HMONITOR monitor, RECT* work_area) {
 
   *work_area = monitor_info.rcWork;
   return true;
-}
-
-int PhysicalToLogical(LONG physical, double scale_factor) {
-  if (scale_factor <= 0.0) {
-    return static_cast<int>(physical);
-  }
-  return static_cast<int>(std::lround(physical / scale_factor));
-}
-
-unsigned int PhysicalToLogicalUnsigned(LONG physical, double scale_factor) {
-  if (scale_factor <= 0.0) {
-    return static_cast<unsigned int>(std::max<LONG>(1, physical));
-  }
-  const auto logical =
-      static_cast<long>(std::lround(static_cast<double>(physical) / scale_factor));
-  return static_cast<unsigned int>(std::max<long>(1, logical));
-}
-
-void ClampPhysicalBoundsToWorkArea(const RECT& work_area,
-                                  SavedWindowBounds* bounds) {
-  if (bounds == nullptr) {
-    return;
-  }
-
-  const LONG work_width = work_area.right - work_area.left;
-  const LONG work_height = work_area.bottom - work_area.top;
-  if (work_width <= 0 || work_height <= 0) {
-    return;
-  }
-
-  bounds->width = std::max<LONG>(1, bounds->width);
-  bounds->height = std::max<LONG>(1, bounds->height);
-
-  if (bounds->width > work_width) {
-    bounds->width = work_width;
-  }
-  if (bounds->height > work_height) {
-    bounds->height = work_height;
-  }
-
-  if (bounds->x < work_area.left) {
-    bounds->x = work_area.left;
-  }
-  if (bounds->y < work_area.top) {
-    bounds->y = work_area.top;
-  }
-
-  if (bounds->x + bounds->width > work_area.right) {
-    bounds->x = work_area.right - bounds->width;
-  }
-  if (bounds->y + bounds->height > work_area.bottom) {
-    bounds->y = work_area.bottom - bounds->height;
-  }
-}
-
-bool LoadWindowBoundsFromKey(const wchar_t* reg_key, SavedWindowBounds* bounds) {
-  if (reg_key == nullptr || bounds == nullptr) {
-    return false;
-  }
-
-  SavedWindowBounds loaded{};
-  DWORD loaded_size = sizeof(loaded);
-  const LSTATUS status =
-      RegGetValueW(HKEY_CURRENT_USER, reg_key, kWindowBoundsRegValue,
-                   RRF_RT_REG_BINARY, nullptr, &loaded, &loaded_size);
-  if (status != ERROR_SUCCESS || loaded_size != sizeof(loaded)) {
-    return false;
-  }
-  if (loaded.width < 640 || loaded.height < 480) {
-    return false;
-  }
-
-  *bounds = loaded;
-  return true;
-}
-
-bool LoadWindowBounds(SavedWindowBounds* bounds) {
-  // Prefer ATLAS Backend's bounds so both apps stay aligned by default.
-  if (LoadWindowBoundsFromKey(kBackendWindowBoundsRegKey, bounds)) {
-    return true;
-  }
-  return LoadWindowBoundsFromKey(kLinkWindowBoundsRegKey, bounds);
-}
-
-void SaveWindowBounds(HWND hwnd) {
-  if (hwnd == nullptr) {
-    return;
-  }
-
-  WINDOWPLACEMENT placement{};
-  placement.length = sizeof(placement);
-
-  RECT normal_rect{};
-  if (GetWindowPlacement(hwnd, &placement)) {
-    normal_rect = placement.rcNormalPosition;
-  } else if (!GetWindowRect(hwnd, &normal_rect)) {
-    return;
-  }
-
-  SavedWindowBounds bounds{
-      normal_rect.left,
-      normal_rect.top,
-      normal_rect.right - normal_rect.left,
-      normal_rect.bottom - normal_rect.top,
-  };
-  if (bounds.width < 100 || bounds.height < 100) {
-    return;
-  }
-
-  auto save_to_key = [&](const wchar_t* reg_key) {
-    if (reg_key == nullptr) {
-      return;
-    }
-
-    HKEY key = nullptr;
-    const LSTATUS open_status = RegCreateKeyExW(
-        HKEY_CURRENT_USER, reg_key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
-        nullptr);
-    if (open_status != ERROR_SUCCESS || key == nullptr) {
-      return;
-    }
-
-    RegSetValueExW(key, kWindowBoundsRegValue, 0, REG_BINARY,
-                   reinterpret_cast<const BYTE*>(&bounds), sizeof(bounds));
-    RegCloseKey(key);
-  };
-
-  // Write to both keys so ATLAS Link and ATLAS Backend stay in sync.
-  save_to_key(kBackendWindowBoundsRegKey);
-  save_to_key(kLinkWindowBoundsRegKey);
 }
 
 Win32Window::Size FitSizeToWorkArea(HMONITOR monitor,
@@ -266,47 +120,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     monitor = MonitorFromPoint(cursor_position, MONITOR_DEFAULTTONEAREST);
   }
 
-  Win32Window::Size size(1250, 1080);
+  // Always use a consistent launch size. We intentionally do not persist
+  // window bounds so updates don't inherit stale/corrupt cached sizes.
+  Win32Window::Size size(1350, 800);
   size = FitSizeToWorkArea(monitor, size);
   Win32Window::Point origin = CenteredOrigin(monitor, size);
-  SavedWindowBounds restored_bounds{};
-  if (LoadWindowBounds(&restored_bounds)) {
-    POINT restore_point{restored_bounds.x, restored_bounds.y};
-    monitor = MonitorFromPoint(restore_point, MONITOR_DEFAULTTONEAREST);
-    RECT work_area{};
-    if (GetWorkAreaForMonitor(monitor, &work_area)) {
-      ClampPhysicalBoundsToWorkArea(work_area, &restored_bounds);
-    }
-
-    const double scale_factor = GetScaleFactorForMonitor(monitor);
-    origin = Win32Window::Point(
-        PhysicalToLogical(restored_bounds.x, scale_factor),
-        PhysicalToLogical(restored_bounds.y, scale_factor));
-    size = Win32Window::Size(
-        PhysicalToLogicalUnsigned(restored_bounds.width, scale_factor),
-        PhysicalToLogicalUnsigned(restored_bounds.height, scale_factor));
-    size = FitSizeToWorkArea(monitor, size);
-  }
 
   if (!window.Create(L"ATLAS Link", origin, size, monitor)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
 
-  bool bounds_saved = false;
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {
-    if (!bounds_saved && msg.message == WM_CLOSE &&
-        msg.hwnd == window.GetHandle()) {
-      SaveWindowBounds(window.GetHandle());
-      bounds_saved = true;
-    }
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
-  }
-
-  if (!bounds_saved) {
-    SaveWindowBounds(window.GetHandle());
   }
 
   ::CoUninitialize();

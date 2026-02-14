@@ -393,8 +393,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '0.0.2';
-  static const String _launcherBuildLabel = 'Stable 0.0.2';
+  static const String _launcherVersion = '0.0.3';
+  static const String _launcherBuildLabel = 'Stable 0.0.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -500,9 +500,17 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _startupConfigResolved = false;
   bool _backendOnline = false;
   bool _checkingLauncherUpdate = false;
+  bool _launcherUpdateDialogVisible = false;
+  bool _launcherUpdateAutoCheckQueued = false;
+  bool _launcherUpdateAutoChecked = false;
+  bool _launcherUpdateInstallerCleanupWatcherActive = false;
   bool _atlasBackendActionBusy = false;
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
+  // When the game server is started from the "start game server?" prompt during
+  // launching, treat it as session-linked and stop it once all clients close.
+  bool _stopHostingWhenNoClientsRemain = false;
+  bool _stoppingSessionLinkedHosting = false;
   bool _profileSetupDialogVisible = false;
   bool _profileSetupDialogQueued = false;
   String _versionSearchQuery = '';
@@ -611,9 +619,23 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _bootstrap() async {
     try {
       await _initStorage();
+      unawaited(_cleanupLauncherUpdateInstallerCacheOnLaunch());
       await _loadInstallState();
       await _loadSettings();
       await _reconcileInstallState();
+      final priorLauncherVersion = _installState.lastSeenLauncherVersion.trim();
+      final currentLauncherVersion = _launcherVersion.trim();
+      var launcherUpdated =
+          priorLauncherVersion.isNotEmpty &&
+          currentLauncherVersion.isNotEmpty &&
+          priorLauncherVersion != currentLauncherVersion;
+      if (launcherUpdated) {
+        await _performPostUpdateReinstallReset(
+          priorVersion: priorLauncherVersion,
+          currentVersion: currentLauncherVersion,
+        );
+        launcherUpdated = false;
+      }
       if (mounted) {
         setState(() {
           _showStartup = _settings.startupAnimationEnabled;
@@ -624,7 +646,18 @@ class _LauncherScreenState extends State<LauncherScreen>
         }
       }
       _syncControllers();
-      await _applyBundledDllDefaults();
+      await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
+      if (currentLauncherVersion.isNotEmpty &&
+          _installState.lastSeenLauncherVersion != currentLauncherVersion) {
+        _installState = _installState.copyWith(
+          lastSeenLauncherVersion: currentLauncherVersion,
+        );
+        try {
+          await _saveInstallState();
+        } catch (error) {
+          _log('settings', 'Failed to save install state: $error');
+        }
+      }
       // Apply loaded settings (blur/background/particles) immediately so the
       // startup overlay doesn't appear to "add extra blur" before settings load.
       if (mounted) {
@@ -640,6 +673,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       });
 
       _queueFirstRunProfileSetup();
+      _queueLauncherAutoUpdateCheckOnLaunch();
     } catch (error) {
       debugPrint('ATLAS Link bootstrap failed: $error');
     } finally {
@@ -653,6 +687,119 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  Future<void> _performPostUpdateReinstallReset({
+    required String priorVersion,
+    required String currentVersion,
+  }) async {
+    final fromVersion = priorVersion.trim();
+    final toVersion = currentVersion.trim();
+    if (fromVersion.isEmpty || toVersion.isEmpty) return;
+    if (fromVersion == toVersion) return;
+
+    _log(
+      'settings',
+      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile).',
+    );
+
+    final preservedVersions = List<VersionEntry>.from(_settings.versions);
+    var preservedSelectedVersionId = _settings.selectedVersionId;
+    if (preservedSelectedVersionId.trim().isNotEmpty &&
+        !preservedVersions.any((entry) => entry.id == preservedSelectedVersionId)) {
+      preservedSelectedVersionId =
+          preservedVersions.isNotEmpty ? preservedVersions.first.id : '';
+    }
+    if (preservedSelectedVersionId.trim().isEmpty &&
+        preservedVersions.isNotEmpty) {
+      preservedSelectedVersionId = preservedVersions.first.id;
+    }
+
+    var preservedUsername = _settings.username.trim();
+    if (preservedUsername.isEmpty) preservedUsername = 'Player';
+
+    var preservedAvatarPath = _settings.profileAvatarPath.trim();
+    if (preservedAvatarPath.isNotEmpty) {
+      try {
+        if (!File(preservedAvatarPath).existsSync()) {
+          preservedAvatarPath = '';
+        }
+      } catch (_) {
+        preservedAvatarPath = '';
+      }
+    }
+
+    final preservedProfileSetupComplete =
+        _settings.profileSetupComplete || _installState.profileSetupComplete;
+
+    Future<void> deleteDir(Directory dir) async {
+      try {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      } catch (_) {
+        // Ignore cleanup failures (locks, permissions, etc.).
+      }
+    }
+
+    // Stop background log flushes before truncating/clearing the log file.
+    _logFlushTimer?.cancel();
+    _logFlushTimer = null;
+    _flushLogBuffer();
+    try {
+      await _logWriteChain;
+    } catch (_) {
+      // Ignore pending log write failures.
+    }
+
+    await deleteDir(Directory(_joinPath([_dataDir.path, 'backend-installer'])));
+    await deleteDir(
+      Directory(_joinPath([_dataDir.path, 'launcher-installer'])),
+    );
+    await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
+
+    // Clear logs on update-reinstall. Keep the file itself so logging stays ready.
+    try {
+      if (await _logFile.exists()) {
+        await _logFile.writeAsString('', flush: true);
+      }
+    } catch (_) {
+      // Ignore log truncation failures.
+    }
+    _logs.clear();
+    _logWriteBuffer.clear();
+
+    final defaults = LauncherSettings.defaults();
+    final nextSettings = defaults.copyWith(
+      username: preservedUsername,
+      profileAvatarPath: preservedAvatarPath,
+      profileSetupComplete: preservedProfileSetupComplete,
+      versions: preservedVersions,
+      selectedVersionId: preservedSelectedVersionId,
+    );
+    final nextInstallState = LauncherInstallState.defaults().copyWith(
+      profileSetupComplete: preservedProfileSetupComplete,
+      lastSeenLauncherVersion: toVersion,
+    );
+
+    _settings = nextSettings;
+    _installState = nextInstallState;
+    _syncControllers();
+
+    try {
+      await _saveSettings(toast: false, applyControllers: false);
+    } catch (error) {
+      _log('settings', 'Failed to save post-update settings: $error');
+    }
+
+    try {
+      await _saveInstallState();
+    } catch (error) {
+      _log('settings', 'Failed to save post-update install state: $error');
+    }
+
+    _log(
+      'settings',
+      'Post-update reinstall reset completed (library + profile preserved).',
+    );
+  }
+
   void _finishStartupAnimation() {
     if (!mounted || !_showStartup) return;
     setState(() {
@@ -660,6 +807,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
     _shellEntranceController.forward(from: 0);
     _queueFirstRunProfileSetup();
+    _queueLauncherAutoUpdateCheckOnLaunch();
   }
 
   void _queueFirstRunProfileSetup() {
@@ -670,6 +818,31 @@ class _LauncherScreenState extends State<LauncherScreen>
       _profileSetupDialogQueued = false;
       unawaited(_maybeShowFirstRunProfileSetup());
     });
+  }
+
+  void _queueLauncherAutoUpdateCheckOnLaunch() {
+    if (_launcherUpdateAutoChecked) return;
+    if (_launcherUpdateAutoCheckQueued) return;
+    _launcherUpdateAutoCheckQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _launcherUpdateAutoCheckQueued = false;
+      unawaited(_maybeAutoCheckForLauncherUpdatesOnLaunch());
+    });
+  }
+
+  Future<void> _maybeAutoCheckForLauncherUpdatesOnLaunch() async {
+    if (!mounted) return;
+    if (_launcherUpdateAutoChecked) return;
+    if (!_startupConfigResolved) return;
+    if (_showStartup) return;
+    if (_launcherUpdateDialogVisible) return;
+    if (_profileSetupDialogVisible) {
+      _queueLauncherAutoUpdateCheckOnLaunch();
+      return;
+    }
+
+    _launcherUpdateAutoChecked = true;
+    await _checkForLauncherUpdates(silent: true);
   }
 
   Future<void> _maybeShowFirstRunProfileSetup() async {
@@ -721,8 +894,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       return await showGeneralDialog<_ProfileSetupResult>(
         context: context,
         barrierDismissible: false,
-        barrierLabel:
-            MaterialLocalizations.of(context).modalBarrierDismissLabel,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
         barrierColor: Colors.transparent,
         transitionDuration: const Duration(milliseconds: 240),
         pageBuilder: (dialogContext, animation, secondaryAnimation) {
@@ -808,7 +982,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                     Material(
                       color: Colors.transparent,
                       shape: CircleBorder(
-                        side: BorderSide(color: _onSurface(dialogContext, 0.16)),
+                        side: BorderSide(
+                          color: _onSurface(dialogContext, 0.16),
+                        ),
                       ),
                       clipBehavior: Clip.antiAlias,
                       child: Ink.image(
@@ -851,8 +1027,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                               ),
                               boxShadow: [
                                 BoxShadow(
-                                  color: _dialogShadowColor(dialogContext)
-                                      .withValues(alpha: 0.45),
+                                  color: _dialogShadowColor(
+                                    dialogContext,
+                                  ).withValues(alpha: 0.45),
                                   blurRadius: 14,
                                   offset: const Offset(0, 8),
                                 ),
@@ -892,11 +1069,15 @@ class _LauncherScreenState extends State<LauncherScreen>
                   ),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+                    borderSide: BorderSide(
+                      color: _onSurface(dialogContext, 0.18),
+                    ),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+                    borderSide: BorderSide(
+                      color: _onSurface(dialogContext, 0.18),
+                    ),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -939,10 +1120,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                             OutlinedButton.icon(
                               onPressed:
                                   submitted || selectedAvatarPath.trim().isEmpty
-                                      ? null
-                                      : () => setDialogState(setDefaultAvatar),
-                              icon:
-                                  const Icon(Icons.restore_rounded, size: 18),
+                                  ? null
+                                  : () => setDialogState(setDefaultAvatar),
+                              icon: const Icon(Icons.restore_rounded, size: 18),
                               label: const Text('Default'),
                             ),
                           ],
@@ -971,7 +1151,10 @@ class _LauncherScreenState extends State<LauncherScreen>
                                             await pickAvatar();
                                             setDialogState(() {});
                                           },
-                                    icon: const Icon(Icons.image_rounded, size: 18),
+                                    icon: const Icon(
+                                      Icons.image_rounded,
+                                      size: 18,
+                                    ),
                                     label: Text(
                                       selectedAvatarPath.trim().isEmpty
                                           ? 'Choose PFP'
@@ -979,11 +1162,16 @@ class _LauncherScreenState extends State<LauncherScreen>
                                     ),
                                   ),
                                   OutlinedButton.icon(
-                                    onPressed: submitted ||
+                                    onPressed:
+                                        submitted ||
                                             selectedAvatarPath.trim().isEmpty
                                         ? null
-                                        : () => setDialogState(setDefaultAvatar),
-                                    icon: const Icon(Icons.restore_rounded, size: 18),
+                                        : () =>
+                                              setDialogState(setDefaultAvatar),
+                                    icon: const Icon(
+                                      Icons.restore_rounded,
+                                      size: 18,
+                                    ),
                                     label: const Text('Default'),
                                   ),
                                 ],
@@ -1040,9 +1228,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                                     height: 34,
                                     decoration: BoxDecoration(
                                       shape: BoxShape.circle,
-                                      color: Theme.of(
-                                        dialogContext,
-                                      ).colorScheme.secondary
+                                      color: Theme.of(dialogContext)
+                                          .colorScheme
+                                          .secondary
                                           .withValues(alpha: 0.18),
                                       border: Border.all(
                                         color: _onSurface(dialogContext, 0.18),
@@ -1140,7 +1328,10 @@ class _LauncherScreenState extends State<LauncherScreen>
                           sigmaY: 3.2 * curved.value,
                         ),
                         child: Container(
-                          color: _dialogBarrierColor(dialogContext, curved.value),
+                          color: _dialogBarrierColor(
+                            dialogContext,
+                            curved.value,
+                          ),
                         ),
                       )
                     : Container(
@@ -1150,8 +1341,7 @@ class _LauncherScreenState extends State<LauncherScreen>
               FadeTransition(
                 opacity: curved,
                 child: ScaleTransition(
-                  scale:
-                      Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                  scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
                   child: child,
                 ),
               ),
@@ -1261,8 +1451,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         .replaceFirst(RegExp(r'^/+'), '');
     if (normalized.isEmpty) return null;
 
-    final parts =
-        normalized.split('/').where((part) => part.trim().isNotEmpty).toList();
+    final parts = normalized
+        .split('/')
+        .where((part) => part.trim().isNotEmpty)
+        .toList();
     if (parts.isEmpty) return null;
 
     // On Flutter Windows, packaged assets live next to the executable:
@@ -1297,10 +1489,37 @@ class _LauncherScreenState extends State<LauncherScreen>
     return false;
   }
 
+  bool _looksLikeBundledAssetDllPath(String configuredPath, String fileName) {
+    final raw = configuredPath.trim();
+    if (raw.isEmpty) return false;
+    if (_basename(raw).toLowerCase() != fileName.toLowerCase()) return false;
+
+    final normalizedRaw = _normalizePath(raw);
+    final needle = _normalizePath(
+      _joinPath(['data', 'flutter_assets', 'assets', 'dlls', fileName]),
+    );
+    return normalizedRaw.contains(needle);
+  }
+
+  bool _isBundledAssetDllFromCurrentInstall(
+    String configuredPath,
+    String fileName,
+  ) {
+    if (!_looksLikeBundledAssetDllPath(configuredPath, fileName)) return false;
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final normalizedExeDir = _normalizePath(exeDir);
+    final normalizedPath = _normalizePath(configuredPath);
+    final prefix = normalizedExeDir.endsWith('/')
+        ? normalizedExeDir
+        : '$normalizedExeDir/';
+    return normalizedPath.startsWith(prefix);
+  }
+
   Future<String?> _ensureBundledDll({
     required String bundledAssetPath,
     required String bundledFileName,
     required String label,
+    bool overwriteFallbackCopy = false,
   }) async {
     final installedPath = _resolveBundledAssetFilePath(bundledAssetPath);
     if (installedPath != null) return installedPath;
@@ -1310,7 +1529,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       await dllDir.create(recursive: true);
       final outputPath = _joinPath([dllDir.path, bundledFileName]);
       final outputFile = File(outputPath);
-      if (!outputFile.existsSync()) {
+      if (overwriteFallbackCopy || !outputFile.existsSync()) {
         final bytes = await rootBundle.load(bundledAssetPath);
         await outputFile.writeAsBytes(
           bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
@@ -1327,7 +1546,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
-  Future<void> _applyBundledDllDefaults() async {
+  Future<void> _applyBundledDllDefaults({
+    bool forceResetBundledPaths = false,
+  }) async {
     var nextSettings = _settings;
     var changed = false;
 
@@ -1335,19 +1556,40 @@ class _LauncherScreenState extends State<LauncherScreen>
       bundledAssetPath: 'assets/dlls/Magnesium.dll',
       bundledFileName: 'Magnesium.dll',
       label: 'game server',
+      overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledGameServerPath != null &&
         bundledGameServerPath.trim().isNotEmpty) {
       final configuredGameServer = _settings.gameServerFilePath.trim();
+      final gameServerExists =
+          configuredGameServer.isNotEmpty &&
+          File(configuredGameServer).existsSync();
+      final looksBundledGameServer = _looksLikeBundledAssetDllPath(
+        configuredGameServer,
+        'Magnesium.dll',
+      );
+      final bundledFromCurrentInstall = _isBundledAssetDllFromCurrentInstall(
+        configuredGameServer,
+        'Magnesium.dll',
+      );
       final shouldAdoptBundledGameServer =
           configuredGameServer.isEmpty ||
-          _isManagedBundledDllPath(configuredGameServer, 'Magnesium.dll');
+          _isManagedBundledDllPath(configuredGameServer, 'Magnesium.dll') ||
+          (configuredGameServer.isNotEmpty && !gameServerExists) ||
+          (looksBundledGameServer &&
+              (!bundledFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledGameServer) {
         nextSettings = nextSettings.copyWith(
           gameServerFilePath: bundledGameServerPath,
         );
         _gameServerFileController.text = bundledGameServerPath;
         changed = true;
+        if (configuredGameServer.isNotEmpty && !gameServerExists) {
+          _log(
+            'settings',
+            'Game server DLL missing at $configuredGameServer. Restored bundled default.',
+          );
+        }
       }
     }
 
@@ -1355,19 +1597,50 @@ class _LauncherScreenState extends State<LauncherScreen>
       bundledAssetPath: 'assets/dlls/LargePakPatch.dll',
       bundledFileName: 'LargePakPatch.dll',
       label: 'large pak patcher',
+      overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledLargePakPath != null && bundledLargePakPath.trim().isNotEmpty) {
       final configuredLargePak = _settings.largePakPatcherFilePath.trim();
+      final largePakExists =
+          configuredLargePak.isNotEmpty &&
+          File(configuredLargePak).existsSync();
+      final looksBundledLargePak =
+          _looksLikeBundledAssetDllPath(
+            configuredLargePak,
+            'LargePakPatch.dll',
+          ) ||
+          _looksLikeBundledAssetDllPath(
+            configuredLargePak,
+            'LargePakPatcher.dll',
+          );
+      final bundledLargePakFromCurrentInstall =
+          _isBundledAssetDllFromCurrentInstall(
+            configuredLargePak,
+            'LargePakPatch.dll',
+          ) ||
+          _isBundledAssetDllFromCurrentInstall(
+            configuredLargePak,
+            'LargePakPatcher.dll',
+          );
       final shouldAdoptBundledLargePak =
           configuredLargePak.isEmpty ||
           _isManagedBundledDllPath(configuredLargePak, 'LargePakPatch.dll') ||
-          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatcher.dll');
+          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatcher.dll') ||
+          (configuredLargePak.isNotEmpty && !largePakExists) ||
+          (looksBundledLargePak &&
+              (!bundledLargePakFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledLargePak) {
         nextSettings = nextSettings.copyWith(
           largePakPatcherFilePath: bundledLargePakPath,
         );
         _largePakPatcherController.text = bundledLargePakPath;
         changed = true;
+        if (configuredLargePak.isNotEmpty && !largePakExists) {
+          _log(
+            'settings',
+            'Large pak patcher DLL missing at $configuredLargePak. Restored bundled default.',
+          );
+        }
       }
     }
 
@@ -1375,18 +1648,36 @@ class _LauncherScreenState extends State<LauncherScreen>
       bundledAssetPath: 'assets/dlls/memory.dll',
       bundledFileName: 'memory.dll',
       label: 'memory patcher',
+      overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledMemoryPath != null && bundledMemoryPath.trim().isNotEmpty) {
       final configuredMemory = _settings.memoryPatcherPath.trim();
+      final memoryExists =
+          configuredMemory.isNotEmpty && File(configuredMemory).existsSync();
+      final looksBundledMemory = _looksLikeBundledAssetDllPath(
+        configuredMemory,
+        'memory.dll',
+      );
+      final bundledMemoryFromCurrentInstall =
+          _isBundledAssetDllFromCurrentInstall(configuredMemory, 'memory.dll');
       final shouldAdoptBundledMemory =
           configuredMemory.isEmpty ||
-          _isManagedBundledDllPath(configuredMemory, 'memory.dll');
+          _isManagedBundledDllPath(configuredMemory, 'memory.dll') ||
+          (configuredMemory.isNotEmpty && !memoryExists) ||
+          (looksBundledMemory &&
+              (!bundledMemoryFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledMemory) {
         nextSettings = nextSettings.copyWith(
           memoryPatcherPath: bundledMemoryPath,
         );
         _memoryPatcherController.text = bundledMemoryPath;
         changed = true;
+        if (configuredMemory.isNotEmpty && !memoryExists) {
+          _log(
+            'settings',
+            'Memory patcher DLL missing at $configuredMemory. Restored bundled default.',
+          );
+        }
       }
     }
 
@@ -1394,18 +1685,36 @@ class _LauncherScreenState extends State<LauncherScreen>
       bundledAssetPath: 'assets/dlls/Tellurium.dll',
       bundledFileName: 'Tellurium.dll',
       label: 'authentication patcher',
+      overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledAuthPath != null && bundledAuthPath.trim().isNotEmpty) {
       final configuredAuth = _settings.authenticationPatcherPath.trim();
+      final authExists =
+          configuredAuth.isNotEmpty && File(configuredAuth).existsSync();
+      final looksBundledAuth = _looksLikeBundledAssetDllPath(
+        configuredAuth,
+        'Tellurium.dll',
+      );
+      final bundledAuthFromCurrentInstall =
+          _isBundledAssetDllFromCurrentInstall(configuredAuth, 'Tellurium.dll');
       final shouldAdoptBundledAuth =
           configuredAuth.isEmpty ||
-          _isManagedBundledDllPath(configuredAuth, 'Tellurium.dll');
+          _isManagedBundledDllPath(configuredAuth, 'Tellurium.dll') ||
+          (configuredAuth.isNotEmpty && !authExists) ||
+          (looksBundledAuth &&
+              (!bundledAuthFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledAuth) {
         nextSettings = nextSettings.copyWith(
           authenticationPatcherPath: bundledAuthPath,
         );
         _authenticationPatcherController.text = bundledAuthPath;
         changed = true;
+        if (configuredAuth.isNotEmpty && !authExists) {
+          _log(
+            'settings',
+            'Authentication patcher DLL missing at $configuredAuth. Restored bundled default.',
+          );
+        }
       }
     }
 
@@ -1413,18 +1722,36 @@ class _LauncherScreenState extends State<LauncherScreen>
       bundledAssetPath: 'assets/dlls/console.dll',
       bundledFileName: 'console.dll',
       label: 'unreal engine patcher',
+      overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledUnrealPath != null && bundledUnrealPath.trim().isNotEmpty) {
       final configuredUnreal = _settings.unrealEnginePatcherPath.trim();
+      final unrealExists =
+          configuredUnreal.isNotEmpty && File(configuredUnreal).existsSync();
+      final looksBundledUnreal = _looksLikeBundledAssetDllPath(
+        configuredUnreal,
+        'console.dll',
+      );
+      final bundledUnrealFromCurrentInstall =
+          _isBundledAssetDllFromCurrentInstall(configuredUnreal, 'console.dll');
       final shouldAdoptBundledUnreal =
           configuredUnreal.isEmpty ||
-          _isManagedBundledDllPath(configuredUnreal, 'console.dll');
+          _isManagedBundledDllPath(configuredUnreal, 'console.dll') ||
+          (configuredUnreal.isNotEmpty && !unrealExists) ||
+          (looksBundledUnreal &&
+              (!bundledUnrealFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledUnreal) {
         nextSettings = nextSettings.copyWith(
           unrealEnginePatcherPath: bundledUnrealPath,
         );
         _unrealEnginePatcherController.text = bundledUnrealPath;
         changed = true;
+        if (configuredUnreal.isNotEmpty && !unrealExists) {
+          _log(
+            'settings',
+            'Unreal engine patcher DLL missing at $configuredUnreal. Restored bundled default.',
+          );
+        }
       }
     }
 
@@ -1444,8 +1771,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (decoded is Map<String, dynamic>) {
         _installState = LauncherInstallState.fromJson(decoded);
       } else if (decoded is Map) {
-        _installState =
-            LauncherInstallState.fromJson(decoded.cast<String, dynamic>());
+        _installState = LauncherInstallState.fromJson(
+          decoded.cast<String, dynamic>(),
+        );
       } else {
         _installState = LauncherInstallState.defaults();
       }
@@ -1968,6 +2296,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _checkForLauncherUpdates({required bool silent}) async {
     if (_checkingLauncherUpdate) return;
+    if (_launcherUpdateDialogVisible) return;
     _checkingLauncherUpdate = true;
     try {
       final info = await LauncherUpdateService.checkForUpdate(
@@ -2092,7 +2421,10 @@ class _LauncherScreenState extends State<LauncherScreen>
                                       border: Border(
                                         top: BorderSide(
                                           width: 2.0,
-                                          color: _onSurface(dialogContext, 0.12),
+                                          color: _onSurface(
+                                            dialogContext,
+                                            0.12,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -2358,180 +2690,547 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<void> _showLauncherUpdateDialog(LauncherUpdateInfo info) async {
-    await showGeneralDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
-      barrierColor: Colors.transparent,
-      transitionDuration: const Duration(milliseconds: 240),
-      pageBuilder: (dialogContext, animation, secondaryAnimation) {
-        final notes = info.notes?.trim() ?? '';
-        return SafeArea(
-          child: Center(
-            child: Material(
-              type: MaterialType.transparency,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 620),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: _dialogSurfaceColor(dialogContext),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: _dialogShadowColor(dialogContext),
-                        blurRadius: 30,
-                        offset: const Offset(0, 16),
+    if (_launcherUpdateDialogVisible) return;
+    _launcherUpdateDialogVisible = true;
+    try {
+      final notes = info.notes?.trim() ?? '';
+      var updating = false;
+      var statusMessage = 'Preparing download...';
+      double? progress;
+      String? error;
+
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 240),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: StatefulBuilder(
+                  builder: (context, setDialogState) {
+                    Future<void> startUpdate() async {
+                      if (updating) return;
+                      setDialogState(() {
+                        updating = true;
+                        error = null;
+                        progress = null;
+                        statusMessage = 'Preparing download...';
+                      });
+
+                      try {
+                        await _downloadAndLaunchLauncherUpdate(
+                          info,
+                          onStatus: (message, nextProgress) {
+                            if (!mounted) return;
+                            setDialogState(() {
+                              statusMessage = message;
+                              progress = nextProgress;
+                            });
+                          },
+                        );
+                        if (!dialogContext.mounted) return;
+                        Navigator.of(dialogContext).pop();
+                      } catch (err) {
+                        setDialogState(() {
+                          error = 'Update failed: $err';
+                          updating = false;
+                          progress = null;
+                        });
+                      }
+                    }
+
+                    final showProgress = updating;
+                    final progressValue = progress;
+                    final isIndeterminate =
+                        progressValue == null ||
+                        progressValue <= 0 ||
+                        progressValue >= 1;
+
+                    return ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 620),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: _dialogSurfaceColor(dialogContext),
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: _onSurface(dialogContext, 0.1),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _dialogShadowColor(dialogContext),
+                              blurRadius: 30,
+                              offset: const Offset(0, 16),
+                            ),
+                          ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Update available',
+                                style: TextStyle(
+                                  fontSize: 25,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(dialogContext, 0.95),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  _buildVersionTag(
+                                    dialogContext,
+                                    label: _versionLabel(info.currentVersion),
+                                    accent: const Color(0xFFDC3545),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'to',
+                                    style: TextStyle(
+                                      color: _onSurface(dialogContext, 0.7),
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildVersionTag(
+                                    dialogContext,
+                                    label: _versionLabel(info.latestVersion),
+                                    accent: const Color(0xFF16C47F),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    dialogContext,
+                                    darkAlpha: 0.08,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(dialogContext, 0.1),
+                                  ),
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      Icons.info_outline_rounded,
+                                      size: 18,
+                                      color: _onSurface(dialogContext, 0.82),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        'ATLAS Link will download the latest setup and launch it. The launcher will close so the update can install.',
+                                        style: TextStyle(
+                                          color: _onSurface(
+                                            dialogContext,
+                                            0.78,
+                                          ),
+                                          fontWeight: FontWeight.w600,
+                                          height: 1.3,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (notes.isNotEmpty) ...[
+                                const SizedBox(height: 14),
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxHeight: 260,
+                                  ),
+                                  child: SingleChildScrollView(
+                                    child: MarkdownBody(
+                                      data: notes,
+                                      styleSheet:
+                                          MarkdownStyleSheet.fromTheme(
+                                            Theme.of(dialogContext),
+                                          ).copyWith(
+                                            p: TextStyle(
+                                              color: _onSurface(
+                                                dialogContext,
+                                                0.9,
+                                              ),
+                                              height: 1.35,
+                                            ),
+                                            horizontalRuleDecoration:
+                                                BoxDecoration(
+                                                  border: Border(
+                                                    top: BorderSide(
+                                                      width: 2.0,
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.12,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                          ),
+                                      onTapLink: (text, href, title) async {
+                                        if (href == null ||
+                                            href.trim().isEmpty) {
+                                          return;
+                                        }
+                                        await _openUrl(href);
+                                      },
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (showProgress) ...[
+                                const SizedBox(height: 14),
+                                LinearProgressIndicator(
+                                  value: isIndeterminate ? null : progressValue,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  statusMessage,
+                                  style: TextStyle(
+                                    color: _onSurface(dialogContext, 0.82),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                              if (error != null) ...[
+                                const SizedBox(height: 12),
+                                Text(
+                                  error!,
+                                  style: const TextStyle(
+                                    color: Color(0xFFDC3545),
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 14),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  TextButton(
+                                    onPressed: updating
+                                        ? null
+                                        : () =>
+                                              Navigator.of(dialogContext).pop(),
+                                    child: const Text('Later'),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  if (notes.isNotEmpty)
+                                    TextButton(
+                                      onPressed: updating
+                                          ? null
+                                          : () async {
+                                              Navigator.of(dialogContext).pop();
+                                              if (!mounted) return;
+                                              await _showLauncherNotesDialog(
+                                                version: info.latestVersion,
+                                                notes: notes,
+                                              );
+                                            },
+                                      child: const Text('Update notes'),
+                                    ),
+                                  const SizedBox(width: 8),
+                                  FilledButton(
+                                    onPressed: updating ? null : startUpdate,
+                                    child: Text(
+                                      updating ? 'Updating...' : 'Update now',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Update available',
-                          style: TextStyle(
-                            fontSize: 25,
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.95),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Row(
-                          children: [
-                            _buildVersionTag(
-                              dialogContext,
-                              label: _versionLabel(info.currentVersion),
-                              accent: const Color(0xFFDC3545),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              'to',
-                              style: TextStyle(
-                                color: _onSurface(dialogContext, 0.7),
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            _buildVersionTag(
-                              dialogContext,
-                              label: _versionLabel(info.latestVersion),
-                              accent: const Color(0xFF16C47F),
-                            ),
-                          ],
-                        ),
-                        if (notes.isNotEmpty) ...[
-                          const SizedBox(height: 14),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 260),
-                            child: SingleChildScrollView(
-                              child: MarkdownBody(
-                                data: notes,
-                                 styleSheet:
-                                     MarkdownStyleSheet.fromTheme(
-                                       Theme.of(dialogContext),
-                                     ).copyWith(
-                                       p: TextStyle(
-                                         color: _onSurface(dialogContext, 0.9),
-                                         height: 1.35,
-                                       ),
-                                       horizontalRuleDecoration: BoxDecoration(
-                                         border: Border(
-                                           top: BorderSide(
-                                             width: 2.0,
-                                             color:
-                                                 _onSurface(dialogContext, 0.12),
-                                           ),
-                                         ),
-                                       ),
-                                     ),
-                                 onTapLink: (text, href, title) async {
-                                   if (href == null || href.trim().isEmpty) {
-                                     return;
-                                   }
-                                  await _openUrl(href);
-                                },
-                              ),
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 14),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            TextButton(
-                              onPressed: () =>
-                                  Navigator.of(dialogContext).pop(),
-                              child: const Text('Later'),
-                            ),
-                            const SizedBox(width: 8),
-                            if (notes.isNotEmpty)
-                              TextButton(
-                                onPressed: () async {
-                                  Navigator.of(dialogContext).pop();
-                                  if (!mounted) return;
-                                  await _showLauncherNotesDialog(
-                                    version: info.latestVersion,
-                                    notes: notes,
-                                  );
-                                },
-                                child: const Text('Update notes'),
-                              ),
-                            const SizedBox(width: 8),
-                            FilledButton(
-                              onPressed: () async {
-                                Navigator.of(dialogContext).pop();
-                                await _openUrl(info.downloadUrl);
-                              },
-                              child: const Text('Update now'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
-          ),
-        );
-      },
-      transitionBuilder: (dialogContext, animation, _, child) {
-        final curved = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-        );
-        return Stack(
-          children: [
-            Positioned.fill(
-              child: _settings.popupBackgroundBlurEnabled
-                  ? BackdropFilter(
-                      filter: ImageFilter.blur(
-                        sigmaX: 3.2 * curved.value,
-                        sigmaY: 3.2 * curved.value,
-                      ),
-                      child: Container(
+          );
+        },
+        transitionBuilder: (dialogContext, animation, _, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: _settings.popupBackgroundBlurEnabled
+                    ? BackdropFilter(
+                        filter: ImageFilter.blur(
+                          sigmaX: 3.2 * curved.value,
+                          sigmaY: 3.2 * curved.value,
+                        ),
+                        child: Container(
+                          color: _dialogBarrierColor(
+                            dialogContext,
+                            curved.value,
+                          ),
+                        ),
+                      )
+                    : Container(
                         color: _dialogBarrierColor(dialogContext, curved.value),
                       ),
-                    )
-                  : Container(
-                      color: _dialogBarrierColor(dialogContext, curved.value),
-                    ),
-            ),
-            FadeTransition(
-              opacity: curved,
-              child: ScaleTransition(
-                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
-                child: child,
               ),
-            ),
-          ],
+              FadeTransition(
+                opacity: curved,
+                child: ScaleTransition(
+                  scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                  child: child,
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      _launcherUpdateDialogVisible = false;
+    }
+  }
+
+  Future<void> _downloadAndLaunchLauncherUpdate(
+    LauncherUpdateInfo info, {
+    required void Function(String message, double? progress) onStatus,
+  }) async {
+    final downloadUrl = info.downloadUrl.trim();
+    if (downloadUrl.isEmpty) throw 'Update download URL unavailable.';
+
+    if (!Platform.isWindows) {
+      onStatus('Opening download page...', null);
+      await _openUrl(downloadUrl);
+      return;
+    }
+
+    final tempDir = _launcherUpdateInstallerDirectory();
+    var keepInstallerFolder = false;
+    var downloadedInstaller = false;
+    onStatus('Preparing download...', null);
+    try {
+      // Avoid racing a previous cleanup attempt (for example right after an update
+      // where the installer is still holding locks).
+      if (_launcherUpdateInstallerCleanupWatcherActive) {
+        onStatus('Cleaning previous installer cache...', null);
+        for (
+          var attempt = 0;
+          attempt < 240 && _launcherUpdateInstallerCleanupWatcherActive;
+          attempt++
+        ) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+      }
+
+      await tempDir.parent.create(recursive: true);
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+      await tempDir.create(recursive: true);
+
+      final installerUrl = downloadUrl;
+      final initialUri = Uri.tryParse(installerUrl);
+      final initialLowerPath = (initialUri?.path ?? installerUrl).toLowerCase();
+      var extension = initialLowerPath.endsWith('.msi')
+          ? '.msi'
+          : initialLowerPath.endsWith('.exe')
+          ? '.exe'
+          : '.exe';
+      var installerFile = File(
+        _joinPath([tempDir.path, 'atlas-link-setup$extension']),
+      );
+
+      const maxAttempts = 3;
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+          onStatus(
+            'Retrying download... (attempt $attempt/$maxAttempts)',
+            null,
+          );
+        }
+        try {
+          await _downloadToFile(
+            installerUrl,
+            installerFile,
+            onProgress: (receivedBytes, totalBytes) {
+              if (totalBytes == null || totalBytes <= 0) {
+                onStatus(
+                  'Downloading installer... ${_formatByteSize(receivedBytes)}',
+                  null,
+                );
+                return;
+              }
+              final progress = (receivedBytes / totalBytes).clamp(0.0, 1.0);
+              onStatus(
+                'Downloading installer... ${_formatByteSize(receivedBytes)} / ${_formatByteSize(totalBytes)}',
+                progress.toDouble(),
+              );
+            },
+          );
+          break;
+        } catch (error) {
+          _log('launcher', 'Update download attempt $attempt failed: $error');
+          if (attempt >= maxAttempts) rethrow;
+          await Future<void>.delayed(Duration(seconds: 2 * attempt));
+        }
+      }
+
+      final detectedExtension = await _detectWindowsInstallerExtension(
+        installerFile,
+      );
+      if (detectedExtension == null) {
+        throw 'Downloaded update is not a Windows installer.';
+      }
+      if (detectedExtension != extension) {
+        _log(
+          'launcher',
+          'Installer type mismatch: expected $extension but detected $detectedExtension. Renaming.',
         );
-      },
-    );
+        final corrected = File(
+          _joinPath([tempDir.path, 'atlas-link-setup$detectedExtension']),
+        );
+        try {
+          if (await corrected.exists()) await corrected.delete();
+        } catch (_) {
+          // Ignore pre-clean failures.
+        }
+        try {
+          installerFile = await installerFile.rename(corrected.path);
+          extension = detectedExtension;
+        } catch (_) {
+          try {
+            await installerFile.copy(corrected.path);
+            installerFile = corrected;
+            extension = detectedExtension;
+          } catch (_) {
+            // Keep original file name; still use the detected type for launch.
+            extension = detectedExtension;
+          }
+        }
+      }
+
+      downloadedInstaller = true;
+
+      onStatus('Launching setup...', 1);
+      _log('launcher', 'Launching update installer: ${installerFile.path}');
+
+      if (extension == '.msi') {
+        await Process.start(
+          'msiexec',
+          ['/i', installerFile.path],
+          runInShell: true,
+          mode: ProcessStartMode.detached,
+        );
+      } else {
+        await Process.start(
+          installerFile.path,
+          const <String>[],
+          runInShell: true,
+          mode: ProcessStartMode.detached,
+        );
+      }
+
+      keepInstallerFolder = true;
+
+      // Best-effort cleanup helper; the cache is also cleared on next launch.
+      await _spawnLauncherUpdateCleanupHelper(
+        installerFilePath: installerFile.path,
+        installerDirPath: tempDir.path,
+      );
+
+      exit(0);
+    } catch (error) {
+      if (!downloadedInstaller) {
+        try {
+          onStatus(
+            'Unable to download installer. Opening download page...',
+            null,
+          );
+          await _openUrl(downloadUrl);
+          return;
+        } catch (_) {
+          // Ignore browser launch failures.
+        }
+      }
+      rethrow;
+    } finally {
+      try {
+        if (!keepInstallerFolder && await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      } catch (_) {
+        // Ignore cleanup failures.
+      }
+    }
+  }
+
+  Future<void> _spawnLauncherUpdateCleanupHelper({
+    required String installerFilePath,
+    required String installerDirPath,
+  }) async {
+    if (!Platform.isWindows) return;
+    final installerPath = installerFilePath.trim();
+    final dirPath = installerDirPath.trim();
+    if (installerPath.isEmpty || dirPath.isEmpty) return;
+
+    String psEscape(String value) => value.replaceAll("'", "''");
+
+    final command =
+        '''
+\$ErrorActionPreference = 'SilentlyContinue'
+\$installer = '${psEscape(installerPath)}'
+\$dir = '${psEscape(dirPath)}'
+for (\$i = 0; \$i -lt 180; \$i++) {
+  try {
+    if (Test-Path -LiteralPath \$installer) {
+      Remove-Item -LiteralPath \$installer -Force -ErrorAction Stop
+    }
+  } catch {}
+  try {
+    if (Test-Path -LiteralPath \$dir) {
+      Remove-Item -LiteralPath \$dir -Recurse -Force -ErrorAction Stop
+    }
+  } catch {}
+  if (-not (Test-Path -LiteralPath \$installer) -and -not (Test-Path -LiteralPath \$dir)) { break }
+  Start-Sleep -Seconds 5
+}
+''';
+
+    final systemRoot = Platform.environment['SystemRoot'];
+    final powershellExe = systemRoot == null || systemRoot.trim().isEmpty
+        ? 'powershell'
+        : _joinPath([
+            systemRoot,
+            'System32',
+            'WindowsPowerShell',
+            'v1.0',
+            'powershell.exe',
+          ]);
+
+    try {
+      await Process.start(
+        powershellExe,
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+        runInShell: true,
+        mode: ProcessStartMode.detached,
+      );
+    } catch (error) {
+      _log('launcher', 'Failed to spawn update cleanup helper: $error');
+    }
   }
 
   void _attachProcessLogs(
@@ -2715,7 +3414,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
 
       final actionLower = text.toLowerCase();
-      final isAction = actionLower.contains('inject') ||
+      final isAction =
+          actionLower.contains('inject') ||
           actionLower.contains('starting') ||
           actionLower.contains('launching') ||
           actionLower.contains('preparing') ||
@@ -2855,8 +3555,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   /// Marker that aligns with the client loading screen completing.
-  static const _clientLoadingCompleteMarker =
-      'UI.State.Startup.SubgameSelect';
+  static const _clientLoadingCompleteMarker = 'UI.State.Startup.SubgameSelect';
 
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed) return;
@@ -2887,7 +3586,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       unawaited(_performPostLoginInjections(state));
     }
 
-
     // Inject the large pak patcher for the client after the loading screen.
     if (!state.host &&
         !state.largePakInjected &&
@@ -2904,15 +3602,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     // (like the game server DLL) happen when the client is fully initialized.
     await Future.delayed(const Duration(milliseconds: 900));
     if (state.killed) return;
-
-    if (!state.host) {
-      if (_gameServerInstance == null) {
-        await _killExistingProcessByPort(
-          _effectiveGameServerPort(),
-          exceptPid: state.pid,
-        );
-      }
-    }
 
     if (state.host) {
       // For the host, inject memory patcher now (post-login), then inject
@@ -3012,7 +3701,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (optionalFailure != null) {
         _setUiStatus(
           host: false,
-          message: 'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
+          message:
+              'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
           severity: _UiStatusSeverity.warning,
         );
         return;
@@ -3056,7 +3746,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (optionalFailure != null) {
       _setUiStatus(
         host: false,
-        message: 'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
+        message:
+            'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
         severity: _UiStatusSeverity.warning,
       );
       return;
@@ -3068,7 +3759,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       severity: _UiStatusSeverity.success,
     );
   }
-
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
     if (!Platform.isWindows) return;
@@ -3115,8 +3805,11 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   void _handleFortniteExit(_FortniteProcessState state, int exitCode) {
     state.killAuxiliary();
-    if (!state.host) {
-      state.child?.killAll();
+    if (!state.host && state.child != null) {
+      // Back-compat: older sessions used the child link to decide when to stop
+      // automatic hosting. Preserve that behavior by marking hosting as
+      // session-linked.
+      _stopHostingWhenNoClientsRemain = true;
     }
 
     if (state.host) {
@@ -3136,6 +3829,12 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     final tag = state.host ? 'gameserver' : 'game';
     _log(tag, 'Fortnite exited with code $exitCode.');
+
+    if (!state.host) {
+      // If hosting was started for this session, stop it only once every client
+      // has exited (multi-launch can have more than one client alive).
+      unawaited(_stopSessionLinkedHostingIfNeeded());
+    }
 
     if (state.host && !state.killed && _settings.hostAutoRestartEnabled) {
       _setUiStatus(
@@ -3164,6 +3863,64 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
     } else {
       _clearUiStatus(host: state.host);
+    }
+  }
+
+  Future<void> _stopSessionLinkedHostingIfNeeded() async {
+    if (!_stopHostingWhenNoClientsRemain) return;
+    if (_hasRunningGameClient) return;
+    if (_stoppingSessionLinkedHosting) return;
+
+    final instance = _gameServerInstance;
+    final process = _gameServerProcess;
+    if (instance == null && process == null) {
+      _stopHostingWhenNoClientsRemain = false;
+      return;
+    }
+
+    _stoppingSessionLinkedHosting = true;
+    try {
+      _setUiStatus(
+        host: true,
+        message: 'Stopping game server...',
+        severity: _UiStatusSeverity.info,
+      );
+
+      final pids = <int>{
+        if (instance != null) instance.pid,
+        if (instance?.launcherPid != null) instance!.launcherPid!,
+        if (instance?.eacPid != null) instance!.eacPid!,
+        if (process != null) process.pid,
+      };
+
+      if (instance != null) {
+        instance.killAll();
+      } else if (process != null) {
+        _FortniteProcessState._killPidSafe(process.pid);
+      }
+
+      for (final pid in pids) {
+        try {
+          await Process.run(
+            'taskkill',
+            ['/F', '/PID', '$pid'],
+            runInShell: true,
+          );
+        } catch (_) {
+          // Ignore already-closed processes.
+        }
+      }
+
+      _gameServerInstance = null;
+      _gameServerProcess = null;
+      _stopHostingWhenNoClientsRemain = false;
+      _clearUiStatus(host: true);
+      _log(
+        'gameserver',
+        'Session-linked hosting stopped (no clients remain).',
+      );
+    } finally {
+      _stoppingSessionLinkedHosting = false;
     }
   }
 
@@ -3223,11 +3980,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final msg =
         'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}.';
     if (toastOnFailure && mounted) _toast(msg);
-    _setUiStatus(
-      host: host,
-      message: msg,
-      severity: _UiStatusSeverity.error,
-    );
+    _setUiStatus(host: host, message: msg, severity: _UiStatusSeverity.error);
     return false;
   }
 
@@ -3274,25 +4027,34 @@ class _LauncherScreenState extends State<LauncherScreen>
         _clearUiStatus(host: false);
         return;
       }
-      if (gameServerPrompt == _GameServerPromptAction.start) {
-        if (mounted) {
-          setState(() => _gameServerLaunching = true);
-        } else {
-          _gameServerLaunching = true;
-        }
+       if (gameServerPrompt == _GameServerPromptAction.start) {
+         if (mounted) {
+           setState(() => _gameServerLaunching = true);
+         } else {
+           _gameServerLaunching = true;
+         }
         _setUiStatus(
           host: true,
           message: 'Starting game server...',
           severity: _UiStatusSeverity.info,
         );
-        linkedHosting = await _startImplicitGameServer(version);
-        if (!mounted) return;
-        setState(() => _gameServerLaunching = false);
-        if (linkedHosting == null) {
-          _setUiStatus(
-            host: true,
-            message: 'Failed to start game server.',
-            severity: _UiStatusSeverity.warning,
+         linkedHosting = await _startImplicitGameServer(version);
+         if (!mounted) return;
+         setState(() => _gameServerLaunching = false);
+         if (linkedHosting != null) {
+           _stopHostingWhenNoClientsRemain = true;
+           _log(
+             'gameserver',
+             'Session-linked hosting enabled (will stop when all clients close).',
+           );
+         } else {
+           _stopHostingWhenNoClientsRemain = false;
+         }
+         if (linkedHosting == null) {
+           _setUiStatus(
+             host: true,
+             message: 'Failed to start game server.',
+             severity: _UiStatusSeverity.warning,
           );
         }
       }
@@ -3449,6 +4211,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<String?> _promptAdditionalClientUsername() async {
     if (!mounted) return null;
     final usedNames = _activeGameClientNames();
+    final hostName = _gameServerInstance?.clientName.trim() ?? '';
+    if (hostName.isNotEmpty) {
+      usedNames.add(hostName.toLowerCase());
+    }
     var suffix = _runningGameClients().length + 1;
     var suggested = 'client$suffix';
     while (usedNames.contains(
@@ -3708,6 +4474,11 @@ class _LauncherScreenState extends State<LauncherScreen>
       return;
     }
 
+    // Manual hosting (Host button) should not auto-stop when clients close.
+    if (!triggeredByAutoRestart) {
+      _stopHostingWhenNoClientsRemain = false;
+    }
+
     if (mounted) {
       setState(() => _gameServerLaunching = true);
     } else {
@@ -3872,319 +4643,302 @@ class _LauncherScreenState extends State<LauncherScreen>
               return KeyEventResult.ignored;
             },
             child: StatefulBuilder(
-                  builder: (dialogContext, setDialogState) {
-                    return SafeArea(
-                      child: Center(
-                        child: Material(
-                          type: MaterialType.transparency,
-                          child: Container(
-                            constraints: BoxConstraints(
-                              maxWidth: 760,
-                              maxHeight: maxDialogHeight,
-                            ),
-                            margin: const EdgeInsets.symmetric(horizontal: 24),
-                            padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
-                            decoration: BoxDecoration(
-                              color: _dialogSurfaceColor(dialogContext),
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(
-                                color: _onSurface(dialogContext, 0.12),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: _dialogShadowColor(dialogContext),
-                                  blurRadius: 34,
-                                  offset: const Offset(0, 18),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Launch Options',
-                                  style: TextStyle(
-                                    color: _onSurface(dialogContext, 0.96),
-                                    fontSize: 36,
-                                    fontWeight: FontWeight.w800,
-                                    height: 1.02,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Customize launch arguments for Play and Host, plus host behavior settings.',
-                                  style: TextStyle(
-                                    color: _onSurface(dialogContext, 0.78),
-                                    fontSize: 15,
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                Flexible(
-                                  fit: FlexFit.loose,
-                                  child: Scrollbar(
-                                    controller: dialogScrollController,
-                                    thumbVisibility: true,
-                                    child: SingleChildScrollView(
-                                      controller: dialogScrollController,
-                                      padding: EdgeInsets.zero,
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          settingTile(
-                                            icon:
-                                                Icons.play_circle_outline_rounded,
-                                            title: 'Play Launch Arguments',
-                                            subtitle:
-                                                'Additional arguments to use with the Launch button',
-                                            trailing: SizedBox(
-                                              width: 220,
-                                              child: TextField(
-                                                controller:
-                                                    playLaunchArgsController,
-                                                focusNode:
-                                                    playLaunchArgsFocusNode,
-                                                keyboardType: TextInputType.text,
-                                                decoration: InputDecoration(
-                                                  isDense: true,
-                                                  hintText: 'Arguments...',
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 12,
-                                                        vertical: 10,
-                                                      ),
-                                                  border: OutlineInputBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.tune_rounded,
-                                            title: 'Host Launch Arguments',
-                                            subtitle:
-                                                'Additional arguments to use with the Host button',
-                                            trailing: SizedBox(
-                                              width: 220,
-                                              child: TextField(
-                                                controller: launchArgsController,
-                                                focusNode:
-                                                    hostLaunchArgsFocusNode,
-                                                keyboardType: TextInputType.text,
-                                                decoration: InputDecoration(
-                                                  isDense: true,
-                                                  hintText: 'Arguments...',
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 12,
-                                                        vertical: 10,
-                                                      ),
-                                                  border: OutlineInputBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.badge_rounded,
-                                            title: 'Host Client Name',
-                                            subtitle:
-                                                'Username used for the hosted client',
-                                            trailing: SizedBox(
-                                              width: 220,
-                                              child: TextField(
-                                                controller:
-                                                    hostUsernameController,
-                                                focusNode: hostUsernameFocusNode,
-                                                keyboardType: TextInputType.text,
-                                                decoration: InputDecoration(
-                                                  isDense: true,
-                                                  hintText: 'host',
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 12,
-                                                        vertical: 10,
-                                                      ),
-                                                  border: OutlineInputBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.web_asset_off_rounded,
-                                            title: 'Headless',
-                                            subtitle:
-                                                'Disables game rendering to save resources',
-                                            trailing: Switch(
-                                              value: headless,
-                                              onChanged: (value) {
-                                                setDialogState(
-                                                  () => headless = value,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.groups_rounded,
-                                            title: 'Multi-Client Launching',
-                                            subtitle:
-                                                'Allows Launch to open additional game clients while one is already running',
-                                            trailing: Switch(
-                                              value: allowMultipleClients,
-                                              onChanged: (value) {
-                                                setDialogState(
-                                                  () =>
-                                                      allowMultipleClients =
-                                                          value,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.cloud_rounded,
-                                            title: 'Launch Backend with Game',
-                                            subtitle:
-                                                'Start ATLAS Backend when launching a session',
-                                            trailing: Switch(
-                                              value: launchBackend,
-                                              onChanged: (value) {
-                                                setDialogState(
-                                                  () => launchBackend = value,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.folder_zip_rounded,
-                                            title: 'Large Pak Patcher',
-                                            subtitle:
-                                                'Inject Large Pak Patcher after the game server starts',
-                                            trailing: Switch(
-                                              value: largePakPatcherEnabled,
-                                              onChanged: (value) {
-                                                setDialogState(
-                                                  () => largePakPatcherEnabled =
-                                                          value,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.restart_alt_rounded,
-                                            title: 'Automatic Restart',
-                                            subtitle:
-                                                'Automatically restarts the game server when it exits',
-                                            trailing: Switch(
-                                              value: autoRestart,
-                                              onChanged: (value) {
-                                                setDialogState(
-                                                  () => autoRestart = value,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          settingTile(
-                                            icon: Icons.numbers_rounded,
-                                            title: 'Port',
-                                            subtitle:
-                                                'The port the launcher expects the game server on',
-                                            trailing: SizedBox(
-                                              width: 120,
-                                              child: TextField(
-                                                controller: portController,
-                                                focusNode: portFocusNode,
-                                                keyboardType:
-                                                    TextInputType.number,
-                                                inputFormatters: [
-                                                  FilteringTextInputFormatter
-                                                      .digitsOnly,
-                                                ],
-                                                decoration: InputDecoration(
-                                                  isDense: true,
-                                                  hintText:
-                                                      _defaultGameServerPort
-                                                          .toString(),
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 12,
-                                                        vertical: 10,
-                                                      ),
-                                                  border: OutlineInputBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          10,
-                                                        ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                Row(
-                                  children: [
-                                    OutlinedButton(
-                                      onPressed: () =>
-                                          dismissDialogSafely(false),
-                                      style: OutlinedButton.styleFrom(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 18,
-                                          vertical: 12,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                      child: const Text('Cancel'),
-                                    ),
-                                    const Spacer(),
-                                    FilledButton(
-                                      onPressed: () =>
-                                          dismissDialogSafely(true),
-                                      style: FilledButton.styleFrom(
-                                        backgroundColor: secondary.withValues(
-                                          alpha: 0.92,
-                                        ),
-                                        foregroundColor: Colors.white,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 12,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                      child: const Text('Save'),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
+              builder: (dialogContext, setDialogState) {
+                return SafeArea(
+                  child: Center(
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: Container(
+                        constraints: BoxConstraints(
+                          maxWidth: 760,
+                          maxHeight: maxDialogHeight,
                         ),
+                        margin: const EdgeInsets.symmetric(horizontal: 24),
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                        decoration: BoxDecoration(
+                          color: _dialogSurfaceColor(dialogContext),
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(
+                            color: _onSurface(dialogContext, 0.12),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _dialogShadowColor(dialogContext),
+                              blurRadius: 34,
+                              offset: const Offset(0, 18),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Launch Options',
+                              style: TextStyle(
+                                color: _onSurface(dialogContext, 0.96),
+                                fontSize: 36,
+                                fontWeight: FontWeight.w800,
+                                height: 1.02,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Customize launch arguments for Play and Host, plus host behavior settings.',
+                              style: TextStyle(
+                                color: _onSurface(dialogContext, 0.78),
+                                fontSize: 15,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Flexible(
+                              fit: FlexFit.loose,
+                              child: Scrollbar(
+                                controller: dialogScrollController,
+                                thumbVisibility: true,
+                                child: SingleChildScrollView(
+                                  controller: dialogScrollController,
+                                  padding: EdgeInsets.zero,
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      settingTile(
+                                        icon: Icons.play_circle_outline_rounded,
+                                        title: 'Play Launch Arguments',
+                                        subtitle:
+                                            'Additional arguments to use with the Launch button',
+                                        trailing: SizedBox(
+                                          width: 220,
+                                          child: TextField(
+                                            controller:
+                                                playLaunchArgsController,
+                                            focusNode: playLaunchArgsFocusNode,
+                                            keyboardType: TextInputType.text,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              hintText: 'Arguments...',
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.tune_rounded,
+                                        title: 'Host Launch Arguments',
+                                        subtitle:
+                                            'Additional arguments to use with the Host button',
+                                        trailing: SizedBox(
+                                          width: 220,
+                                          child: TextField(
+                                            controller: launchArgsController,
+                                            focusNode: hostLaunchArgsFocusNode,
+                                            keyboardType: TextInputType.text,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              hintText: 'Arguments...',
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.badge_rounded,
+                                        title: 'Host Client Name',
+                                        subtitle:
+                                            'Username used for the hosted client',
+                                        trailing: SizedBox(
+                                          width: 220,
+                                          child: TextField(
+                                            controller: hostUsernameController,
+                                            focusNode: hostUsernameFocusNode,
+                                            keyboardType: TextInputType.text,
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              hintText: 'host',
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.web_asset_off_rounded,
+                                        title: 'Headless',
+                                        subtitle:
+                                            'Disables game rendering to save resources',
+                                        trailing: Switch(
+                                          value: headless,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () => headless = value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.groups_rounded,
+                                        title: 'Multi-Client Launching',
+                                        subtitle:
+                                            'Allows Launch to open additional game clients while one is already running',
+                                        trailing: Switch(
+                                          value: allowMultipleClients,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () =>
+                                                  allowMultipleClients = value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.cloud_rounded,
+                                        title: 'Launch Backend with Game',
+                                        subtitle:
+                                            'Start ATLAS Backend when launching a session',
+                                        trailing: Switch(
+                                          value: launchBackend,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () => launchBackend = value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.folder_zip_rounded,
+                                        title: 'Large Pak Patcher',
+                                        subtitle:
+                                            'Inject Large Pak Patcher after the game server starts',
+                                        trailing: Switch(
+                                          value: largePakPatcherEnabled,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () => largePakPatcherEnabled =
+                                                  value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.restart_alt_rounded,
+                                        title: 'Automatic Restart',
+                                        subtitle:
+                                            'Automatically restarts the game server when it exits',
+                                        trailing: Switch(
+                                          value: autoRestart,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () => autoRestart = value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
+                                        icon: Icons.numbers_rounded,
+                                        title: 'Port',
+                                        subtitle:
+                                            'The port the launcher expects the game server on',
+                                        trailing: SizedBox(
+                                          width: 120,
+                                          child: TextField(
+                                            controller: portController,
+                                            focusNode: portFocusNode,
+                                            keyboardType: TextInputType.number,
+                                            inputFormatters: [
+                                              FilteringTextInputFormatter
+                                                  .digitsOnly,
+                                            ],
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              hintText: _defaultGameServerPort
+                                                  .toString(),
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              children: [
+                                OutlinedButton(
+                                  onPressed: () => dismissDialogSafely(false),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 12,
+                                    ),
+                                    shape: const StadiumBorder(),
+                                  ),
+                                  child: const Text('Cancel'),
+                                ),
+                                const Spacer(),
+                                FilledButton(
+                                  onPressed: () => dismissDialogSafely(true),
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 20,
+                                      vertical: 12,
+                                    ),
+                                    shape: const StadiumBorder(),
+                                  ),
+                                  child: const Text('Save'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
                 );
               },
@@ -4482,16 +5236,18 @@ class _LauncherScreenState extends State<LauncherScreen>
                         Row(
                           children: [
                             OutlinedButton(
-                              onPressed: () =>
-                                  Navigator.of(dialogContext).pop(
-                                    _GameServerPromptAction.ignore,
-                                  ),
+                              onPressed: () => Navigator.of(
+                                dialogContext,
+                              ).pop(_GameServerPromptAction.ignore),
                               style: OutlinedButton.styleFrom(
                                 shape: const StadiumBorder(),
                                 side: BorderSide(
                                   color: _onSurface(dialogContext, 0.26),
                                 ),
-                                foregroundColor: _onSurface(dialogContext, 0.92),
+                                foregroundColor: _onSurface(
+                                  dialogContext,
+                                  0.92,
+                                ),
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 22,
                                   vertical: 12,
@@ -4504,18 +5260,20 @@ class _LauncherScreenState extends State<LauncherScreen>
                               child: FilledButton.icon(
                                 onPressed: () {
                                   applySelectedDllIfChanged();
-                                  Navigator.of(dialogContext).pop(
-                                    _GameServerPromptAction.start,
-                                  );
+                                  Navigator.of(
+                                    dialogContext,
+                                  ).pop(_GameServerPromptAction.start);
                                 },
                                 style: FilledButton.styleFrom(
-                                  backgroundColor: Theme.of(
-                                    dialogContext,
-                                  ).colorScheme.secondary.withValues(alpha: 0.92),
+                                  backgroundColor: Theme.of(dialogContext)
+                                      .colorScheme
+                                      .secondary
+                                      .withValues(alpha: 0.92),
                                   foregroundColor: Colors.white,
                                   shape: const StadiumBorder(),
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 12),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
                                 ),
                                 icon: const Icon(Icons.play_arrow_rounded),
                                 label: const Text('Start game server'),
@@ -5090,9 +5848,48 @@ class _LauncherScreenState extends State<LauncherScreen>
       const Duration(milliseconds: _authInjectionInitialDelayMs),
     );
 
+    Future<String> repairAuthPathIfNeeded(String configured) async {
+      final candidate = configured.trim();
+      if (candidate.isNotEmpty && File(candidate).existsSync()) {
+        return candidate;
+      }
+
+      final bundledPath = await _ensureBundledDll(
+        bundledAssetPath: 'assets/dlls/Tellurium.dll',
+        bundledFileName: 'Tellurium.dll',
+        label: 'authentication patcher',
+      );
+      final nextPath = bundledPath?.trim() ?? '';
+      if (nextPath.isEmpty) return candidate;
+
+      _log(
+        'settings',
+        'Repairing authentication patcher path. Using bundled default at $nextPath.',
+      );
+      if (mounted) {
+        setState(() {
+          _settings = _settings.copyWith(authenticationPatcherPath: nextPath);
+          _authenticationPatcherController.text = nextPath;
+        });
+      } else {
+        _settings = _settings.copyWith(authenticationPatcherPath: nextPath);
+        _authenticationPatcherController.text = nextPath;
+      }
+      try {
+        await _saveSettings(toast: false, applyControllers: false);
+      } catch (error) {
+        _log(
+          'settings',
+          'Failed to persist repaired auth patcher path: $error',
+        );
+      }
+      return nextPath;
+    }
+
+    var resolvedAuthPath = await repairAuthPathIfNeeded(authPath);
     _InjectionAttempt attempt = await _injectSinglePatcher(
       gamePid: gamePid,
-      patcherPath: authPath,
+      patcherPath: resolvedAuthPath,
       patcherName: 'authentication patcher',
       required: true,
     );
@@ -5106,9 +5903,10 @@ class _LauncherScreenState extends State<LauncherScreen>
       await Future<void>.delayed(
         const Duration(milliseconds: _authInjectionRetryDelayMs),
       );
+      resolvedAuthPath = await repairAuthPathIfNeeded(resolvedAuthPath);
       attempt = await _injectSinglePatcher(
         gamePid: gamePid,
-        patcherPath: authPath,
+        patcherPath: resolvedAuthPath,
         patcherName: 'authentication patcher',
         required: true,
       );
@@ -5417,6 +6215,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _gameServerInstance = null;
     _gameServerProcess = null;
+    _stopHostingWhenNoClientsRemain = false;
     _clearUiStatus(host: true);
     _log('gameserver', 'Close hosting command executed.');
     if (mounted) _toast('Game server closed.');
@@ -5770,7 +6569,8 @@ class _LauncherScreenState extends State<LauncherScreen>
                     onKeyEvent: (_, event) {
                       if ((event is KeyDownEvent) &&
                           event.logicalKey == LogicalKeyboardKey.escape) {
-                        if (nameFocusNode.hasFocus || folderFocusNode.hasFocus) {
+                        if (nameFocusNode.hasFocus ||
+                            folderFocusNode.hasFocus) {
                           nameFocusNode.unfocus();
                           folderFocusNode.unfocus();
                           return KeyEventResult.handled;
@@ -5788,289 +6588,263 @@ class _LauncherScreenState extends State<LauncherScreen>
                           maxHeight: maxHeight,
                         ),
                         child: Container(
-                              decoration: BoxDecoration(
-                                color: _dialogSurfaceColor(dialogContext),
-                                borderRadius: BorderRadius.circular(28),
-                                border: Border.all(
-                                  color: _onSurface(dialogContext, 0.1),
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: _dialogShadowColor(dialogContext),
-                                    blurRadius: 34,
-                                    offset: const Offset(0, 18),
-                                  ),
-                                ],
+                          decoration: BoxDecoration(
+                            color: _dialogSurfaceColor(dialogContext),
+                            borderRadius: BorderRadius.circular(28),
+                            border: Border.all(
+                              color: _onSurface(dialogContext, 0.1),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: _dialogShadowColor(dialogContext),
+                                blurRadius: 34,
+                                offset: const Offset(0, 18),
                               ),
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  24,
-                                  22,
-                                  24,
-                                  18,
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                            ],
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
                                   children: [
-                                    Row(
+                                    Icon(
+                                      headerIcon,
+                                      color: _onSurface(dialogContext, 0.94),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      title,
+                                      style: TextStyle(
+                                        fontSize: 34,
+                                        fontWeight: FontWeight.w700,
+                                        color: _onSurface(dialogContext, 0.96),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Flexible(
+                                  child: SingleChildScrollView(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
-                                        Icon(
-                                          headerIcon,
-                                          color: _onSurface(
-                                            dialogContext,
-                                            0.94,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 10),
                                         Text(
-                                          title,
+                                          stepDescription,
                                           style: TextStyle(
-                                            fontSize: 34,
+                                            fontSize: 16,
                                             fontWeight: FontWeight.w700,
                                             color: _onSurface(
                                               dialogContext,
-                                              0.96,
+                                              0.74,
                                             ),
+                                            height: 1.25,
                                           ),
                                         ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 8),
-                                    Flexible(
-                                      child: SingleChildScrollView(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              stepDescription,
-                                              style: TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w700,
+                                        const SizedBox(height: 16),
+                                        if (step == 0) ...[
+                                          Container(
+                                            width: double.infinity,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 14,
+                                              vertical: 12,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              borderRadius:
+                                                  BorderRadius.circular(18),
+                                              color: _adaptiveScrimColor(
+                                                dialogContext,
+                                                darkAlpha: 0.08,
+                                                lightAlpha: 0.20,
+                                              ),
+                                              border: Border.all(
                                                 color: _onSurface(
                                                   dialogContext,
-                                                  0.74,
+                                                  0.1,
                                                 ),
-                                                height: 1.25,
                                               ),
                                             ),
-                                            const SizedBox(height: 16),
-                                            if (step == 0) ...[
-                                              Container(
-                                                width: double.infinity,
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 14,
-                                                      vertical: 12,
-                                                    ),
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(18),
-                                                  color: _adaptiveScrimColor(
-                                                    dialogContext,
-                                                    darkAlpha: 0.08,
-                                                    lightAlpha: 0.20,
-                                                  ),
-                                                  border: Border.all(
+                                            child: Wrap(
+                                              crossAxisAlignment:
+                                                  WrapCrossAlignment.center,
+                                              spacing: 10,
+                                              runSpacing: 10,
+                                              children: [
+                                                Text(
+                                                  'Select the path that contains both',
+                                                  style: TextStyle(
                                                     color: _onSurface(
                                                       dialogContext,
-                                                      0.1,
+                                                      0.82,
                                                     ),
+                                                    fontWeight: FontWeight.w600,
                                                   ),
                                                 ),
-                                                child: Wrap(
-                                                  crossAxisAlignment:
-                                                      WrapCrossAlignment.center,
-                                                  spacing: 10,
-                                                  runSpacing: 10,
-                                                  children: [
-                                                    Text(
-                                                      'Select the path that contains both',
-                                                      style: TextStyle(
+                                                Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 10,
+                                                        vertical: 7,
+                                                      ),
+                                                  decoration: BoxDecoration(
+                                                    color: _adaptiveScrimColor(
+                                                      dialogContext,
+                                                      darkAlpha: 0.1,
+                                                      lightAlpha: 0.22,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          12,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.1,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      Icon(
+                                                        Icons.folder_rounded,
+                                                        size: 16,
                                                         color: _onSurface(
                                                           dialogContext,
-                                                          0.82,
+                                                          0.88,
                                                         ),
-                                                        fontWeight:
-                                                            FontWeight.w600,
                                                       ),
-                                                    ),
-                                                    Container(
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 10,
-                                                            vertical: 7,
-                                                          ),
-                                                      decoration: BoxDecoration(
-                                                        color:
-                                                            _adaptiveScrimColor(
-                                                              dialogContext,
-                                                              darkAlpha: 0.1,
-                                                              lightAlpha: 0.22,
-                                                            ),
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              12,
-                                                            ),
-                                                        border: Border.all(
+                                                      const SizedBox(width: 6),
+                                                      Text(
+                                                        'FortniteGame',
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w700,
                                                           color: _onSurface(
                                                             dialogContext,
-                                                            0.1,
+                                                            0.92,
                                                           ),
                                                         ),
                                                       ),
-                                                      child: Row(
-                                                        mainAxisSize:
-                                                            MainAxisSize.min,
-                                                        children: [
-                                                          Icon(
-                                                            Icons
-                                                                .folder_rounded,
-                                                            size: 16,
-                                                            color: _onSurface(
-                                                              dialogContext,
-                                                              0.88,
-                                                            ),
-                                                          ),
-                                                          const SizedBox(
-                                                            width: 6,
-                                                          ),
-                                                          Text(
-                                                            'FortniteGame',
-                                                            style: TextStyle(
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .w700,
-                                                              color: _onSurface(
-                                                                dialogContext,
-                                                                0.92,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                    ),
-                                                    Container(
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 10,
-                                                            vertical: 7,
-                                                          ),
-                                                      decoration: BoxDecoration(
-                                                        color:
-                                                            _adaptiveScrimColor(
-                                                              dialogContext,
-                                                              darkAlpha: 0.1,
-                                                              lightAlpha: 0.22,
-                                                            ),
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              12,
-                                                            ),
-                                                        border: Border.all(
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.1,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                      child: Row(
-                                                        mainAxisSize:
-                                                            MainAxisSize.min,
-                                                        children: [
-                                                          Icon(
-                                                            Icons
-                                                                .folder_rounded,
-                                                            size: 16,
-                                                            color: _onSurface(
-                                                              dialogContext,
-                                                              0.88,
-                                                            ),
-                                                          ),
-                                                          const SizedBox(
-                                                            width: 6,
-                                                          ),
-                                                          Text(
-                                                            'Engine',
-                                                            style: TextStyle(
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .w700,
-                                                              color: _onSurface(
-                                                                dialogContext,
-                                                                0.92,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                    ),
-                                                    Text(
-                                                      'folders.',
-                                                      style: TextStyle(
-                                                        color: _onSurface(
-                                                          dialogContext,
-                                                          0.82,
-                                                        ),
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
-                                                    ),
-                                                  ],
+                                                    ],
+                                                  ),
                                                 ),
-                                              ),
-                                              const SizedBox(height: 14),
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: TextField(
-                                                      focusNode:
-                                                          folderFocusNode,
-                                                      controller:
-                                                          folderController,
-                                                      onChanged: (_) =>
-                                                          setDialogState(
-                                                            () =>
-                                                                validation = '',
-                                                          ),
-                                                      style: TextStyle(
+                                                Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 10,
+                                                        vertical: 7,
+                                                      ),
+                                                  decoration: BoxDecoration(
+                                                    color: _adaptiveScrimColor(
+                                                      dialogContext,
+                                                      darkAlpha: 0.1,
+                                                      lightAlpha: 0.22,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          12,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.1,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      Icon(
+                                                        Icons.folder_rounded,
+                                                        size: 16,
                                                         color: _onSurface(
                                                           dialogContext,
-                                                          0.92,
+                                                          0.88,
                                                         ),
                                                       ),
-                                                      cursorColor: secondary,
-                                                      decoration: InputDecoration(
-                                                        hintText:
-                                                            'Choose your path!',
-                                                        hintStyle: TextStyle(
+                                                      const SizedBox(width: 6),
+                                                      Text(
+                                                        'Engine',
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w700,
                                                           color: _onSurface(
                                                             dialogContext,
-                                                            0.48,
+                                                            0.92,
                                                           ),
                                                         ),
-                                                        prefixIcon: Icon(
-                                                          Icons.folder_rounded,
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.78,
-                                                          ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'folders.',
+                                                  style: TextStyle(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.82,
+                                                    ),
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(height: 14),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: TextField(
+                                                  focusNode: folderFocusNode,
+                                                  controller: folderController,
+                                                  onChanged: (_) =>
+                                                      setDialogState(
+                                                        () => validation = '',
+                                                      ),
+                                                  style: TextStyle(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.92,
+                                                    ),
+                                                  ),
+                                                  cursorColor: secondary,
+                                                  decoration: InputDecoration(
+                                                    hintText:
+                                                        'Choose your path!',
+                                                    hintStyle: TextStyle(
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.48,
+                                                      ),
+                                                    ),
+                                                    prefixIcon: Icon(
+                                                      Icons.folder_rounded,
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.78,
+                                                      ),
+                                                    ),
+                                                    filled: true,
+                                                    fillColor:
+                                                        _adaptiveScrimColor(
+                                                          dialogContext,
+                                                          darkAlpha: 0.1,
+                                                          lightAlpha: 0.2,
                                                         ),
-                                                        filled: true,
-                                                        fillColor:
-                                                            _adaptiveScrimColor(
-                                                              dialogContext,
-                                                              darkAlpha: 0.1,
-                                                              lightAlpha: 0.2,
-                                                            ),
-                                                        isDense: true,
-                                                        contentPadding:
-                                                            const EdgeInsets.symmetric(
-                                                              horizontal: 14,
-                                                              vertical: 13,
-                                                            ),
-                                                        enabledBorder: OutlineInputBorder(
+                                                    isDense: true,
+                                                    contentPadding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 14,
+                                                          vertical: 13,
+                                                        ),
+                                                    enabledBorder:
+                                                        OutlineInputBorder(
                                                           borderRadius:
                                                               BorderRadius.circular(
                                                                 14,
@@ -6082,13 +6856,14 @@ class _LauncherScreenState extends State<LauncherScreen>
                                                             ),
                                                           ),
                                                         ),
-                                                        focusedBorder:
-                                                            OutlineInputBorder(
-                                                              borderRadius:
-                                                                  BorderRadius.circular(
-                                                                    14,
-                                                                  ),
-                                                              borderSide: BorderSide(
+                                                    focusedBorder:
+                                                        OutlineInputBorder(
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                                14,
+                                                              ),
+                                                          borderSide:
+                                                              BorderSide(
                                                                 color: secondary
                                                                     .withValues(
                                                                       alpha:
@@ -6096,192 +6871,179 @@ class _LauncherScreenState extends State<LauncherScreen>
                                                                     ),
                                                                 width: 1.2,
                                                               ),
-                                                            ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 12),
-                                                  OutlinedButton(
-                                                    onPressed: pickBuildFolder,
-                                                    style: OutlinedButton.styleFrom(
-                                                      shape:
-                                                          const StadiumBorder(),
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 18,
-                                                          ),
-                                                      minimumSize: const Size(
-                                                        0,
-                                                        46,
-                                                      ),
-                                                      foregroundColor:
-                                                          _onSurface(
-                                                            dialogContext,
-                                                            0.92,
-                                                          ),
-                                                      backgroundColor:
-                                                          _adaptiveScrimColor(
-                                                            dialogContext,
-                                                            darkAlpha: 0.08,
-                                                            lightAlpha: 0.16,
-                                                          ),
-                                                      side: BorderSide(
-                                                        color: _onSurface(
-                                                          dialogContext,
-                                                          0.14,
                                                         ),
-                                                      ),
-                                                    ),
-                                                    child: const Text('Browse'),
-                                                  ),
-                                                ],
-                                              ),
-                                            ] else ...[
-                                              Text(
-                                                'Build Name',
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.w700,
-                                                  color: _onSurface(
-                                                    dialogContext,
-                                                    0.82,
                                                   ),
                                                 ),
                                               ),
-                                              const SizedBox(height: 6),
-                                              TextField(
-                                                focusNode: nameFocusNode,
-                                                controller: nameController,
-                                                onChanged: (_) =>
-                                                    setDialogState(
-                                                      () => validation = '',
-                                                    ),
-                                                style: TextStyle(
-                                                  color: _onSurface(
+                                              const SizedBox(width: 12),
+                                              OutlinedButton(
+                                                onPressed: pickBuildFolder,
+                                                style: OutlinedButton.styleFrom(
+                                                  shape: const StadiumBorder(),
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 18,
+                                                      ),
+                                                  minimumSize: const Size(
+                                                    0,
+                                                    46,
+                                                  ),
+                                                  foregroundColor: _onSurface(
                                                     dialogContext,
                                                     0.92,
                                                   ),
-                                                ),
-                                                cursorColor: secondary,
-                                                decoration: InputDecoration(
-                                                  hintText:
-                                                      'e.g. Chapter 2 Season 4',
-                                                  hintStyle: TextStyle(
-                                                    color: _onSurface(
-                                                      dialogContext,
-                                                      0.48,
-                                                    ),
-                                                  ),
-                                                  prefixIcon: Icon(
-                                                    Icons.edit_rounded,
-                                                    color: _onSurface(
-                                                      dialogContext,
-                                                      0.72,
-                                                    ),
-                                                  ),
-                                                  filled: true,
-                                                  fillColor:
+                                                  backgroundColor:
                                                       _adaptiveScrimColor(
                                                         dialogContext,
-                                                        darkAlpha: 0.1,
-                                                        lightAlpha: 0.2,
+                                                        darkAlpha: 0.08,
+                                                        lightAlpha: 0.16,
                                                       ),
-                                                  isDense: true,
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 14,
-                                                        vertical: 13,
-                                                      ),
-                                                  enabledBorder:
-                                                      OutlineInputBorder(
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              14,
-                                                            ),
-                                                        borderSide: BorderSide(
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.12,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                  focusedBorder:
-                                                      OutlineInputBorder(
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              14,
-                                                            ),
-                                                        borderSide: BorderSide(
-                                                          color: secondary
-                                                              .withValues(
-                                                                alpha: 0.95,
-                                                              ),
-                                                          width: 1.2,
-                                                        ),
-                                                      ),
+                                                  side: BorderSide(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.14,
+                                                    ),
+                                                  ),
+                                                ),
+                                                child: const Text('Browse'),
+                                              ),
+                                            ],
+                                          ),
+                                        ] else ...[
+                                          Text(
+                                            'Build Name',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              color: _onSurface(
+                                                dialogContext,
+                                                0.82,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          TextField(
+                                            focusNode: nameFocusNode,
+                                            controller: nameController,
+                                            onChanged: (_) => setDialogState(
+                                              () => validation = '',
+                                            ),
+                                            style: TextStyle(
+                                              color: _onSurface(
+                                                dialogContext,
+                                                0.92,
+                                              ),
+                                            ),
+                                            cursorColor: secondary,
+                                            decoration: InputDecoration(
+                                              hintText:
+                                                  'e.g. Chapter 2 Season 4',
+                                              hintStyle: TextStyle(
+                                                color: _onSurface(
+                                                  dialogContext,
+                                                  0.48,
                                                 ),
                                               ),
-                                              const SizedBox(height: 12),
-                                              Text(
-                                                'Build Root Folder',
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.w700,
+                                              prefixIcon: Icon(
+                                                Icons.edit_rounded,
+                                                color: _onSurface(
+                                                  dialogContext,
+                                                  0.72,
+                                                ),
+                                              ),
+                                              filled: true,
+                                              fillColor: _adaptiveScrimColor(
+                                                dialogContext,
+                                                darkAlpha: 0.1,
+                                                lightAlpha: 0.2,
+                                              ),
+                                              isDense: true,
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 14,
+                                                    vertical: 13,
+                                                  ),
+                                              enabledBorder: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14),
+                                                borderSide: BorderSide(
                                                   color: _onSurface(
                                                     dialogContext,
-                                                    0.82,
+                                                    0.12,
                                                   ),
                                                 ),
                                               ),
-                                              const SizedBox(height: 6),
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: TextField(
-                                                      focusNode:
-                                                          folderFocusNode,
-                                                      controller:
-                                                          folderController,
-                                                      onChanged: (_) =>
-                                                          setDialogState(
-                                                            () =>
-                                                                validation = '',
-                                                          ),
-                                                      style: TextStyle(
-                                                        color: _onSurface(
-                                                          dialogContext,
-                                                          0.92,
-                                                        ),
+                                              focusedBorder: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14),
+                                                borderSide: BorderSide(
+                                                  color: secondary.withValues(
+                                                    alpha: 0.95,
+                                                  ),
+                                                  width: 1.2,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          Text(
+                                            'Build Root Folder',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              color: _onSurface(
+                                                dialogContext,
+                                                0.82,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: TextField(
+                                                  focusNode: folderFocusNode,
+                                                  controller: folderController,
+                                                  onChanged: (_) =>
+                                                      setDialogState(
+                                                        () => validation = '',
                                                       ),
-                                                      cursorColor: secondary,
-                                                      decoration: InputDecoration(
-                                                        hintText:
-                                                            r'D:\Builds\Fortnite\14.60',
-                                                        hintStyle: TextStyle(
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.48,
-                                                          ),
+                                                  style: TextStyle(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.92,
+                                                    ),
+                                                  ),
+                                                  cursorColor: secondary,
+                                                  decoration: InputDecoration(
+                                                    hintText:
+                                                        r'D:\Builds\Fortnite\14.60',
+                                                    hintStyle: TextStyle(
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.48,
+                                                      ),
+                                                    ),
+                                                    prefixIcon: Icon(
+                                                      Icons.folder_rounded,
+                                                      color: _onSurface(
+                                                        dialogContext,
+                                                        0.78,
+                                                      ),
+                                                    ),
+                                                    filled: true,
+                                                    fillColor:
+                                                        _adaptiveScrimColor(
+                                                          dialogContext,
+                                                          darkAlpha: 0.1,
+                                                          lightAlpha: 0.2,
                                                         ),
-                                                        prefixIcon: Icon(
-                                                          Icons.folder_rounded,
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.78,
-                                                          ),
+                                                    isDense: true,
+                                                    contentPadding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 14,
+                                                          vertical: 13,
                                                         ),
-                                                        filled: true,
-                                                        fillColor:
-                                                            _adaptiveScrimColor(
-                                                              dialogContext,
-                                                              darkAlpha: 0.1,
-                                                              lightAlpha: 0.2,
-                                                            ),
-                                                        isDense: true,
-                                                        contentPadding:
-                                                            const EdgeInsets.symmetric(
-                                                              horizontal: 14,
-                                                              vertical: 13,
-                                                            ),
-                                                        enabledBorder: OutlineInputBorder(
+                                                    enabledBorder:
+                                                        OutlineInputBorder(
                                                           borderRadius:
                                                               BorderRadius.circular(
                                                                 14,
@@ -6293,13 +7055,14 @@ class _LauncherScreenState extends State<LauncherScreen>
                                                             ),
                                                           ),
                                                         ),
-                                                        focusedBorder:
-                                                            OutlineInputBorder(
-                                                              borderRadius:
-                                                                  BorderRadius.circular(
-                                                                    14,
-                                                                  ),
-                                                              borderSide: BorderSide(
+                                                    focusedBorder:
+                                                        OutlineInputBorder(
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                                14,
+                                                              ),
+                                                          borderSide:
+                                                              BorderSide(
                                                                 color: secondary
                                                                     .withValues(
                                                                       alpha:
@@ -6307,239 +7070,232 @@ class _LauncherScreenState extends State<LauncherScreen>
                                                                     ),
                                                                 width: 1.2,
                                                               ),
-                                                            ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 12),
-                                                  OutlinedButton(
-                                                    onPressed: pickBuildFolder,
-                                                    style: OutlinedButton.styleFrom(
-                                                      shape:
-                                                          const StadiumBorder(),
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 18,
-                                                          ),
-                                                      minimumSize: const Size(
-                                                        0,
-                                                        46,
-                                                      ),
-                                                      foregroundColor:
-                                                          _onSurface(
-                                                            dialogContext,
-                                                            0.92,
-                                                          ),
-                                                      backgroundColor:
-                                                          _adaptiveScrimColor(
-                                                            dialogContext,
-                                                            darkAlpha: 0.08,
-                                                            lightAlpha: 0.16,
-                                                          ),
-                                                      side: BorderSide(
-                                                        color: _onSurface(
-                                                          dialogContext,
-                                                          0.14,
                                                         ),
-                                                      ),
-                                                    ),
-                                                    child: const Text('Browse'),
                                                   ),
-                                                ],
-                                              ),
-                                            ],
-                                            if (validation.isNotEmpty) ...[
-                                              const SizedBox(height: 10),
-                                              Text(
-                                                validation,
-                                                style: const TextStyle(
-                                                  color: Color(0xFFFF9CB0),
-                                                  fontWeight: FontWeight.w600,
                                                 ),
                                               ),
+                                              const SizedBox(width: 12),
+                                              OutlinedButton(
+                                                onPressed: pickBuildFolder,
+                                                style: OutlinedButton.styleFrom(
+                                                  shape: const StadiumBorder(),
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 18,
+                                                      ),
+                                                  minimumSize: const Size(
+                                                    0,
+                                                    46,
+                                                  ),
+                                                  foregroundColor: _onSurface(
+                                                    dialogContext,
+                                                    0.92,
+                                                  ),
+                                                  backgroundColor:
+                                                      _adaptiveScrimColor(
+                                                        dialogContext,
+                                                        darkAlpha: 0.08,
+                                                        lightAlpha: 0.16,
+                                                      ),
+                                                  side: BorderSide(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.14,
+                                                    ),
+                                                  ),
+                                                ),
+                                                child: const Text('Browse'),
+                                              ),
                                             ],
-                                          ],
+                                          ),
+                                        ],
+                                        if (validation.isNotEmpty) ...[
+                                          const SizedBox(height: 10),
+                                          Text(
+                                            validation,
+                                            style: const TextStyle(
+                                              color: Color(0xFFFF9CB0),
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                if (step == 0) ...[
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: FilledButton(
+                                      onPressed: () {
+                                        final path = folderController.text
+                                            .trim();
+                                        if (!_isBuildRootValid(path)) {
+                                          setDialogState(() {
+                                            validation =
+                                                'Select a folder that contains FortniteGame and Engine.';
+                                          });
+                                          return;
+                                        }
+                                        if (nameController.text
+                                            .trim()
+                                            .isEmpty) {
+                                          nameController.text = _basename(path);
+                                        }
+                                        setDialogState(() {
+                                          validation = '';
+                                          step = 1;
+                                        });
+                                      },
+                                      style: FilledButton.styleFrom(
+                                        backgroundColor: secondary.withValues(
+                                          alpha: 0.92,
                                         ),
+                                        foregroundColor: Colors.white,
+                                        shape: const StadiumBorder(),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 22,
+                                          vertical: 14,
+                                        ),
+                                        minimumSize: const Size.fromHeight(52),
+                                      ),
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: const [
+                                          Text(
+                                            'Next',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          SizedBox(width: 8),
+                                          Icon(Icons.arrow_forward_rounded),
+                                        ],
                                       ),
                                     ),
-                                    const SizedBox(height: 14),
-                                    if (step == 0) ...[
-                                      SizedBox(
-                                        width: double.infinity,
-                                        child: FilledButton(
-                                          onPressed: () {
-                                            final path = folderController.text
-                                                .trim();
-                                            if (!_isBuildRootValid(path)) {
-                                              setDialogState(() {
-                                                validation =
-                                                    'Select a folder that contains FortniteGame and Engine.';
-                                              });
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Row(
+                                    children: [
+                                      if (allowBulkImport)
+                                        OutlinedButton.icon(
+                                          onPressed: () async {
+                                            final parentPath = await FilePicker
+                                                .platform
+                                                .getDirectoryPath(
+                                                  dialogTitle:
+                                                      'Select a folder that contains multiple build folders',
+                                                );
+                                            if (parentPath == null ||
+                                                parentPath.trim().isEmpty) {
                                               return;
                                             }
-                                            if (nameController.text
-                                                .trim()
-                                                .isEmpty) {
-                                              nameController.text = _basename(
-                                                path,
-                                              );
+                                            if (!dialogContext.mounted ||
+                                                !mounted) {
+                                              return;
                                             }
-                                            setDialogState(() {
-                                              validation = '';
-                                              step = 1;
-                                            });
+                                            dismissDialogSafely();
+                                            if (!mounted) return;
+                                            await _importManyVersionsFromParent(
+                                              parentPath,
+                                            );
                                           },
-                                          style: FilledButton.styleFrom(
-                                            backgroundColor: secondary
-                                                .withValues(alpha: 0.92),
-                                            foregroundColor: Colors.white,
+                                          icon: const Icon(
+                                            Icons.playlist_add_rounded,
+                                          ),
+                                          label: const Text(
+                                            'Import multiple builds',
+                                          ),
+                                          style: OutlinedButton.styleFrom(
                                             shape: const StadiumBorder(),
                                             padding: const EdgeInsets.symmetric(
-                                              horizontal: 22,
-                                              vertical: 14,
+                                              horizontal: 16,
+                                              vertical: 11,
                                             ),
-                                            minimumSize: const Size.fromHeight(
-                                              52,
-                                            ),
-                                          ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.center,
-                                            children: const [
-                                              Text(
-                                                'Next',
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.w700,
-                                                ),
+                                            side: BorderSide(
+                                              color: _onSurface(
+                                                dialogContext,
+                                                0.14,
                                               ),
-                                              SizedBox(width: 8),
-                                              Icon(Icons.arrow_forward_rounded),
-                                            ],
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      Row(
-                                        children: [
-                                          if (allowBulkImport)
-                                            OutlinedButton.icon(
-                                              onPressed: () async {
-                                                final parentPath = await FilePicker
-                                                    .platform
-                                                    .getDirectoryPath(
-                                                      dialogTitle:
-                                                          'Select a folder that contains multiple build folders',
-                                                    );
-                                                if (parentPath == null ||
-                                                    parentPath.trim().isEmpty) {
-                                                  return;
-                                                }
-                                                if (!dialogContext.mounted ||
-                                                    !mounted) {
-                                                  return;
-                                                }
-                                                dismissDialogSafely();
-                                                if (!mounted) return;
-                                                await _importManyVersionsFromParent(
-                                                  parentPath,
-                                                );
-                                              },
-                                              icon: const Icon(
-                                                Icons.playlist_add_rounded,
-                                              ),
-                                              label: const Text(
-                                                'Import multiple builds',
-                                              ),
-                                              style: OutlinedButton.styleFrom(
-                                                shape: const StadiumBorder(),
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 16,
-                                                      vertical: 11,
-                                                    ),
-                                                side: BorderSide(
-                                                  color: _onSurface(
-                                                    dialogContext,
-                                                    0.14,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          const Spacer(),
-                                          TextButton(
-                                            onPressed: dismissDialogSafely,
-                                            child: const Text('Cancel'),
-                                          ),
-                                        ],
-                                      ),
-                                    ] else ...[
-                                      Row(
-                                        children: [
-                                          if (allowBulkImport)
-                                            TextButton.icon(
-                                              onPressed: () =>
-                                                  setDialogState(() {
-                                                    validation = '';
-                                                    step = 0;
-                                                  }),
-                                              icon: const Icon(
-                                                Icons.arrow_back_rounded,
-                                              ),
-                                              label: const Text('Back'),
-                                            ),
-                                          const Spacer(),
-                                          TextButton(
-                                            onPressed: dismissDialogSafely,
-                                            child: const Text('Cancel'),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          FilledButton.icon(
-                                            onPressed: () {
-                                              final name = nameController.text
-                                                  .trim();
-                                              final path = folderController.text
-                                                  .trim();
-                                              if (name.isEmpty) {
-                                                setDialogState(() {
-                                                  validation =
-                                                      'Build name is required.';
-                                                });
-                                                return;
-                                              }
-                                              if (!_isBuildRootValid(path)) {
-                                                setDialogState(() {
-                                                  validation =
-                                                      'Pick a folder containing FortniteGame and Engine.';
-                                                });
-                                                return;
-                                              }
-                                              dismissDialogSafely(
-                                                _BuildImportRequest(
-                                                  buildName: name,
-                                                  buildRootPath: path,
-                                                ),
-                                              );
-                                            },
-                                            style: FilledButton.styleFrom(
-                                              backgroundColor: secondary
-                                                  .withValues(alpha: 0.92),
-                                              foregroundColor: Colors.white,
-                                              shape: const StadiumBorder(),
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 18,
-                                                    vertical: 13,
-                                                  ),
-                                            ),
-                                            icon: Icon(confirmIcon),
-                                            label: Text(confirmLabel),
-                                          ),
-                                        ],
+                                      const Spacer(),
+                                      TextButton(
+                                        onPressed: dismissDialogSafely,
+                                        child: const Text('Cancel'),
                                       ),
                                     ],
-                                  ],
-                                ),
-                              ),
+                                  ),
+                                ] else ...[
+                                  Row(
+                                    children: [
+                                      if (allowBulkImport)
+                                        TextButton.icon(
+                                          onPressed: () => setDialogState(() {
+                                            validation = '';
+                                            step = 0;
+                                          }),
+                                          icon: const Icon(
+                                            Icons.arrow_back_rounded,
+                                          ),
+                                          label: const Text('Back'),
+                                        ),
+                                      const Spacer(),
+                                      TextButton(
+                                        onPressed: dismissDialogSafely,
+                                        child: const Text('Cancel'),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      FilledButton.icon(
+                                        onPressed: () {
+                                          final name = nameController.text
+                                              .trim();
+                                          final path = folderController.text
+                                              .trim();
+                                          if (name.isEmpty) {
+                                            setDialogState(() {
+                                              validation =
+                                                  'Build name is required.';
+                                            });
+                                            return;
+                                          }
+                                          if (!_isBuildRootValid(path)) {
+                                            setDialogState(() {
+                                              validation =
+                                                  'Pick a folder containing FortniteGame and Engine.';
+                                            });
+                                            return;
+                                          }
+                                          dismissDialogSafely(
+                                            _BuildImportRequest(
+                                              buildName: name,
+                                              buildRootPath: path,
+                                            ),
+                                          );
+                                        },
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: secondary.withValues(
+                                            alpha: 0.92,
+                                          ),
+                                          foregroundColor: Colors.white,
+                                          shape: const StadiumBorder(),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 18,
+                                            vertical: 13,
+                                          ),
+                                        ),
+                                        icon: Icon(confirmIcon),
+                                        label: Text(confirmLabel),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -7103,7 +7859,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                         const SizedBox(height: 6),
                         Text(
                           '- Clear imported builds\n'
-                          '- Reset profile (name + PFP) and show first-run setup again on next launch\n'
+                          '- Reset profile (name + PFP) and show first-run setup again\n'
                           '- Reset launch options, backend settings, visuals, and DLL paths\n'
                           '- Clear internal caches (installer + bundled DLL copies)\n'
                           '- Clear launcher logs',
@@ -7191,6 +7947,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       // Ignore proxy shutdown issues during reset.
     }
 
+    _gameServerCrashStatusClearTimer?.cancel();
+    _gameServerCrashStatusClearTimer = null;
+
     _pollTimer?.cancel();
     _pollTimer = null;
 
@@ -7219,7 +7978,20 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
+    final appData = Platform.environment['APPDATA'];
+    if (appData != null && appData.trim().isNotEmpty) {
+      final legacyDir = Directory(
+        _joinPath([appData, _legacyLauncherDataDirName]),
+      );
+      if (_normalizePath(legacyDir.path) != _normalizePath(_dataDir.path)) {
+        await deleteDir(legacyDir);
+      }
+    }
+
     await deleteDir(Directory(_joinPath([_dataDir.path, 'backend-installer'])));
+    await deleteDir(
+      Directory(_joinPath([_dataDir.path, 'launcher-installer'])),
+    );
     await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
     await deleteFile(_installStateFile);
     await deleteFile(_settingsFile);
@@ -7235,10 +8007,33 @@ class _LauncherScreenState extends State<LauncherScreen>
         _settings = defaults;
         _installState = LauncherInstallState.defaults();
         _tab = LauncherTab.home;
+        _settingsReturnTab = LauncherTab.home;
         _settingsSection = SettingsSection.profile;
+        _homeHeroIndex = 0;
+        _showStartup = defaults.startupAnimationEnabled;
+        _startupConfigResolved = true;
         _backendOnline = false;
+        _checkingLauncherUpdate = false;
+        _launcherUpdateDialogVisible = false;
+        _launcherUpdateAutoCheckQueued = false;
+        _launcherUpdateAutoChecked = false;
+        _launcherUpdateInstallerCleanupWatcherActive = false;
+        _gameInstance = null;
+        _extraGameInstances.clear();
+        _gameServerInstance = null;
         _gameUiStatus = null;
         _gameServerUiStatus = null;
+        _atlasBackendActionBusy = false;
+        _gameAction = _GameActionState.idle;
+        _gameServerLaunching = false;
+        _gameProcess = null;
+        _gameServerProcess = null;
+        _atlasBackendProcess = null;
+        _atlasBackendInstallDialogContext = null;
+        _atlasBackendInstallDialogVisible = false;
+        _atlasBackendInstallCleanupWatcherActive = false;
+        _profileSetupDialogVisible = false;
+        _profileSetupDialogQueued = false;
         _sortedVersionsSource = null;
         _sortedVersionsCache = const <VersionEntry>[];
         _versionSearchQuery = '';
@@ -7247,10 +8042,33 @@ class _LauncherScreenState extends State<LauncherScreen>
       _settings = defaults;
       _installState = LauncherInstallState.defaults();
       _tab = LauncherTab.home;
+      _settingsReturnTab = LauncherTab.home;
       _settingsSection = SettingsSection.profile;
+      _homeHeroIndex = 0;
+      _showStartup = defaults.startupAnimationEnabled;
+      _startupConfigResolved = true;
       _backendOnline = false;
+      _checkingLauncherUpdate = false;
+      _launcherUpdateDialogVisible = false;
+      _launcherUpdateAutoCheckQueued = false;
+      _launcherUpdateAutoChecked = false;
+      _launcherUpdateInstallerCleanupWatcherActive = false;
+      _gameInstance = null;
+      _extraGameInstances.clear();
+      _gameServerInstance = null;
       _gameUiStatus = null;
       _gameServerUiStatus = null;
+      _atlasBackendActionBusy = false;
+      _gameAction = _GameActionState.idle;
+      _gameServerLaunching = false;
+      _gameProcess = null;
+      _gameServerProcess = null;
+      _atlasBackendProcess = null;
+      _atlasBackendInstallDialogContext = null;
+      _atlasBackendInstallDialogVisible = false;
+      _atlasBackendInstallCleanupWatcherActive = false;
+      _profileSetupDialogVisible = false;
+      _profileSetupDialogQueued = false;
       _sortedVersionsSource = null;
       _sortedVersionsCache = const <VersionEntry>[];
       _versionSearchQuery = '';
@@ -7260,18 +8078,31 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     if (mounted) widget.onDarkModeChanged(_settings.darkModeEnabled);
     _syncControllers();
+    _shellEntranceController.stop();
+    _shellEntranceController.value = _showStartup ? 0.0 : 1.0;
+    _libraryActionsNudgeController.stop();
+    _libraryActionsNudgeController.value = 0.0;
 
     // Restore bundled DLL defaults (Magnesium/memory/Tellurium/console) after
     // clearing internal files.
     await _applyBundledDllDefaults();
     await _saveSettings(toast: false);
 
+    _installState = _installState.copyWith(
+      lastSeenLauncherVersion: _launcherVersion,
+    );
+    try {
+      await _saveInstallState();
+    } catch (error) {
+      _log('settings', 'Failed to save install state: $error');
+    }
+
     await _refreshRuntime();
     _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       unawaited(_refreshRuntime());
     });
 
-    if (mounted) _toast('Launcher reset. Relaunch to run onboarding.');
+    if (mounted) _toast('Launcher reset.');
     _log('settings', 'Launcher reset completed.');
   }
 
@@ -7662,23 +8493,17 @@ class _LauncherScreenState extends State<LauncherScreen>
         if (showRightControls) ...[
           if (_tab == LauncherTab.library) ...[
             _libraryPulseGlow(
-              _titleActionButton(
-                Icons.add_rounded,
-                () {
-                  _completeLibraryActionsNudge();
-                  unawaited(_importVersion());
-                },
-              ),
+              _titleActionButton(Icons.add_rounded, () {
+                _completeLibraryActionsNudge();
+                unawaited(_importVersion());
+              }),
             ),
             const SizedBox(width: 8),
             _libraryPulseGlow(
-              _titleActionButton(
-                Icons.download_rounded,
-                () {
-                  _completeLibraryActionsNudge();
-                  unawaited(_openUrl('https://builds.fortforge.dev/builds'));
-                },
-              ),
+              _titleActionButton(Icons.download_rounded, () {
+                _completeLibraryActionsNudge();
+                unawaited(_openUrl('https://builds.fortforge.dev/builds'));
+              }),
             ),
             const SizedBox(width: 10),
           ],
@@ -7754,8 +8579,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (_settings.libraryActionsNudgeComplete) return;
     setState(() {
       _settings = _settings.copyWith(libraryActionsNudgeComplete: true);
-      _installState =
-          _installState.copyWith(libraryActionsNudgeComplete: true);
+      _installState = _installState.copyWith(libraryActionsNudgeComplete: true);
     });
     _syncLibraryActionsNudgePulse();
     unawaited(_saveInstallState());
@@ -9385,8 +10209,9 @@ class _LauncherScreenState extends State<LauncherScreen>
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop('install'),
                               style: FilledButton.styleFrom(
-                                backgroundColor:
-                                    secondary.withValues(alpha: 0.92),
+                                backgroundColor: secondary.withValues(
+                                  alpha: 0.92,
+                                ),
                                 foregroundColor: Colors.white,
                                 shape: const StadiumBorder(),
                                 padding: const EdgeInsets.symmetric(
@@ -9452,11 +10277,17 @@ class _LauncherScreenState extends State<LauncherScreen>
     final tempDir = Directory(_joinPath([_dataDir.path, 'backend-installer']));
     var keepInstallerFolder = false;
     var downloadedInstaller = false;
-    _showAtlasBackendInstallDialog(message: 'Resolving installer...', progress: null);
+    _showAtlasBackendInstallDialog(
+      message: 'Resolving installer...',
+      progress: null,
+    );
     try {
       final fetchedInstallerUrl = await _fetchAtlasBackendInstallerUrl();
       if (fetchedInstallerUrl == null) {
-        _log('backend', 'Unable to resolve backend installer URL from releases.');
+        _log(
+          'backend',
+          'Unable to resolve backend installer URL from releases.',
+        );
         _updateAtlasBackendInstallDialog(
           message: 'Installer not found. Opening release page...',
           progress: null,
@@ -9541,7 +10372,10 @@ class _LauncherScreenState extends State<LauncherScreen>
           );
           break;
         } catch (error) {
-          _log('backend', 'Backend installer download attempt $attempt failed: $error');
+          _log(
+            'backend',
+            'Backend installer download attempt $attempt failed: $error',
+          );
           if (attempt >= maxAttempts) rethrow;
           await Future<void>.delayed(Duration(seconds: 2 * attempt));
         }
@@ -9556,7 +10390,10 @@ class _LauncherScreenState extends State<LauncherScreen>
           'Installer type mismatch: expected $extension but detected $detectedExtension. Renaming.',
         );
         final corrected = File(
-          _joinPath([tempDir.path, 'atlas-backend-installer$detectedExtension']),
+          _joinPath([
+            tempDir.path,
+            'atlas-backend-installer$detectedExtension',
+          ]),
         );
         try {
           if (await corrected.exists()) await corrected.delete();
@@ -9732,6 +10569,63 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
     return !await dir.exists();
+  }
+
+  Directory _launcherUpdateInstallerDirectory() {
+    return Directory(_joinPath([_dataDir.path, 'launcher-installer']));
+  }
+
+  Future<void> _cleanupLauncherUpdateInstallerCacheOnLaunch() async {
+    if (!Platform.isWindows) return;
+    if (_launcherUpdateInstallerCleanupWatcherActive) return;
+    _launcherUpdateInstallerCleanupWatcherActive = true;
+    try {
+      final dir = _launcherUpdateInstallerDirectory();
+      if (!await dir.exists()) return;
+
+      var lockWarningLogged = false;
+      const maxAttempts = 24;
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (!await dir.exists()) return;
+        try {
+          await dir.delete(recursive: true);
+          _log('launcher', 'Cleaned launcher update installer cache.');
+          return;
+        } catch (error) {
+          final lower = error.toString().toLowerCase();
+          final isLockContention =
+              lower.contains('being used by another process') ||
+              lower.contains('errno = 32');
+          if (isLockContention && !lockWarningLogged) {
+            _log(
+              'launcher',
+              'Launcher update installer cache is still in use; retrying cleanup shortly.',
+            );
+            lockWarningLogged = true;
+          } else if (!isLockContention) {
+            _log(
+              'launcher',
+              'Unexpected launcher update cache cleanup error on attempt $attempt/$maxAttempts: $error',
+            );
+          }
+          if (attempt == maxAttempts) {
+            _log(
+              'launcher',
+              'Unable to clean launcher update installer cache after $maxAttempts attempts.',
+            );
+            return;
+          }
+          await Future<void>.delayed(const Duration(seconds: 5));
+        }
+      }
+    } catch (error) {
+      _log(
+        'launcher',
+        'Failed to clean launcher update installer cache: $error',
+      );
+    } finally {
+      _launcherUpdateInstallerCleanupWatcherActive = false;
+    }
   }
 
   void _showAtlasBackendInstallDialog({
@@ -9936,7 +10830,8 @@ class _LauncherScreenState extends State<LauncherScreen>
           final url = (asset['browser_download_url'] ?? '').toString().trim();
           if (url.isEmpty) continue;
 
-          final isAtlasAsset = name.contains('atlas') || name.contains('backend');
+          final isAtlasAsset =
+              name.contains('atlas') || name.contains('backend');
           final isInstaller =
               name.contains('setup') ||
               name.contains('installer') ||
@@ -9985,10 +10880,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         final body = await response.transform(utf8.decoder).join();
         if (response.statusCode != 200) {
           final remaining = response.headers.value('x-ratelimit-remaining');
-          final hint =
-              remaining == null || remaining.trim().isEmpty
-                  ? ''
-                  : ' (rate remaining $remaining)';
+          final hint = remaining == null || remaining.trim().isEmpty
+              ? ''
+              : ' (rate remaining $remaining)';
           _log(
             'backend',
             'GitHub API request failed ($url): HTTP ${response.statusCode}$hint',
@@ -10079,16 +10973,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (header.length >= 2 && header[0] == 0x4D && header[1] == 0x5A) {
         return '.exe';
       }
-      const oleMagic = <int>[
-        0xD0,
-        0xCF,
-        0x11,
-        0xE0,
-        0xA1,
-        0xB1,
-        0x1A,
-        0xE1,
-      ];
+      const oleMagic = <int>[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
       if (header.length >= 8) {
         var matchesOle = true;
         for (var i = 0; i < oleMagic.length; i++) {
@@ -10476,8 +11361,44 @@ foreach ($app in $appPaths) {
     required VoidCallback onReset,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
-    final hasValue = controller.text.trim().isNotEmpty;
+    final rawPath = controller.text.trim();
+    final hasValue = rawPath.isNotEmpty;
     final display = hasValue ? controller.text : placeholder;
+    final lowerPath = rawPath.toLowerCase();
+
+    bool exists = false;
+    if (hasValue) {
+      try {
+        exists = File(rawPath).existsSync();
+      } catch (_) {
+        exists = false;
+      }
+    }
+
+    final looksLikeDll = hasValue ? lowerPath.endsWith('.dll') : true;
+    final showMissing = hasValue && looksLikeDll && !exists;
+    final showTypeWarning = hasValue && !looksLikeDll;
+
+    Widget? statusIcon;
+    if (showMissing) {
+      statusIcon = Tooltip(
+        message: 'File missing',
+        child: Icon(
+          Icons.error_rounded,
+          size: 18,
+          color: Theme.of(context).colorScheme.error,
+        ),
+      );
+    } else if (showTypeWarning) {
+      statusIcon = Tooltip(
+        message: 'Not a DLL',
+        child: Icon(
+          Icons.warning_amber_rounded,
+          size: 18,
+          color: const Color(0xFFE7A008),
+        ),
+      );
+    }
 
     return Row(
       children: [
@@ -10493,6 +11414,7 @@ foreach ($app in $appPaths) {
           ),
         ),
         const SizedBox(width: 8),
+        if (statusIcon != null) ...[statusIcon, const SizedBox(width: 8)],
         IconButton(
           onPressed: onPick,
           tooltip: 'Choose file',
@@ -11019,7 +11941,8 @@ foreach ($app in $appPaths) {
                 _backendSettingTile(
                   icon: Icons.description_outlined,
                   title: 'Large Pak Patcher',
-                  subtitle: 'Injected after the game server to support large pak files',
+                  subtitle:
+                      'Injected after the game server to support large pak files',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
                     controller: _largePakPatcherController,
@@ -12492,19 +13415,24 @@ class LauncherInstallState {
   const LauncherInstallState({
     required this.profileSetupComplete,
     required this.libraryActionsNudgeComplete,
+    required this.lastSeenLauncherVersion,
   });
 
   final bool profileSetupComplete;
   final bool libraryActionsNudgeComplete;
+  final String lastSeenLauncherVersion;
 
   LauncherInstallState copyWith({
     bool? profileSetupComplete,
     bool? libraryActionsNudgeComplete,
+    String? lastSeenLauncherVersion,
   }) {
     return LauncherInstallState(
       profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
       libraryActionsNudgeComplete:
           libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
+      lastSeenLauncherVersion:
+          lastSeenLauncherVersion ?? this.lastSeenLauncherVersion,
     );
   }
 
@@ -12512,6 +13440,7 @@ class LauncherInstallState {
     return const LauncherInstallState(
       profileSetupComplete: false,
       libraryActionsNudgeComplete: false,
+      lastSeenLauncherVersion: '',
     );
   }
 
@@ -12527,6 +13456,12 @@ class LauncherInstallState {
       return fallback;
     }
 
+    String asString(dynamic value, String fallback) {
+      if (value == null) return fallback;
+      if (value is String) return value;
+      return value.toString();
+    }
+
     return LauncherInstallState(
       profileSetupComplete: asBool(
         json['profileSetupComplete'] ?? json['ProfileSetupComplete'],
@@ -12537,6 +13472,10 @@ class LauncherInstallState {
             json['LibraryActionsNudgeComplete'],
         false,
       ),
+      lastSeenLauncherVersion: asString(
+        json['lastSeenLauncherVersion'] ?? json['LastSeenLauncherVersion'],
+        '',
+      ).trim(),
     );
   }
 
@@ -12544,6 +13483,7 @@ class LauncherInstallState {
     return <String, dynamic>{
       'profileSetupComplete': profileSetupComplete,
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
+      'lastSeenLauncherVersion': lastSeenLauncherVersion,
     };
   }
 }
@@ -12847,7 +13787,7 @@ class LauncherSettings {
       backendPort: asInt(json['backendPort'], 3551),
       launchBackendOnSessionStart: asBool(
         json['launchBackendOnSessionStart'] ?? json['launchBackend'],
-        false,
+        true,
       ),
       largePakPatcherEnabled: asBool(
         json['largePakPatcherEnabled'] ?? json['largePakPatcher'],
