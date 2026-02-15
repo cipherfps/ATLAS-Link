@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch]$SkipFlutterBuild,
+  [switch]$SkipFlutterClean,
   [switch]$SkipInnoCompile
 )
 
@@ -93,6 +94,17 @@ $version = Get-PubspecVersion -PubspecPath $pubspecPath
 Write-Step "Resolved app version: $version"
 
 if (-not $SkipFlutterBuild) {
+  if (-not $SkipFlutterClean) {
+    Write-Step "Running flutter clean"
+    Push-Location $flutterDir
+    try {
+      flutter clean
+    }
+    finally {
+      Pop-Location
+    }
+  }
+
   Write-Step "Running flutter build windows --release"
   Push-Location $flutterDir
   try {
