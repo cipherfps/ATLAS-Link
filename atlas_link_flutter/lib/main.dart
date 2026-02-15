@@ -393,8 +393,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '0.0.4';
-  static const String _launcherBuildLabel = 'Stable 0.0.4';
+  static const String _launcherVersion = '1.0.0';
+  static const String _launcherBuildLabel = 'Stable 1.0.0';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1260,7 +1260,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'Choose your name and PFP',
+                                'Create your profile',
                                 style: TextStyle(
                                   fontSize: 38,
                                   fontWeight: FontWeight.w800,
@@ -1270,7 +1270,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                               ),
                               const SizedBox(height: 10),
                               Text(
-                                'This is only shown once. You can change your profile later in Settings.',
+                                'Set your name and profile picture! You can change this later in your profile settings.',
                                 style: TextStyle(
                                   fontSize: 15.5,
                                   height: 1.38,
@@ -4843,7 +4843,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                         icon: Icons.folder_zip_rounded,
                                         title: 'Large Pak Patcher',
                                         subtitle:
-                                            'Inject Large Pak Patcher after the game server starts',
+                                            'Help large or custom pak files load correctly',
                                         trailing: Switch(
                                           value: largePakPatcherEnabled,
                                           onChanged: (value) {
@@ -6276,6 +6276,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         selectedVersionId: version.id,
       );
     });
+    _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
     if (mounted) _toast('Version imported.');
   }
@@ -6430,6 +6431,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         selectedVersionId: imported.last.id,
       );
     });
+    _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
 
     final summaryParts = <String>[
@@ -7625,6 +7627,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         selectedVersionId: selected,
       );
     });
+    _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
   }
 
@@ -7751,6 +7754,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _librarySearchController.clear();
       _versionSearchQuery = '';
     });
+    _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
     if (mounted) _toast('All builds cleared.');
   }
@@ -8566,7 +8570,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   bool get _shouldPulseLibraryActions =>
-      _tab == LauncherTab.library && !_settings.libraryActionsNudgeComplete;
+      _tab == LauncherTab.library && _settings.versions.isEmpty;
 
   void _syncLibraryActionsNudgePulse() {
     final shouldPulse = _shouldPulseLibraryActions;
@@ -8660,9 +8664,129 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final selectedGradientBottom = dark
         ? Colors.white.withValues(alpha: 0.06)
         : secondary.withValues(alpha: 0.10);
-
     const transparentOverlay = WidgetStatePropertyAll<Color>(
       Colors.transparent,
+    );
+    final selectedOutlineColor = dark
+        ? Colors.white.withValues(alpha: 0.28)
+        : secondary.withValues(alpha: 0.72);
+    final selectedOutlineShadowColor = dark
+        ? Colors.white.withValues(alpha: 0.14)
+        : secondary.withValues(alpha: 0.18);
+
+    const navTabs = <LauncherTab>[
+      LauncherTab.home,
+      LauncherTab.library,
+      LauncherTab.backend,
+    ];
+    const navTabGap = 4.0;
+    const navTabWidth = 74.0;
+    const navTabRadius = 14.0;
+    final selectedTabIndex = navTabs.indexOf(_tab);
+
+    Widget navTabButton(LauncherTab tab) {
+      final selected = _tab == tab;
+      final label = switch (tab) {
+        LauncherTab.home => 'Home',
+        LauncherTab.library => 'Library',
+        LauncherTab.backend => 'Backend',
+        LauncherTab.general => 'Settings',
+      };
+      final icon = switch (tab) {
+        LauncherTab.home => Icons.home_outlined,
+        LauncherTab.library => Icons.folder_open_outlined,
+        LauncherTab.backend => Icons.cloud_outlined,
+        LauncherTab.general => Icons.bar_chart_rounded,
+      };
+      return _HoverScale(
+        scale: 1.04,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(navTabRadius),
+          overlayColor: transparentOverlay,
+          splashFactory: NoSplash.splashFactory,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          onTap: () => unawaited(_switchMenu(tab)),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            constraints: const BoxConstraints.tightFor(width: navTabWidth),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(navTabRadius),
+              color: selected ? selectedBackground : Colors.transparent,
+              gradient: selected
+                  ? LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [selectedGradientTop, selectedGradientBottom],
+                    )
+                  : null,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  size: 19,
+                  color: _onSurface(context, selected ? 1 : 0.70),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    color: _onSurface(context, selected ? 1 : 0.75),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final tabStrip = Stack(
+      alignment: Alignment.centerLeft,
+      children: [
+        if (selectedTabIndex >= 0)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            left: selectedTabIndex * (navTabWidth + navTabGap),
+            top: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: Container(
+                width: navTabWidth,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(navTabRadius),
+                  border: Border.all(color: selectedOutlineColor, width: 1.4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: selectedOutlineShadowColor,
+                      blurRadius: 18,
+                      spreadRadius: 0.4,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            navTabButton(navTabs[0]),
+            const SizedBox(width: navTabGap),
+            navTabButton(navTabs[1]),
+            const SizedBox(width: navTabGap),
+            navTabButton(navTabs[2]),
+          ],
+        ),
+      ],
     );
     return ClipRRect(
       borderRadius: BorderRadius.circular(30),
@@ -8723,92 +8847,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     color: _onSurface(context, 0.18),
                   ),
                   const SizedBox(width: 4),
-                  ...LauncherTab.values
-                      .where((tab) => tab != LauncherTab.general)
-                      .map((tab) {
-                        final selected = _tab == tab;
-                        final label = switch (tab) {
-                          LauncherTab.home => 'Home',
-                          LauncherTab.library => 'Library',
-                          LauncherTab.backend => 'Backend',
-                          LauncherTab.general => 'Settings',
-                        };
-                        final icon = switch (tab) {
-                          LauncherTab.home => Icons.home_outlined,
-                          LauncherTab.library => Icons.folder_open_outlined,
-                          LauncherTab.backend => Icons.cloud_outlined,
-                          LauncherTab.general => Icons.bar_chart_rounded,
-                        };
-                        return Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: _HoverScale(
-                            scale: 1.04,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(14),
-                              overlayColor: transparentOverlay,
-                              splashFactory: NoSplash.splashFactory,
-                              splashColor: Colors.transparent,
-                              highlightColor: Colors.transparent,
-                              hoverColor: Colors.transparent,
-                              focusColor: Colors.transparent,
-                              onTap: () => unawaited(_switchMenu(tab)),
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 180),
-                                curve: Curves.easeOutCubic,
-                                constraints: const BoxConstraints(minWidth: 74),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 8,
-                                ),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(14),
-                                  color: selected
-                                      ? selectedBackground
-                                      : Colors.transparent,
-                                  gradient: selected
-                                      ? LinearGradient(
-                                          begin: Alignment.topCenter,
-                                          end: Alignment.bottomCenter,
-                                          colors: [
-                                            selectedGradientTop,
-                                            selectedGradientBottom,
-                                          ],
-                                        )
-                                      : null,
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      icon,
-                                      size: 19,
-                                      color: _onSurface(
-                                        context,
-                                        selected ? 1 : 0.70,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      label,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: selected
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                        color: _onSurface(
-                                          context,
-                                          selected ? 1 : 0.75,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      }),
-                  const SizedBox(width: 6),
+                  tabStrip,
+                  const SizedBox(width: 10),
                   InkWell(
                     borderRadius: BorderRadius.circular(999),
                     overlayColor: transparentOverlay,
