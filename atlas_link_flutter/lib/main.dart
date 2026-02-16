@@ -393,8 +393,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.0.0';
-  static const String _launcherBuildLabel = 'Stable 1.0.0';
+  static const String _launcherVersion = '1.0.2';
+  static const String _launcherBuildLabel = 'Stable 1.0.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -517,6 +517,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _stoppingSessionLinkedHosting = false;
   bool _profileSetupDialogVisible = false;
   bool _profileSetupDialogQueued = false;
+  bool _libraryImportTipFadingOut = false;
+  int _backendQuickTipStep = 0;
+  BackendConnectionType? _backendQuickTipOriginalType;
+  String? _backendQuickTipOriginalHost;
   String _versionSearchQuery = '';
 
   Process? _gameProcess;
@@ -702,15 +706,18 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _log(
       'settings',
-      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile).',
+      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile + appearance settings).',
     );
 
     final preservedVersions = List<VersionEntry>.from(_settings.versions);
     var preservedSelectedVersionId = _settings.selectedVersionId;
     if (preservedSelectedVersionId.trim().isNotEmpty &&
-        !preservedVersions.any((entry) => entry.id == preservedSelectedVersionId)) {
-      preservedSelectedVersionId =
-          preservedVersions.isNotEmpty ? preservedVersions.first.id : '';
+        !preservedVersions.any(
+          (entry) => entry.id == preservedSelectedVersionId,
+        )) {
+      preservedSelectedVersionId = preservedVersions.isNotEmpty
+          ? preservedVersions.first.id
+          : '';
     }
     if (preservedSelectedVersionId.trim().isEmpty &&
         preservedVersions.isNotEmpty) {
@@ -730,6 +737,17 @@ class _LauncherScreenState extends State<LauncherScreen>
         preservedAvatarPath = '';
       }
     }
+
+    final preservedDarkModeEnabled = _settings.darkModeEnabled;
+    final preservedPopupBackgroundBlurEnabled =
+        _settings.popupBackgroundBlurEnabled;
+    final preservedBackgroundImagePath = _settings.backgroundImagePath.trim();
+    final preservedBackgroundBlur = _settings.backgroundBlur;
+    final preservedBackgroundParticlesOpacity =
+        _settings.backgroundParticlesOpacity;
+    final preservedStartupAnimationEnabled = _settings.startupAnimationEnabled;
+    final preservedBackendConnectionTipComplete =
+        _settings.backendConnectionTipComplete;
 
     final preservedProfileSetupComplete =
         _settings.profileSetupComplete || _installState.profileSetupComplete;
@@ -774,6 +792,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       username: preservedUsername,
       profileAvatarPath: preservedAvatarPath,
       profileSetupComplete: preservedProfileSetupComplete,
+      darkModeEnabled: preservedDarkModeEnabled,
+      popupBackgroundBlurEnabled: preservedPopupBackgroundBlurEnabled,
+      backgroundImagePath: preservedBackgroundImagePath,
+      backgroundBlur: preservedBackgroundBlur,
+      backgroundParticlesOpacity: preservedBackgroundParticlesOpacity,
+      startupAnimationEnabled: preservedStartupAnimationEnabled,
+      backendConnectionTipComplete: preservedBackendConnectionTipComplete,
       versions: preservedVersions,
       selectedVersionId: preservedSelectedVersionId,
     );
@@ -800,7 +825,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _log(
       'settings',
-      'Post-update reinstall reset completed (library + profile preserved).',
+      'Post-update reinstall reset completed (library + profile + appearance settings preserved).',
     );
   }
 
@@ -1800,24 +1825,33 @@ class _LauncherScreenState extends State<LauncherScreen>
     final resolvedLibraryNudge =
         _settings.libraryActionsNudgeComplete ||
         _installState.libraryActionsNudgeComplete;
+    final resolvedBackendConnectionTip =
+        _settings.backendConnectionTipComplete ||
+        _installState.backendConnectionTipComplete;
 
     var installStateChanged = false;
     var settingsChanged = false;
 
     if (_installState.profileSetupComplete != resolvedProfileSetup ||
-        _installState.libraryActionsNudgeComplete != resolvedLibraryNudge) {
+        _installState.libraryActionsNudgeComplete != resolvedLibraryNudge ||
+        _installState.backendConnectionTipComplete !=
+            resolvedBackendConnectionTip) {
       _installState = _installState.copyWith(
         profileSetupComplete: resolvedProfileSetup,
         libraryActionsNudgeComplete: resolvedLibraryNudge,
+        backendConnectionTipComplete: resolvedBackendConnectionTip,
       );
       installStateChanged = true;
     }
 
     if (_settings.profileSetupComplete != resolvedProfileSetup ||
-        _settings.libraryActionsNudgeComplete != resolvedLibraryNudge) {
+        _settings.libraryActionsNudgeComplete != resolvedLibraryNudge ||
+        _settings.backendConnectionTipComplete !=
+            resolvedBackendConnectionTip) {
       _settings = _settings.copyWith(
         profileSetupComplete: resolvedProfileSetup,
         libraryActionsNudgeComplete: resolvedLibraryNudge,
+        backendConnectionTipComplete: resolvedBackendConnectionTip,
       );
       settingsChanged = true;
     }
@@ -1842,6 +1876,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _loadSettings() async {
     if (!await _settingsFile.exists()) {
       _settings = LauncherSettings.defaults();
+      await _migrateAppearanceSettingsFileIfNeeded();
       return;
     }
     try {
@@ -1854,9 +1889,98 @@ class _LauncherScreenState extends State<LauncherScreen>
       } else {
         _settings = LauncherSettings.defaults();
       }
+      await _migrateAppearanceSettingsFileIfNeeded();
     } catch (error) {
       _settings = LauncherSettings.defaults();
       _log('settings', 'Invalid settings file. Loaded defaults. $error');
+      await _migrateAppearanceSettingsFileIfNeeded();
+    }
+  }
+
+  Future<void> _migrateAppearanceSettingsFileIfNeeded() async {
+    final legacyAppearanceSettingsFile = File(
+      _joinPath([_dataDir.path, 'appearance_settings.json']),
+    );
+    if (!await legacyAppearanceSettingsFile.exists()) {
+      return;
+    }
+    try {
+      final raw = await legacyAppearanceSettingsFile.readAsString();
+      final decoded = jsonDecode(raw);
+      final data = decoded is Map<String, dynamic>
+          ? decoded
+          : decoded is Map
+          ? decoded.cast<String, dynamic>()
+          : const <String, dynamic>{};
+
+      double asDouble(dynamic value, double fallback) {
+        if (value is num) return value.toDouble();
+        if (value is String) return double.tryParse(value) ?? fallback;
+        return fallback;
+      }
+
+      bool asBool(dynamic value, bool fallback) {
+        if (value is bool) return value;
+        if (value is num) return value != 0;
+        if (value is String) {
+          final lowered = value.toLowerCase();
+          if (lowered == 'true' || lowered == '1') return true;
+          if (lowered == 'false' || lowered == '0') return false;
+        }
+        return fallback;
+      }
+
+      final merged = _settings.copyWith(
+        darkModeEnabled: asBool(
+          data['darkModeEnabled'] ?? data['darkMode'] ?? data['DarkMode'],
+          _settings.darkModeEnabled,
+        ),
+        popupBackgroundBlurEnabled: asBool(
+          data['popupBackgroundBlurEnabled'] ??
+              data['popupBackgroundBlur'] ??
+              data['PopupBackgroundBlur'],
+          _settings.popupBackgroundBlurEnabled,
+        ),
+        backgroundImagePath:
+            (data['backgroundImagePath'] ?? data['BackgroundImagePath'] ?? '')
+                .toString(),
+        backgroundBlur: asDouble(
+          data['backgroundBlur'] ?? data['BackgroundBlur'],
+          _settings.backgroundBlur,
+        ).clamp(0, 30),
+        backgroundParticlesOpacity: asDouble(
+          data['backgroundParticlesOpacity'] ??
+              data['BackgroundParticlesOpacity'],
+          _settings.backgroundParticlesOpacity,
+        ).clamp(0, 2),
+        startupAnimationEnabled: asBool(
+          data['startupAnimationEnabled'] ?? data['StartupAnimationEnabled'],
+          _settings.startupAnimationEnabled,
+        ),
+      );
+
+      _settings = merged;
+
+      final pretty = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(_settings.toJson());
+      await _settingsFile.writeAsString(pretty, flush: true);
+
+      try {
+        await legacyAppearanceSettingsFile.delete();
+      } catch (_) {
+        // Ignore legacy cleanup failures.
+      }
+
+      _log(
+        'settings',
+        'Migrated legacy appearance_settings.json into settings.json.',
+      );
+    } catch (error) {
+      _log(
+        'settings',
+        'Invalid legacy appearance settings file. Keeping current settings values. $error',
+      );
     }
   }
 
@@ -3905,11 +4029,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       for (final pid in pids) {
         try {
-          await Process.run(
-            'taskkill',
-            ['/F', '/PID', '$pid'],
-            runInShell: true,
-          );
+          await Process.run('taskkill', [
+            '/F',
+            '/PID',
+            '$pid',
+          ], runInShell: true);
         } catch (_) {
           // Ignore already-closed processes.
         }
@@ -3919,10 +4043,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _gameServerProcess = null;
       _stopHostingWhenNoClientsRemain = false;
       _clearUiStatus(host: true);
-      _log(
-        'gameserver',
-        'Session-linked hosting stopped (no clients remain).',
-      );
+      _log('gameserver', 'Session-linked hosting stopped (no clients remain).');
     } finally {
       _stoppingSessionLinkedHosting = false;
     }
@@ -4031,34 +4152,34 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _clearUiStatus(host: false);
         return;
       }
-       if (gameServerPrompt == _GameServerPromptAction.start) {
-         if (mounted) {
-           setState(() => _gameServerLaunching = true);
-         } else {
-           _gameServerLaunching = true;
-         }
+      if (gameServerPrompt == _GameServerPromptAction.start) {
+        if (mounted) {
+          setState(() => _gameServerLaunching = true);
+        } else {
+          _gameServerLaunching = true;
+        }
         _setUiStatus(
           host: true,
           message: 'Starting game server...',
           severity: _UiStatusSeverity.info,
         );
-         linkedHosting = await _startImplicitGameServer(version);
-         if (!mounted) return;
-         setState(() => _gameServerLaunching = false);
-         if (linkedHosting != null) {
-           _stopHostingWhenNoClientsRemain = true;
-           _log(
-             'gameserver',
-             'Session-linked hosting enabled (will stop when all clients close).',
-           );
-         } else {
-           _stopHostingWhenNoClientsRemain = false;
-         }
-         if (linkedHosting == null) {
-           _setUiStatus(
-             host: true,
-             message: 'Failed to start game server.',
-             severity: _UiStatusSeverity.warning,
+        linkedHosting = await _startImplicitGameServer(version);
+        if (!mounted) return;
+        setState(() => _gameServerLaunching = false);
+        if (linkedHosting != null) {
+          _stopHostingWhenNoClientsRemain = true;
+          _log(
+            'gameserver',
+            'Session-linked hosting enabled (will stop when all clients close).',
+          );
+        } else {
+          _stopHostingWhenNoClientsRemain = false;
+        }
+        if (linkedHosting == null) {
+          _setUiStatus(
+            host: true,
+            message: 'Failed to start game server.',
+            severity: _UiStatusSeverity.warning,
           );
         }
       }
@@ -8432,6 +8553,100 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 ),
               ),
             ),
+          if (_startupConfigResolved &&
+              !_showStartup &&
+              _tab == LauncherTab.library &&
+              (!_settings.libraryActionsNudgeComplete ||
+                  _libraryImportTipFadingOut))
+            Positioned(
+              top: 104,
+              right: 28,
+              child: SafeArea(
+                child: AnimatedOpacity(
+                  opacity: _libraryImportTipFadingOut ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 290),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(context),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: _onSurface(context, 0.12)),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(context),
+                            blurRadius: 30,
+                            offset: const Offset(0, 16),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.tips_and_updates_rounded,
+                                size: 16,
+                                color: _onSurface(context, 0.86),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Quick tip',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: _onSurface(context, 0.92),
+                                ),
+                              ),
+                              const Spacer(),
+                              InkWell(
+                                borderRadius: BorderRadius.circular(999),
+                                onTap: () {
+                                  unawaited(_dismissLibraryImportTip());
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.all(2),
+                                  child: Icon(
+                                    Icons.close_rounded,
+                                    size: 16,
+                                    color: _onSurface(context, 0.62),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Import a build using the + button in the top-right.',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              height: 1.28,
+                              color: _onSurface(context, 0.86),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'You can also use the download button to browse builds.',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              height: 1.28,
+                              color: _onSurface(context, 0.86),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           if (_startupConfigResolved && _showStartup)
             _AtlasStartupAnimationOverlay(onFinished: _finishStartupAnimation),
         ],
@@ -8505,15 +8720,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           if (_tab == LauncherTab.library) ...[
             _libraryPulseGlow(
               _titleActionButton(Icons.add_rounded, () {
-                _completeLibraryActionsNudge();
-                unawaited(_importVersion());
+                unawaited(
+                  _dismissLibraryImportTip(onDismissedAction: _importVersion),
+                );
               }),
             ),
             const SizedBox(width: 8),
             _libraryPulseGlow(
               _titleActionButton(Icons.download_rounded, () {
-                _completeLibraryActionsNudge();
-                unawaited(_openUrl('https://builds.fortforge.dev/builds'));
+                unawaited(
+                  _dismissLibraryImportTip(
+                    onDismissedAction: () =>
+                        _openUrl('https://builds.fortforge.dev/builds'),
+                  ),
+                );
               }),
             ),
             const SizedBox(width: 10),
@@ -8570,7 +8790,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   bool get _shouldPulseLibraryActions =>
-      _tab == LauncherTab.library && _settings.versions.isEmpty;
+      (_tab == LauncherTab.library && _settings.versions.isEmpty) ||
+      (_tab == LauncherTab.backend && _showBackendConnectionTip);
 
   void _syncLibraryActionsNudgePulse() {
     final shouldPulse = _shouldPulseLibraryActions;
@@ -8595,6 +8816,40 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _syncLibraryActionsNudgePulse();
     unawaited(_saveInstallState());
     unawaited(_saveSettings(toast: false));
+  }
+
+  Future<void> _dismissLibraryImportTip({
+    Future<void> Function()? onDismissedAction,
+  }) async {
+    if (_libraryImportTipFadingOut) return;
+
+    if (_settings.libraryActionsNudgeComplete) {
+      if (onDismissedAction != null) await onDismissedAction();
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _libraryImportTipFadingOut = true;
+      });
+    } else {
+      _libraryImportTipFadingOut = true;
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    _completeLibraryActionsNudge();
+
+    if (mounted) {
+      setState(() {
+        _libraryImportTipFadingOut = false;
+      });
+    } else {
+      _libraryImportTipFadingOut = false;
+    }
+
+    if (onDismissedAction != null) {
+      await onDismissedAction();
+    }
   }
 
   Widget _libraryPulseGlow(Widget child) {
@@ -8630,6 +8885,218 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           child: child,
         );
       },
+    );
+  }
+
+  bool get _showBackendConnectionTip =>
+      !_settings.backendConnectionTipComplete &&
+      !_installState.backendConnectionTipComplete;
+
+  void _beginBackendTipPreviewIfNeeded() {
+    _backendQuickTipOriginalType ??= _settings.backendConnectionType;
+    _backendQuickTipOriginalHost ??= _settings.backendHost;
+  }
+
+  void _previewBackendTypeForTip(BackendConnectionType type) {
+    _beginBackendTipPreviewIfNeeded();
+    final originalHost = _backendQuickTipOriginalHost ?? _settings.backendHost;
+    final previewHost = type == BackendConnectionType.local
+        ? '127.0.0.1'
+        : originalHost;
+    setState(() {
+      _settings = _settings.copyWith(
+        backendConnectionType: type,
+        backendHost: previewHost,
+      );
+      _backendHostController.text = _effectiveBackendHost();
+    });
+  }
+
+  void _restoreBackendTypeAfterTipPreview() {
+    final originalType = _backendQuickTipOriginalType;
+    if (originalType == null) return;
+    final originalHost = _backendQuickTipOriginalHost ?? _settings.backendHost;
+    setState(() {
+      _settings = _settings.copyWith(
+        backendConnectionType: originalType,
+        backendHost: originalHost,
+      );
+      _backendHostController.text = _effectiveBackendHost();
+      _backendQuickTipOriginalType = null;
+      _backendQuickTipOriginalHost = null;
+    });
+  }
+
+  void _completeBackendConnectionTip() {
+    if (_settings.backendConnectionTipComplete) return;
+    _restoreBackendTypeAfterTipPreview();
+    setState(() {
+      _settings = _settings.copyWith(backendConnectionTipComplete: true);
+      _installState = _installState.copyWith(
+        backendConnectionTipComplete: true,
+      );
+      _backendQuickTipStep = 0;
+    });
+    _syncLibraryActionsNudgePulse();
+    unawaited(_saveInstallState());
+    unawaited(_saveSettings(toast: false));
+  }
+
+  void _advanceBackendConnectionTip() {
+    if (_backendQuickTipStep == 0) {
+      _previewBackendTypeForTip(BackendConnectionType.remote);
+      setState(() => _backendQuickTipStep = 1);
+      return;
+    }
+    _completeBackendConnectionTip();
+  }
+
+  Widget _backendConnectionTipCard() {
+    final secondary = Theme.of(context).colorScheme.secondary;
+    final stepTwo = _backendQuickTipStep == 1;
+
+    Widget stepContent;
+    if (!stepTwo) {
+      stepContent = Text(
+        'Running your own backend? Keep Type on Local so Link uses your local server settings.',
+        style: TextStyle(
+          fontSize: 12.5,
+          height: 1.28,
+          color: _onSurface(context, 0.86),
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    } else {
+      stepContent = Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        runSpacing: 4,
+        children: [
+          Text(
+            'Joining a friend\'s backend? Switch Type to Remote and paste their',
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.28,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          InkWell(
+            onTap: () => unawaited(_openUrl('https://www.radmin-vpn.com/')),
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+              child: Text(
+                'Radmin VPN',
+                style: TextStyle(
+                  color: secondary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+          ),
+          Text(
+            'IP in the Host box.',
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.28,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+      decoration: BoxDecoration(
+        color: _dialogSurfaceColor(context),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _onSurface(context, 0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: _dialogShadowColor(context),
+            blurRadius: 30,
+            offset: const Offset(0, 16),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.tips_and_updates_rounded,
+                size: 16,
+                color: _onSurface(context, 0.86),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Quick tip',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: _onSurface(context, 0.92),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${_backendQuickTipStep + 1}/2',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: _onSurface(context, 0.72),
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                tooltip: _backendQuickTipStep == 0 ? 'Next tip' : 'Got it',
+                onPressed: _advanceBackendConnectionTip,
+                icon: Icon(
+                  _backendQuickTipStep == 0
+                      ? Icons.arrow_forward_rounded
+                      : Icons.check_rounded,
+                  size: 16,
+                ),
+                color: secondary,
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(26, 26),
+                  padding: const EdgeInsets.all(4),
+                ),
+              ),
+              InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: _completeBackendConnectionTip,
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 16,
+                    color: _onSurface(context, 0.62),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 170),
+            switchInCurve: Curves.easeOut,
+            switchOutCurve: Curves.easeOut,
+            transitionBuilder: (child, animation) =>
+                FadeTransition(opacity: animation, child: child),
+            child: KeyedSubtree(
+              key: ValueKey<int>(_backendQuickTipStep),
+              child: stepContent,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -9803,6 +10270,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ? 'ATLAS Backend running'
         : 'Launch ATLAS Backend';
 
+    if (_showBackendConnectionTip &&
+        _backendQuickTipStep == 0 &&
+        _backendQuickTipOriginalType == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            !_showBackendConnectionTip ||
+            _backendQuickTipStep != 0 ||
+            _backendQuickTipOriginalType != null) {
+          return;
+        }
+        _previewBackendTypeForTip(BackendConnectionType.local);
+      });
+    }
+
     return _menuItemEntrance(
       menuKey: LauncherTab.backend,
       index: 0,
@@ -9856,27 +10337,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   ],
                 ),
               ),
+              if (_showBackendConnectionTip) ...[
+                const SizedBox(height: 12),
+                _backendConnectionTipCard(),
+              ],
               const SizedBox(height: 14),
               _backendSettingTile(
                 icon: Icons.settings_ethernet_rounded,
                 title: 'Type',
                 subtitle:
                     'The type of backend to use when logging into Fortnite',
-                trailing: DropdownButtonFormField<BackendConnectionType>(
-                  initialValue: _settings.backendConnectionType,
-                  decoration: _backendFieldDecoration(),
-                  items: BackendConnectionType.values
-                      .map(
-                        (type) => DropdownMenuItem<BackendConnectionType>(
-                          value: type,
-                          child: Text(type.label),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (type) {
-                    if (type == null) return;
-                    unawaited(_setBackendConnectionType(type));
-                  },
+                trailing: _libraryPulseGlow(
+                  DropdownButtonFormField<BackendConnectionType>(
+                    initialValue: _settings.backendConnectionType,
+                    decoration: _backendFieldDecoration(),
+                    items: BackendConnectionType.values
+                        .map(
+                          (type) => DropdownMenuItem<BackendConnectionType>(
+                            value: type,
+                            child: Text(type.label),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (type) {
+                      if (type == null) return;
+                      unawaited(_setBackendConnectionType(type));
+                    },
+                  ),
                 ),
               ),
               if (_settings.backendConnectionType ==
@@ -13462,22 +13949,27 @@ class LauncherInstallState {
   const LauncherInstallState({
     required this.profileSetupComplete,
     required this.libraryActionsNudgeComplete,
+    required this.backendConnectionTipComplete,
     required this.lastSeenLauncherVersion,
   });
 
   final bool profileSetupComplete;
   final bool libraryActionsNudgeComplete;
+  final bool backendConnectionTipComplete;
   final String lastSeenLauncherVersion;
 
   LauncherInstallState copyWith({
     bool? profileSetupComplete,
     bool? libraryActionsNudgeComplete,
+    bool? backendConnectionTipComplete,
     String? lastSeenLauncherVersion,
   }) {
     return LauncherInstallState(
       profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
       libraryActionsNudgeComplete:
           libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
+      backendConnectionTipComplete:
+          backendConnectionTipComplete ?? this.backendConnectionTipComplete,
       lastSeenLauncherVersion:
           lastSeenLauncherVersion ?? this.lastSeenLauncherVersion,
     );
@@ -13487,6 +13979,7 @@ class LauncherInstallState {
     return const LauncherInstallState(
       profileSetupComplete: false,
       libraryActionsNudgeComplete: false,
+      backendConnectionTipComplete: false,
       lastSeenLauncherVersion: '',
     );
   }
@@ -13519,6 +14012,11 @@ class LauncherInstallState {
             json['LibraryActionsNudgeComplete'],
         false,
       ),
+      backendConnectionTipComplete: asBool(
+        json['backendConnectionTipComplete'] ??
+            json['BackendConnectionTipComplete'],
+        true,
+      ),
       lastSeenLauncherVersion: asString(
         json['lastSeenLauncherVersion'] ?? json['LastSeenLauncherVersion'],
         '',
@@ -13530,6 +14028,7 @@ class LauncherInstallState {
     return <String, dynamic>{
       'profileSetupComplete': profileSetupComplete,
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
+      'backendConnectionTipComplete': backendConnectionTipComplete,
       'lastSeenLauncherVersion': lastSeenLauncherVersion,
     };
   }
@@ -13541,6 +14040,7 @@ class LauncherSettings {
     required this.profileAvatarPath,
     required this.profileSetupComplete,
     required this.libraryActionsNudgeComplete,
+    required this.backendConnectionTipComplete,
     required this.darkModeEnabled,
     required this.popupBackgroundBlurEnabled,
     required this.backgroundImagePath,
@@ -13575,6 +14075,7 @@ class LauncherSettings {
   final String profileAvatarPath;
   final bool profileSetupComplete;
   final bool libraryActionsNudgeComplete;
+  final bool backendConnectionTipComplete;
   final bool darkModeEnabled;
   final bool popupBackgroundBlurEnabled;
   final String backgroundImagePath;
@@ -13616,6 +14117,7 @@ class LauncherSettings {
     String? profileAvatarPath,
     bool? profileSetupComplete,
     bool? libraryActionsNudgeComplete,
+    bool? backendConnectionTipComplete,
     bool? darkModeEnabled,
     bool? popupBackgroundBlurEnabled,
     String? backgroundImagePath,
@@ -13651,6 +14153,8 @@ class LauncherSettings {
       profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
       libraryActionsNudgeComplete:
           libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
+      backendConnectionTipComplete:
+          backendConnectionTipComplete ?? this.backendConnectionTipComplete,
       darkModeEnabled: darkModeEnabled ?? this.darkModeEnabled,
       popupBackgroundBlurEnabled:
           popupBackgroundBlurEnabled ?? this.popupBackgroundBlurEnabled,
@@ -13700,6 +14204,7 @@ class LauncherSettings {
       profileAvatarPath: '',
       profileSetupComplete: false,
       libraryActionsNudgeComplete: false,
+      backendConnectionTipComplete: false,
       darkModeEnabled: true,
       popupBackgroundBlurEnabled: true,
       backgroundImagePath: '',
@@ -13792,6 +14297,10 @@ class LauncherSettings {
       ),
       libraryActionsNudgeComplete: asBool(
         json['libraryActionsNudgeComplete'],
+        true,
+      ),
+      backendConnectionTipComplete: asBool(
+        json['backendConnectionTipComplete'],
         true,
       ),
       darkModeEnabled: asBool(
@@ -13898,6 +14407,7 @@ class LauncherSettings {
       'profileAvatarPath': profileAvatarPath,
       'profileSetupComplete': profileSetupComplete,
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
+      'backendConnectionTipComplete': backendConnectionTipComplete,
       'darkModeEnabled': darkModeEnabled,
       'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
       'backgroundImagePath': backgroundImagePath,
