@@ -543,6 +543,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   Timer? _homeHeroTimer;
   Timer? _pollTimer;
   Timer? _gameServerCrashStatusClearTimer;
+  bool _runtimePollingStarted = false;
+  DateTime? _runtimePollingStartedAt;
+  Future<void>? _runtimeRefreshInFlight;
 
   _UiStatus? _gameUiStatus;
   _UiStatus? _gameServerUiStatus;
@@ -675,10 +678,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       _log('launcher', 'ATLAS Link initialized.');
 
       unawaited(_cleanupAtlasBackendInstallerIfBackendDetected());
-      await _refreshRuntime();
-      _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-        unawaited(_refreshRuntime());
-      });
+      if (!_showStartup) {
+        _startRuntimeRefreshLoopIfNeeded();
+      }
 
       _queueFirstRunProfileSetup();
       _queueLauncherAutoUpdateCheckOnLaunch();
@@ -691,6 +693,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           _startupConfigResolved = true;
         });
         _shellEntranceController.value = 1.0;
+        _startRuntimeRefreshLoopIfNeeded();
       }
     }
   }
@@ -842,8 +845,34 @@ class _LauncherScreenState extends State<LauncherScreen>
       _showStartup = false;
     });
     _shellEntranceController.forward(from: 0);
+    _startRuntimeRefreshLoopIfNeeded();
     _queueFirstRunProfileSetup();
     _queueLauncherAutoUpdateCheckOnLaunch();
+  }
+
+  void _startRuntimeRefreshLoopIfNeeded() {
+    if (_runtimePollingStarted) return;
+    _runtimePollingStarted = true;
+    _runtimePollingStartedAt = DateTime.now();
+
+    unawaited(
+      Future<void>(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 320));
+        if (!mounted) return;
+        await _refreshRuntime();
+      }),
+    );
+
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      unawaited(_refreshRuntime());
+    });
+  }
+
+  bool _deferNonCriticalRuntimeRefresh() {
+    if (!_profileSetupDialogVisible) return false;
+    final startedAt = _runtimePollingStartedAt;
+    if (startedAt == null) return false;
+    return DateTime.now().difference(startedAt) < const Duration(seconds: 14);
   }
 
   void _queueFirstRunProfileSetup() {
@@ -852,7 +881,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     _profileSetupDialogQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _profileSetupDialogQueued = false;
-      unawaited(_maybeShowFirstRunProfileSetup());
+      unawaited(
+        Future<void>(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          if (!mounted) return;
+          await _maybeShowFirstRunProfileSetup();
+        }),
+      );
     });
   }
 
@@ -862,7 +897,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     _launcherUpdateAutoCheckQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _launcherUpdateAutoCheckQueued = false;
-      unawaited(_maybeAutoCheckForLauncherUpdatesOnLaunch());
+      unawaited(
+        Future<void>(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 900));
+          if (!mounted) return;
+          await _maybeAutoCheckForLauncherUpdatesOnLaunch();
+        }),
+      );
     });
   }
 
@@ -872,6 +913,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (!_startupConfigResolved) return;
     if (_showStartup) return;
     if (_launcherUpdateDialogVisible) return;
+    if (!_settings.profileSetupComplete) return;
     if (_profileSetupDialogVisible) {
       _queueLauncherAutoUpdateCheckOnLaunch();
       return;
@@ -912,6 +954,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       } catch (error) {
         _log('settings', 'Failed to persist install state: $error');
       }
+      _queueLauncherAutoUpdateCheckOnLaunch();
     } catch (error) {
       _log('settings', 'First-run profile setup failed: $error');
     } finally {
@@ -2154,37 +2197,60 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
   }
 
-  Future<void> _refreshRuntime() async {
-    final proxyOk = await _syncBackendProxy();
-    if (!proxyOk) {
-      if (!mounted) return;
-      setState(() => _backendOnline = false);
+  Future<void> _refreshRuntime({bool force = false}) async {
+    if (!force && _deferNonCriticalRuntimeRefresh()) return;
+
+    final inFlight = _runtimeRefreshInFlight;
+    if (inFlight != null) {
+      await inFlight;
       return;
     }
 
-    final uri = Uri(
-      scheme: 'http',
-      host: _defaultBackendHost,
-      port: _defaultBackendPort,
-      path: 'unknown',
-    );
-
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 3)
-      ..autoUncompress = false;
+    final completer = Completer<void>();
+    _runtimeRefreshInFlight = completer.future;
     try {
-      final req = await client.getUrl(uri);
-      final res = await req.close();
-      if (!mounted) return;
-      setState(() {
-        // If we get a response and it's not a proxy error, treat it as online.
-        _backendOnline = res.statusCode < 500;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _backendOnline = false);
+      final proxyOk = await _syncBackendProxy();
+      if (!proxyOk) {
+        if (mounted && _backendOnline) {
+          setState(() => _backendOnline = false);
+        }
+        return;
+      }
+
+      final uri = Uri(
+        scheme: 'http',
+        host: _defaultBackendHost,
+        port: _defaultBackendPort,
+        path: 'unknown',
+      );
+
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 3)
+        ..autoUncompress = false;
+      try {
+        final req = await client.getUrl(uri);
+        final res = await req.close();
+        if (mounted) {
+          final online = res.statusCode < 500;
+          if (_backendOnline != online) {
+            setState(() {
+              // If we get a response and it's not a proxy error, treat it as online.
+              _backendOnline = online;
+            });
+          }
+        }
+      } catch (_) {
+        if (mounted && _backendOnline) {
+          setState(() => _backendOnline = false);
+        }
+      } finally {
+        client.close(force: true);
+      }
     } finally {
-      client.close(force: true);
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+      _runtimeRefreshInFlight = null;
     }
   }
 
@@ -8091,6 +8157,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     _pollTimer?.cancel();
     _pollTimer = null;
+    _runtimePollingStarted = false;
 
     _logFlushTimer?.cancel();
     _logFlushTimer = null;
@@ -8236,10 +8303,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('settings', 'Failed to save install state: $error');
     }
 
-    await _refreshRuntime();
-    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      unawaited(_refreshRuntime());
-    });
+    if (!_showStartup) {
+      _startRuntimeRefreshLoopIfNeeded();
+    }
 
     if (mounted) _toast('Launcher reset.');
     _log('settings', 'Launcher reset completed.');
@@ -11748,7 +11814,7 @@ foreach ($app in $appPaths) {
       }
     }
     await _saveSettings(toast: false);
-    await _refreshRuntime();
+    await _refreshRuntime(force: true);
     if (!mounted) return;
     final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
     final effective = '$_defaultBackendHost:$_defaultBackendPort';
