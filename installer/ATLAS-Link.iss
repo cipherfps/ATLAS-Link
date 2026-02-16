@@ -44,7 +44,7 @@ OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#ExecutableName}
@@ -143,13 +143,13 @@ begin
   if not FileExists(PowerShellExe) then
     PowerShellExe := 'powershell';
 
-  Params := '-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File "' + ScriptPath + '"';
+  Params := '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + ScriptPath + '"';
   if not ShellExec(
-    'runas',
+    'open',
     PowerShellExe,
     Params,
     '',
-    SW_SHOWNORMAL,
+    SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode
   ) then begin

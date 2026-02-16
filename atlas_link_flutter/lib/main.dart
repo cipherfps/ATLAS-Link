@@ -746,8 +746,12 @@ class _LauncherScreenState extends State<LauncherScreen>
     final preservedBackgroundParticlesOpacity =
         _settings.backgroundParticlesOpacity;
     final preservedStartupAnimationEnabled = _settings.startupAnimationEnabled;
+    final preservedLibraryActionsNudgeComplete =
+        _settings.libraryActionsNudgeComplete ||
+        _installState.libraryActionsNudgeComplete;
     final preservedBackendConnectionTipComplete =
-        _settings.backendConnectionTipComplete;
+        _settings.backendConnectionTipComplete ||
+        _installState.backendConnectionTipComplete;
 
     final preservedProfileSetupComplete =
         _settings.profileSetupComplete || _installState.profileSetupComplete;
@@ -792,6 +796,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       username: preservedUsername,
       profileAvatarPath: preservedAvatarPath,
       profileSetupComplete: preservedProfileSetupComplete,
+      libraryActionsNudgeComplete: preservedLibraryActionsNudgeComplete,
       darkModeEnabled: preservedDarkModeEnabled,
       popupBackgroundBlurEnabled: preservedPopupBackgroundBlurEnabled,
       backgroundImagePath: preservedBackgroundImagePath,
@@ -804,6 +809,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     );
     final nextInstallState = LauncherInstallState.defaults().copyWith(
       profileSetupComplete: preservedProfileSetupComplete,
+      libraryActionsNudgeComplete: preservedLibraryActionsNudgeComplete,
+      backendConnectionTipComplete: preservedBackendConnectionTipComplete,
       lastSeenLauncherVersion: toVersion,
     );
 
