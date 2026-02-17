@@ -1750,6 +1750,102 @@ class _LauncherScreenState extends State<LauncherScreen>
     return normalizedPath.startsWith(prefix);
   }
 
+  static const String _atlasLinkBundledDllFallbackBaseUrl =
+      'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
+
+  String _titleCaseLabel(String label) {
+    final trimmed = label.trim();
+    if (trimmed.isEmpty) return trimmed;
+    final parts = trimmed.split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
+    final cased = parts.map((word) {
+      if (RegExp(r'^[A-Z0-9]+$').hasMatch(word)) return word;
+      final first = word[0].toUpperCase();
+      final rest = word.length > 1 ? word.substring(1) : '';
+      return '$first$rest';
+    }).toList();
+    return cased.join(' ');
+  }
+
+  Future<bool> _tryDownloadBundledDllFromGitHub({
+    required String bundledAssetPath,
+    required File outputFile,
+    required String label,
+  }) async {
+    final normalized = bundledAssetPath
+        .trim()
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'^/+'), '');
+    if (normalized.isEmpty) return false;
+
+    // Only allow downloading assets that are expected to ship with the launcher.
+    if (!normalized.toLowerCase().startsWith('assets/dlls/')) return false;
+
+    final url = '$_atlasLinkBundledDllFallbackBaseUrl$normalized';
+    final tmp = File('${outputFile.path}.tmp');
+    try {
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
+
+      _log('settings', 'Bundled $label DLL missing. Downloading from GitHub...');
+      final displayLabel = _titleCaseLabel(label);
+      if (mounted) {
+        _toastProgress(
+          'Downloading $displayLabel DLL...',
+          progress: null,
+          indeterminate: true,
+        );
+      }
+      await _downloadToFile(
+        url,
+        tmp,
+        onProgress: (receivedBytes, totalBytes) {
+          if (!mounted) return;
+          if (totalBytes == null || totalBytes <= 0) {
+            _toastProgress(
+              'Downloading $displayLabel DLL...',
+              progress: null,
+              indeterminate: true,
+            );
+            return;
+          }
+          final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
+          _toastProgress(
+            'Downloading $displayLabel DLL...',
+            progress: ratio,
+            indeterminate: false,
+          );
+        },
+      );
+      final length = await tmp.length();
+      if (length <= 0) {
+        throw 'Downloaded file was empty.';
+      }
+
+      if (await outputFile.exists()) {
+        await outputFile.delete();
+      }
+      await tmp.rename(outputFile.path);
+      if (mounted) {
+        _toastProgressDismiss();
+      }
+      return true;
+    } catch (error) {
+      _log('settings', 'Failed to download default $label DLL from GitHub ($url): $error');
+      if (mounted) {
+        _toastProgressDismiss();
+      }
+      try {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      } catch (_) {
+        // Ignore cleanup failures.
+      }
+      return false;
+    }
+  }
+
   Future<String?> _ensureBundledDll({
     required String bundledAssetPath,
     required String bundledFileName,
@@ -1765,11 +1861,26 @@ class _LauncherScreenState extends State<LauncherScreen>
       final outputPath = _joinPath([dllDir.path, bundledFileName]);
       final outputFile = File(outputPath);
       if (overwriteFallbackCopy || !outputFile.existsSync()) {
-        final bytes = await rootBundle.load(bundledAssetPath);
-        await outputFile.writeAsBytes(
-          bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-          flush: true,
-        );
+        try {
+          final bytes = await rootBundle.load(bundledAssetPath);
+          await outputFile.writeAsBytes(
+            bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+            flush: true,
+          );
+        } catch (error) {
+          // If the packaged asset is missing/corrupted, fall back to fetching
+          // the default from GitHub so the Reset button can still restore it.
+          _log(
+            'settings',
+            'Failed to extract bundled $label DLL ($bundledAssetPath): $error',
+          );
+          final downloaded = await _tryDownloadBundledDllFromGitHub(
+            bundledAssetPath: bundledAssetPath,
+            outputFile: outputFile,
+            label: label,
+          );
+          if (!downloaded) rethrow;
+        }
       }
       return outputPath;
     } catch (error) {
@@ -9138,33 +9249,57 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   void _toast(String message) {
     if (!mounted) return;
 
-    if (_toastOverlayEntry == null) {
-      final overlay = Overlay.maybeOf(context, rootOverlay: true);
-      if (overlay == null) return;
-
-      _toastOverlayEntry = OverlayEntry(
-        builder: (overlayContext) {
-          final safePadding = MediaQuery.of(overlayContext).padding;
-          return Positioned(
-            right: 18 + safePadding.right,
-            bottom: 18 + safePadding.bottom,
-            child: Material(
-              color: Colors.transparent,
-              child: _ToastOverlayHost(
-                key: _toastHostKey,
-                onEmpty: () {
-                  _toastOverlayEntry?.remove();
-                  _toastOverlayEntry = null;
-                },
-              ),
-            ),
-          );
-        },
-      );
-      overlay.insert(_toastOverlayEntry!);
-    }
-
+    if (!_ensureToastOverlayReady()) return;
     _toastHostKey.currentState?.show(message);
+  }
+
+  bool _ensureToastOverlayReady() {
+    if (!mounted) return false;
+    if (_toastOverlayEntry != null) return true;
+
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return false;
+
+    _toastOverlayEntry = OverlayEntry(
+      builder: (overlayContext) {
+        final safePadding = MediaQuery.of(overlayContext).padding;
+        return Positioned(
+          right: 18 + safePadding.right,
+          bottom: 18 + safePadding.bottom,
+          child: Material(
+            color: Colors.transparent,
+            child: _ToastOverlayHost(
+              key: _toastHostKey,
+              onEmpty: () {
+                _toastOverlayEntry?.remove();
+                _toastOverlayEntry = null;
+              },
+            ),
+          ),
+        );
+      },
+    );
+    overlay.insert(_toastOverlayEntry!);
+    return true;
+  }
+
+  void _toastProgress(
+    String message, {
+    required double? progress,
+    required bool indeterminate,
+  }) {
+    if (!mounted) return;
+    if (!_ensureToastOverlayReady()) return;
+    _toastHostKey.currentState?.showProgress(
+      message,
+      progress: progress,
+      indeterminate: indeterminate,
+    );
+  }
+
+  void _toastProgressDismiss() {
+    if (!mounted) return;
+    _toastHostKey.currentState?.dismissProgressSoon();
   }
 
   ImageProvider<Object> _backgroundImage() {
@@ -14497,6 +14632,9 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
       GlobalKey<_AnimatedToastCardState>();
   Timer? _timer;
   String _message = '';
+  bool _progressMode = false;
+  double? _progress;
+  bool _progressIndeterminate = false;
 
   void show(String message) {
     if (!mounted) return;
@@ -14505,6 +14643,9 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
 
     _timer?.cancel();
     _message = trimmed;
+    _progressMode = false;
+    _progress = null;
+    _progressIndeterminate = false;
 
     if (mounted) {
       setState(() {});
@@ -14515,6 +14656,42 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
     });
 
     _timer = Timer(_toastDuration, () {
+      if (!mounted) return;
+      _cardKey.currentState?.dismiss();
+    });
+  }
+
+  void showProgress(
+    String message, {
+    required double? progress,
+    required bool indeterminate,
+  }) {
+    if (!mounted) return;
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+
+    _timer?.cancel();
+    _message = trimmed;
+    _progressMode = true;
+    _progress = progress;
+    _progressIndeterminate = indeterminate;
+
+    setState(() {});
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _cardKey.currentState?.showProgress(
+        _message,
+        progress: _progress,
+        indeterminate: _progressIndeterminate,
+      );
+    });
+  }
+
+  void dismissProgressSoon() {
+    if (!mounted) return;
+    if (!_progressMode) return;
+    _timer?.cancel();
+    _timer = Timer(const Duration(milliseconds: 550), () {
       if (!mounted) return;
       _cardKey.currentState?.dismiss();
     });
@@ -14559,6 +14736,9 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
   late final Animation<Offset> _slide;
   bool _dismissing = false;
   String _message = '';
+  bool _showProgressBar = false;
+  double? _progress;
+  bool _progressIndeterminate = false;
 
   @override
   void initState() {
@@ -14588,13 +14768,47 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
     final trimmed = message.trim();
     if (trimmed.isEmpty) return;
 
-    setState(() => _message = trimmed);
+    setState(() {
+      _message = trimmed;
+      _showProgressBar = false;
+      _progress = null;
+      _progressIndeterminate = false;
+    });
 
     final wasHidden = _controller.value <= 0.001;
     _dismissing = false;
 
     // If we're mid-dismiss and a new toast arrives, keep it visible without
     // re-running an entrance animation.
+    _controller.stop();
+    if (wasHidden) {
+      _controller
+        ..value = 0
+        ..forward();
+    } else {
+      _controller.value = 1;
+    }
+  }
+
+  void showProgress(
+    String message, {
+    required double? progress,
+    required bool indeterminate,
+  }) {
+    if (!mounted) return;
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+
+    setState(() {
+      _message = trimmed;
+      _showProgressBar = true;
+      _progress = progress;
+      _progressIndeterminate = indeterminate;
+    });
+
+    final wasHidden = _controller.value <= 0.001;
+    _dismissing = false;
+
     _controller.stop();
     if (wasHidden) {
       _controller
@@ -14625,6 +14839,9 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
   @override
   Widget build(BuildContext context) {
     final onSurface = _onSurface(context, 0.92);
+    final barColor = Theme.of(context).colorScheme.secondary;
+    final barTrack = _onSurface(context, 0.10);
+    const radius = 18.0;
     return FadeTransition(
       opacity: _fade,
       child: SlideTransition(
@@ -14632,11 +14849,8 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: _dialogSurfaceColor(context),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: _onSurface(context, 0.12)),
+              borderRadius: BorderRadius.circular(radius),
               boxShadow: [
                 BoxShadow(
                   color: _dialogShadowColor(context),
@@ -14645,14 +14859,43 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
                 ),
               ],
             ),
-            child: Text(
-              _message,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: onSurface,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(radius),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(context),
+                  borderRadius: BorderRadius.circular(radius),
+                  border: Border.all(color: _onSurface(context, 0.12)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                      child: Text(
+                        _message,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: onSurface,
+                          fontWeight: FontWeight.w600,
+                          height: 1.2,
+                        ),
+                      ),
+                    ),
+                    if (_showProgressBar)
+                      SizedBox(
+                        height: 3,
+                        child: LinearProgressIndicator(
+                          value: _progressIndeterminate ? null : _progress,
+                          backgroundColor: barTrack,
+                          valueColor: AlwaysStoppedAnimation<Color>(barColor),
+                          minHeight: 3,
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
