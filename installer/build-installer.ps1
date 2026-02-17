@@ -12,6 +12,73 @@ function Write-Step {
   Write-Host "[ATLAS-Link Installer] $Message" -ForegroundColor Cyan
 }
 
+function Stop-AtlasLinkProcesses {
+  $names = @(
+    'ATLAS Link',
+    'atlas_link_flutter'
+  )
+
+  foreach ($name in $names) {
+    try {
+      $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+      foreach ($p in @($procs)) {
+        Write-Step "Stopping running process: $($p.ProcessName) (pid $($p.Id))"
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {
+      # Ignore failures (process may not exist / access denied).
+    }
+  }
+}
+
+function Remove-DirWithRetry {
+  param(
+    [Parameter(Mandatory=$true)][string]$Path,
+    [int]$Attempts = 6
+  )
+
+  if (-not (Test-Path $Path)) {
+    return
+  }
+
+  for ($i = 1; $i -le $Attempts; $i++) {
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+      return
+    } catch {
+      if ($i -eq $Attempts) {
+        Write-Step "Warning: failed to remove '$Path' after $Attempts attempts: $($_.Exception.Message)"
+        return
+      }
+      Start-Sleep -Milliseconds (200 * $i)
+    }
+  }
+}
+
+function Remove-FileWithRetry {
+  param(
+    [Parameter(Mandatory=$true)][string]$Path,
+    [int]$Attempts = 6
+  )
+
+  if (-not (Test-Path $Path)) {
+    return
+  }
+
+  for ($i = 1; $i -le $Attempts; $i++) {
+    try {
+      Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+      return
+    } catch {
+      if ($i -eq $Attempts) {
+        Write-Step "Warning: failed to remove file '$Path' after $Attempts attempts: $($_.Exception.Message)"
+        return
+      }
+      Start-Sleep -Milliseconds (200 * $i)
+    }
+  }
+}
+
 function Find-Iscc {
   $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
   $isccFromPath = $null
@@ -96,13 +163,37 @@ Write-Step "Resolved app version: $version"
 if (-not $SkipFlutterBuild) {
   if (-not $SkipFlutterClean) {
     Write-Step "Running flutter clean"
+
+    # Release builds can fail to clean/rebuild if a previous app binary is
+    # still running (or held by AV/indexers). Stop ATLAS Link and best-effort
+    # remove common locked outputs before cleaning.
+    Stop-AtlasLinkProcesses
+    $releaseOutputDir = Join-Path $flutterDir 'build\windows\x64\runner\Release'
+    Remove-FileWithRetry -Path (Join-Path $releaseOutputDir 'atlas_link_flutter.exe')
+    Remove-FileWithRetry -Path (Join-Path $releaseOutputDir 'ATLAS Link.exe')
+
     Push-Location $flutterDir
     try {
-      flutter clean
+      try {
+        flutter clean
+      } catch {
+        Write-Step "flutter clean failed (likely locked files). Attempting to stop ATLAS Link and retry..."
+        Stop-AtlasLinkProcesses
+        Start-Sleep -Milliseconds 350
+        try {
+          flutter clean
+        } catch {
+          Write-Step "Warning: flutter clean still failed. Continuing build with manual cleanup attempts."
+        }
+      }
     }
     finally {
       Pop-Location
     }
+
+    # Best-effort cleanup for common lock hotspots.
+    Remove-DirWithRetry -Path (Join-Path $flutterDir 'build')
+    Remove-DirWithRetry -Path (Join-Path $flutterDir '.dart_tool')
   }
 
   Write-Step "Running flutter build windows --release"

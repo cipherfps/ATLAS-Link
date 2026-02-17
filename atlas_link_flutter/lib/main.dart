@@ -19,8 +19,80 @@ import 'package:win32/win32.dart';
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
 const _fallbackAcrylicColorLight = Color(0x36F2F6FF);
 
+RandomAccessFile? _singleInstanceLockHandle;
+
+Future<void> _releaseSingleInstanceLock() async {
+  final handle = _singleInstanceLockHandle;
+  if (handle == null) return;
+  _singleInstanceLockHandle = null;
+  try {
+    await handle.unlock();
+  } catch (_) {
+    // Ignore if lock was already released.
+  }
+  try {
+    await handle.close();
+  } catch (_) {
+    // Ignore close failures during shutdown.
+  }
+}
+
+void _registerSingleInstanceReleaseHooks() {
+  Future<void> onSignal(_) async {
+    await _releaseSingleInstanceLock();
+    exit(0);
+  }
+
+  for (final signal in <ProcessSignal>[
+    ProcessSignal.sigint,
+    ProcessSignal.sigterm,
+  ]) {
+    try {
+      signal.watch().listen((event) {
+        unawaited(onSignal(event));
+      });
+    } catch (_) {
+      // Some environments/signals may not be supported.
+    }
+  }
+}
+
+Future<bool> _acquireSingleInstanceLock() async {
+  try {
+    final appData = Platform.environment['APPDATA']?.trim();
+    final lockRoot = appData != null && appData.isNotEmpty
+        ? Directory('$appData\\ATLAS Link')
+        : Directory(
+            '${Directory.systemTemp.path}${Platform.pathSeparator}ATLAS Link',
+          );
+
+    if (!lockRoot.existsSync()) {
+      await lockRoot.create(recursive: true);
+    }
+
+    final lockFile = File(
+      '${lockRoot.path}${Platform.pathSeparator}atlas_link.lock',
+    );
+    if (!lockFile.existsSync()) {
+      await lockFile.create(recursive: true);
+    }
+
+    final handle = await lockFile.open(mode: FileMode.append);
+    await handle.lock(FileLock.exclusive);
+    _singleInstanceLockHandle = handle;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final lockAcquired = await _acquireSingleInstanceLock();
+  if (!lockAcquired) {
+    exit(0);
+  }
+  _registerSingleInstanceReleaseHooks();
   if (Platform.isWindows) {
     try {
       await Window.initialize();
@@ -279,9 +351,12 @@ class _FortniteProcessState {
   bool tokenError = false;
   bool corrupted = false;
   bool killed = false;
+  bool exited = false;
   bool postLoginInjected = false;
   bool largePakInjected = false;
   bool gameServerInjected = false;
+  bool hostPostLoginPatchersInjected = false;
+  bool gameServerInjectionScheduled = false;
 
   void killAuxiliary() {
     final launcher = launcherPid;
@@ -294,6 +369,7 @@ class _FortniteProcessState {
     if (killed) return;
     killed = true;
     launched = true;
+    exited = true;
     if (includeChild) {
       child?.killAll();
     }
@@ -479,12 +555,17 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _logWriteChain = Future<void>.value();
   bool _logFileReady = false;
 
+  OverlayEntry? _toastOverlayEntry;
+    final GlobalKey<_ToastOverlayHostState> _toastHostKey =
+      GlobalKey<_ToastOverlayHostState>();
+
   final _usernameController = TextEditingController();
   final _backendDirController = TextEditingController();
   final _backendCommandController = TextEditingController();
   final _backendHostController = TextEditingController();
   final _backendPortController = TextEditingController();
   final _librarySearchController = TextEditingController();
+  final ScrollController _libraryScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
   final _authenticationPatcherController = TextEditingController();
   final _memoryPatcherController = TextEditingController();
@@ -500,9 +581,16 @@ class _LauncherScreenState extends State<LauncherScreen>
   List<VersionEntry>? _sortedVersionsSource;
   List<VersionEntry> _sortedVersionsCache = const <VersionEntry>[];
 
+  String? _librarySplashPrefetchSignature;
+  bool _librarySplashPrefetchQueued = false;
+  bool _libraryWarmupQueued = false;
+  bool _libraryWarmupCompleted = false;
+
   bool _showStartup = true;
   bool _startupConfigResolved = false;
   bool _backendOnline = false;
+  DateTime? _lastBackendUndetectedToastAt;
+  DateTime? _lastBackendCheckingToastAt;
   bool _checkingLauncherUpdate = false;
   bool _launcherUpdateDialogVisible = false;
   bool _launcherUpdateAutoCheckQueued = false;
@@ -549,6 +637,14 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   _UiStatus? _gameUiStatus;
   _UiStatus? _gameServerUiStatus;
+
+  bool _launchProgressPopupDismissed = false;
+  String? _lastLaunchStatusToast;
+  DateTime? _lastLaunchStatusToastAt;
+
+  bool _gameServerPromptVisible = false;
+  bool _gameServerPromptRequiredForLaunch = false;
+  bool _gameServerPromptResolvedForLaunch = true;
 
   final Set<String> _afterMathCleanedRoots = <String>{};
 
@@ -607,6 +703,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     _homeHeroTimer?.cancel();
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
+    _toastOverlayEntry?.remove();
+    _toastOverlayEntry = null;
     _logFlushTimer?.cancel();
     _flushLogBuffer();
     _shellEntranceController.dispose();
@@ -617,6 +715,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _backendHostController.dispose();
     _backendPortController.dispose();
     _librarySearchController.dispose();
+    _libraryScrollController.dispose();
     _unrealEnginePatcherController.dispose();
     _authenticationPatcherController.dispose();
     _memoryPatcherController.dispose();
@@ -848,6 +947,63 @@ class _LauncherScreenState extends State<LauncherScreen>
     _startRuntimeRefreshLoopIfNeeded();
     _queueFirstRunProfileSetup();
     _queueLauncherAutoUpdateCheckOnLaunch();
+    _queueLibraryWarmup();
+  }
+
+  void _queueLibraryWarmup() {
+    if (_libraryWarmupQueued || _libraryWarmupCompleted) return;
+    _libraryWarmupQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _libraryWarmupQueued = false;
+
+      // Give the shell a moment to settle before doing any heavy work.
+      Timer(const Duration(milliseconds: 1200), () {
+        if (!mounted) return;
+        if (_showStartup) return;
+        if (_libraryWarmupCompleted) return;
+
+        unawaited(_runLibraryWarmupNow());
+      });
+    });
+  }
+
+  Future<void> _runLibraryWarmupNow() async {
+    if (!mounted) return;
+    if (_showStartup) return;
+    if (_libraryWarmupCompleted) return;
+
+    // Pre-sort versions so the first Library open doesn't pay the cost.
+    final installed = _sortedInstalledVersions();
+
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+
+    // Pre-cache the selected cover at its typical display size.
+    try {
+      final coverProvider = ResizeImage(
+        _libraryCoverImage(_settings.selectedVersion),
+        width: (250 * dpr).round().clamp(1, 4096),
+      );
+      await precacheImage(coverProvider, context);
+    } catch (_) {
+      // Ignore bad images.
+    }
+
+    // Pre-cache a small batch of grid covers to reduce first-scroll pop-in.
+    final cacheWidth = (520 * dpr).round().clamp(1, 4096);
+    final count = min(4, installed.length);
+    for (var i = 0; i < count; i++) {
+      if (!mounted) return;
+      try {
+        await precacheImage(
+          ResizeImage(_libraryCoverImage(installed[i]), width: cacheWidth),
+          context,
+        );
+      } catch (_) {
+        // Ignore bad images.
+      }
+    }
+
+    _libraryWarmupCompleted = true;
   }
 
   void _startRuntimeRefreshLoopIfNeeded() {
@@ -2211,8 +2367,12 @@ class _LauncherScreenState extends State<LauncherScreen>
     try {
       final proxyOk = await _syncBackendProxy();
       if (!proxyOk) {
-        if (mounted && _backendOnline) {
-          setState(() => _backendOnline = false);
+        if (mounted) {
+          final wasOnline = _backendOnline;
+          if (wasOnline) {
+            setState(() => _backendOnline = false);
+            _toastBackendUndetected();
+          }
         }
         return;
       }
@@ -2233,15 +2393,23 @@ class _LauncherScreenState extends State<LauncherScreen>
         if (mounted) {
           final online = res.statusCode < 500;
           if (_backendOnline != online) {
+            final wasOnline = _backendOnline;
             setState(() {
               // If we get a response and it's not a proxy error, treat it as online.
               _backendOnline = online;
             });
+            if (wasOnline && !online) {
+              _toastBackendUndetected();
+            }
           }
         }
       } catch (_) {
-        if (mounted && _backendOnline) {
-          setState(() => _backendOnline = false);
+        if (mounted) {
+          final wasOnline = _backendOnline;
+          if (wasOnline) {
+            setState(() => _backendOnline = false);
+            _toastBackendUndetected();
+          }
         }
       } finally {
         client.close(force: true);
@@ -2252,6 +2420,20 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       _runtimeRefreshInFlight = null;
     }
+  }
+
+  void _toastBackendUndetected() {
+    if (!mounted) return;
+
+    final now = DateTime.now();
+    final lastAt = _lastBackendUndetectedToastAt;
+    if (lastAt != null && now.difference(lastAt).inSeconds < 10) {
+      return;
+    }
+    _lastBackendUndetectedToastAt = now;
+
+    final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
+    _toast('Backend undetected (configured: $configured).');
   }
 
   bool _backendProxyRequired() {
@@ -3478,6 +3660,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     });
 
+    _maybeToastLaunchStatus(host: host, status: next);
+    _resetLaunchProgressPopupDismissalIfNeeded();
+
     if (host &&
         severity == _UiStatusSeverity.error &&
         message.trim() == 'Game server crashed.') {
@@ -3507,6 +3692,67 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _gameUiStatus = null;
       }
     });
+
+    _resetLaunchProgressPopupDismissalIfNeeded();
+  }
+
+  void _clearStaleHostStoppedWarningOnNewSession() {
+    if (_gameServerProcess != null) return;
+    if (_gameServerLaunching) return;
+    final status = _gameServerUiStatus;
+    if (status == null) return;
+    if (status.severity != _UiStatusSeverity.warning) return;
+
+    final lower = status.message.toLowerCase();
+    final isStoppedPrompt =
+        lower.contains('stopped') && lower.contains('click host');
+    if (!isStoppedPrompt) return;
+
+    _clearUiStatus(host: true);
+  }
+
+  void _maybeToastLaunchStatus({required bool host, required _UiStatus status}) {
+    if (!mounted) return;
+    if (!_launchProgressPopupDismissed) return;
+    if (status.severity != _UiStatusSeverity.info) return;
+    if (!_isLaunchInProgress()) return;
+
+    final lower = status.message.toLowerCase();
+    final isLaunchMessage =
+        lower.contains('starting') ||
+        lower.contains('launching') ||
+        lower.contains('checking') ||
+        lower.contains('waiting') ||
+        lower.contains('inject') ||
+        lower.contains('finalizing') ||
+        lower.contains('preparing');
+    if (!isLaunchMessage) return;
+
+    final prefix = host ? 'Host' : 'Fortnite';
+    final toastMessage = '$prefix: ${status.message.trim()}';
+    if (toastMessage.trim().isEmpty) return;
+
+    final now = DateTime.now();
+    final last = _lastLaunchStatusToast;
+    final lastAt = _lastLaunchStatusToastAt;
+    if (last == toastMessage) return;
+    if (lastAt != null && now.difference(lastAt).inMilliseconds < 650) return;
+
+    _lastLaunchStatusToast = toastMessage;
+    _lastLaunchStatusToastAt = now;
+    _toast(toastMessage);
+  }
+
+  void _resetLaunchProgressPopupDismissalIfNeeded() {
+    if (!_launchProgressPopupDismissed) return;
+    if (_isLaunchInProgress()) return;
+    if (!mounted) {
+      _launchProgressPopupDismissed = false;
+    } else {
+      setState(() => _launchProgressPopupDismissed = false);
+    }
+    _lastLaunchStatusToast = null;
+    _lastLaunchStatusToastAt = null;
   }
 
   Color _statusAccentColor(BuildContext context, _UiStatusSeverity severity) {
@@ -3557,18 +3803,19 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (running) {
       if (_gameServerUiStatus != null) return _gameServerUiStatus;
       if (_gameServerInstance?.launched == true) {
-        return const _UiStatus(
-          'Game server running',
-          _UiStatusSeverity.success,
-        );
+        return const _UiStatus('Running', _UiStatusSeverity.success);
       }
-      return const _UiStatus('Game server starting...', _UiStatusSeverity.info);
+      return const _UiStatus('Starting...', _UiStatusSeverity.info);
     }
 
     return _gameServerUiStatus;
   }
 
   Widget _buildLibraryGameStatusLine() {
+    if (_isLaunchInProgress()) {
+      return const SizedBox.shrink();
+    }
+
     final onSurface = Theme.of(context).colorScheme.onSurface;
 
     // Show the most relevant status while launching. When both Fortnite and the
@@ -3590,7 +3837,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       // When the label is already shown, avoid repeating it in the message.
       if (lower.startsWith(labelLower)) {
         text = text.substring(label.length).trimLeft();
-        text = text.replaceFirst(RegExp(r'^[:\\-\\s]+'), '');
+        text = text.replaceFirst(RegExp(r'^[:\-\s]+'), '');
         lower = text.toLowerCase();
       }
 
@@ -3599,9 +3846,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               lower.startsWith('fortnite starting'))) {
         return 'Starting...';
       }
-      if (labelLower == 'game server' &&
-          (lower.startsWith('starting game server') ||
-              lower.startsWith('game server starting'))) {
+        if (labelLower == 'host' &&
+          (lower.startsWith('starting host') ||
+            lower.startsWith('host starting') ||
+            lower.startsWith('starting game server') ||
+            lower.startsWith('game server starting'))) {
         return 'Starting...';
       }
 
@@ -3671,17 +3920,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           message: gameStatus.message,
         );
         final serverText = cleanLabeledMessage(
-          label: 'Game server',
+          label: 'Host',
           message: serverStatus.message,
         );
-        return 'Fortnite: $gameText | Game server: $serverText';
+        return 'Fortnite: $gameText\nHost: $serverText';
       }
       if (showServerLine) {
         final serverText = cleanLabeledMessage(
-          label: 'Game server',
+          label: 'Host',
           message: serverStatus.message,
         );
-        return 'Game server: $serverText';
+        return 'Host: $serverText';
       }
       final gameText = cleanLabeledMessage(
         label: 'Fortnite',
@@ -3722,7 +3971,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 fit: FlexFit.loose,
                 child: Text(
                   formatStatusLine(),
-                  maxLines: 1,
+                  maxLines: showGameLine && showServerLine ? 2 : 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: onSurface.withValues(alpha: 0.9),
@@ -3734,6 +3983,229 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         ),
       ),
+    );
+  }
+
+  bool _isLaunchInProgress() {
+    if (!_startupConfigResolved || _showStartup) return false;
+
+    bool isLaunchMessage(_UiStatus status) {
+      if (status.severity != _UiStatusSeverity.info) return false;
+      final lower = status.message.toLowerCase();
+      if (lower.isEmpty) return false;
+      if (lower.contains('closing') || lower.contains('stopping')) return false;
+      return lower.contains('starting') ||
+          lower.contains('launching') ||
+          lower.contains('checking') ||
+          lower.contains('waiting') ||
+          lower.contains('inject') ||
+          lower.contains('finalizing') ||
+          lower.contains('preparing');
+    }
+
+    final gameStatus = _currentLibraryGameStatus();
+    final hostStatus = _currentLibraryGameServerStatus();
+    final showGame = gameStatus != null && isLaunchMessage(gameStatus);
+    final showHost = hostStatus != null && isLaunchMessage(hostStatus);
+    return showGame || showHost;
+  }
+
+  bool _shouldShowLaunchProgressPopup() {
+    if (_launchProgressPopupDismissed) return false;
+    if (_gameServerPromptVisible) return false;
+    if (_gameServerPromptRequiredForLaunch && !_gameServerPromptResolvedForLaunch) {
+      return false;
+    }
+    return _isLaunchInProgress();
+  }
+
+  String _launchPopupLine({required String label, required String message}) {
+    var text = message.trim();
+    if (text.isEmpty) return '';
+    if (text.endsWith('.') && !text.endsWith('...')) {
+      text = text.substring(0, text.length - 1).trimRight();
+    }
+    return '$label: $text';
+  }
+
+  Widget _buildLaunchProgressPopup() {
+    final selected = _settings.selectedVersion;
+    final cover = _libraryCoverImage(selected);
+    final title = selected?.name.trim().isNotEmpty == true
+        ? selected!.name.trim()
+        : 'Launching';
+    final subtitle = selected?.gameVersion.trim().isNotEmpty == true
+        ? selected!.gameVersion.trim()
+        : '';
+
+    final gameStatus = _currentLibraryGameStatus();
+    final hostStatus = _currentLibraryGameServerStatus();
+    final lines = <String>[
+      if (hostStatus != null)
+        _launchPopupLine(label: 'Host', message: hostStatus.message),
+      if (gameStatus != null)
+        _launchPopupLine(label: 'Fortnite', message: gameStatus.message),
+    ].where((line) => line.trim().isNotEmpty).toList();
+
+    final statusText = lines.isEmpty ? 'Working...' : lines.join('\n');
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: AbsorbPointer(
+            child: _settings.popupBackgroundBlurEnabled
+                ? BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 3.0, sigmaY: 3.0),
+                    child: Container(
+                      color: _dialogBarrierColor(context, 1.0),
+                    ),
+                  )
+                : Container(color: _dialogBarrierColor(context, 1.0)),
+          ),
+        ),
+        Center(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 560),
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+              decoration: BoxDecoration(
+                color: _dialogSurfaceColor(context),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: _onSurface(context, 0.10)),
+                boxShadow: [
+                  BoxShadow(
+                    color: _dialogShadowColor(context),
+                    blurRadius: 34,
+                    offset: const Offset(0, 18),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Image(
+                          image: cover,
+                          width: 54,
+                          height: 54,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: _onSurface(context, 0.94),
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                                height: 1.05,
+                              ),
+                            ),
+                            if (subtitle.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: _onSurface(context, 0.70),
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.0,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(999),
+                        onTap: () {
+                          setState(() => _launchProgressPopupDismissed = true);
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 18,
+                            color: _onSurface(context, 0.70),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                    const SizedBox(height: 14),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18),
+                        color: _onSurface(context, 0.05),
+                        border: Border.all(color: _onSurface(context, 0.10)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.4,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Theme.of(context).colorScheme.secondary,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              statusText,
+                              style: TextStyle(
+                                color: _onSurface(context, 0.88),
+                                fontSize: 13.5,
+                                height: 1.25,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: null,
+                        minHeight: 6,
+                        backgroundColor: _onSurface(context, 0.10),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          Theme.of(context).colorScheme.secondary
+                              .withValues(alpha: 0.9),
+                        ),
+                      ),
+                    ),
+                  ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -3759,7 +4231,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   static const _clientLoadingCompleteMarker = 'UI.State.Startup.SubgameSelect';
 
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
-    if (state.killed) return;
+    if (state.killed || state.exited) return;
 
     if (!state.launched) {
       if (_cannotConnectErrors.any(line.contains)) {
@@ -3796,13 +4268,28 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('game', 'Client fully loaded. Scheduling large pak injection...');
       unawaited(_performDeferredLargePakInjection(state));
     }
+
+    // For hosting, delay the game server DLL injection until the lobby marker.
+    if (state.host &&
+        state.postLoginInjected &&
+        state.hostPostLoginPatchersInjected &&
+        !state.gameServerInjected &&
+        !state.gameServerInjectionScheduled &&
+        line.contains(_clientLoadingCompleteMarker)) {
+      state.gameServerInjectionScheduled = true;
+      _log(
+        'gameserver',
+        'Host fully loaded. Scheduling game server DLL injection...',
+      );
+      unawaited(_performDeferredGameServerInjection(state));
+    }
   }
 
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
     // Give Fortnite a moment after login completes so late-stage injections
     // (like the game server DLL) happen when the client is fully initialized.
     await Future.delayed(const Duration(milliseconds: 900));
-    if (state.killed) return;
+    if (state.killed || state.exited) return;
 
     if (state.host) {
       // For the host, inject memory patcher now (post-login), then inject
@@ -3838,39 +4325,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         exceptPid: state.pid,
       );
 
+      state.hostPostLoginPatchersInjected = true;
       _setUiStatus(
         host: true,
-        message: 'Injecting game server DLL...',
+        message: 'Logged in. Waiting for host to finish loading...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-
-      final serverReport = await _injectConfiguredPatchers(
-        state.pid,
-        state.gameVersion,
-        includeAuth: false,
-        includeMemory: false,
-        includeLargePak: false,
-        includeUnreal: false,
-        includeGameServer: true,
-      );
-
-      final serverFailure = serverReport.firstRequiredFailure;
-      if (serverFailure != null) {
-        _setUiStatus(
-          host: true,
-          message: 'Failed to inject ${serverFailure.name}.',
-          severity: _UiStatusSeverity.error,
-        );
-        return;
-      }
-
-      state.gameServerInjected = true;
-      _setUiStatus(
-        host: true,
-        message: 'Game server running.',
-        severity: _UiStatusSeverity.success,
-      );
+      unawaited(_scheduleHostFallbackGameServerInjection(state));
     } else {
       _setUiStatus(
         host: false,
@@ -3897,6 +4358,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         );
         return;
       }
+      // Large Pak normally injects on a specific loading-complete marker.
+      // In some game-server launch flows that marker may be delayed/missing,
+      // so schedule a fallback attempt after post-login setup.
+      unawaited(_scheduleLargePakFallbackInjection(state));
 
       final optionalFailure = report.firstOptionalFailure;
       if (optionalFailure != null) {
@@ -3920,11 +4385,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _performDeferredLargePakInjection(
     _FortniteProcessState state,
   ) async {
-    if (state.killed || !_settings.largePakPatcherEnabled) return;
+    if (state.killed || state.exited || !_settings.largePakPatcherEnabled) {
+      return;
+    }
 
     // Give the frontend a moment to settle after the loading screen.
     await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (state.killed) return;
+    if (state.killed || state.exited) return;
 
     _setUiStatus(
       host: false,
@@ -3959,6 +4426,93 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Fortnite running.',
       severity: _UiStatusSeverity.success,
     );
+  }
+
+  Future<void> _scheduleLargePakFallbackInjection(
+    _FortniteProcessState state,
+  ) async {
+    if (state.host || !_settings.largePakPatcherEnabled) return;
+
+    await Future<void>.delayed(const Duration(seconds: 8));
+    if (state.killed || state.exited || state.largePakInjected) return;
+    if (!state.postLoginInjected) return;
+
+    state.largePakInjected = true;
+    _log(
+      'game',
+      'Client loading marker not seen in time. Running fallback large pak injection...',
+    );
+    await _performDeferredLargePakInjection(state);
+  }
+
+  Future<void> _performDeferredGameServerInjection(
+    _FortniteProcessState state,
+  ) async {
+    if (!state.host) return;
+    if (state.killed || state.exited) return;
+    if (state.gameServerInjected) return;
+
+    // Give the lobby/subgame UI a moment to settle.
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    if (state.killed || state.exited) return;
+    if (state.gameServerInjected) return;
+
+    _setUiStatus(
+      host: true,
+      message: 'Injecting game server DLL...',
+      severity: _UiStatusSeverity.info,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    final serverReport = await _injectConfiguredPatchers(
+      state.pid,
+      state.gameVersion,
+      includeAuth: false,
+      includeMemory: false,
+      includeLargePak: false,
+      includeUnreal: false,
+      includeGameServer: true,
+    );
+
+    final serverFailure = serverReport.firstRequiredFailure;
+    if (serverFailure != null) {
+      state.gameServerInjectionScheduled = false;
+      _setUiStatus(
+        host: true,
+        message: 'Failed to inject ${serverFailure.name}.',
+        severity: _UiStatusSeverity.error,
+      );
+      return;
+    }
+
+    state.gameServerInjected = true;
+    _setUiStatus(
+      host: true,
+      message: 'Running.',
+      severity: _UiStatusSeverity.success,
+    );
+  }
+
+  Future<void> _scheduleHostFallbackGameServerInjection(
+    _FortniteProcessState state,
+  ) async {
+    if (!state.host) return;
+    if (state.killed || state.exited) return;
+    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
+
+    // Some builds never emit the lobby UI marker. As a fallback, attempt the
+    // server DLL injection after a short delay once post-login patchers ran.
+    await Future<void>.delayed(const Duration(seconds: 16));
+    if (state.killed || state.exited) return;
+    if (!state.hostPostLoginPatchersInjected) return;
+    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
+
+    state.gameServerInjectionScheduled = true;
+    _log(
+      'gameserver',
+      'Host loading marker not seen. Running fallback game server DLL injection...',
+    );
+    unawaited(_performDeferredGameServerInjection(state));
   }
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
@@ -4005,6 +4559,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   void _handleFortniteExit(_FortniteProcessState state, int exitCode) {
+    state.exited = true;
     state.killAuxiliary();
     if (!state.host && state.child != null) {
       // Back-compat: older sessions used the child link to decide when to stop
@@ -4029,7 +4584,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     final tag = state.host ? 'gameserver' : 'game';
-    _log(tag, 'Fortnite exited with code $exitCode.');
+    _log(
+      tag,
+      'Fortnite exited with code $exitCode '
+      '(killed=${state.killed}, launched=${state.launched}, '
+      'postLoginInjected=${state.postLoginInjected}, '
+      'hostPostLoginPatchersInjected=${state.hostPostLoginPatchersInjected}, '
+      'gameServerInjected=${state.gameServerInjected}).',
+    );
 
     if (!state.host) {
       // If hosting was started for this session, stop it only once every client
@@ -4040,10 +4602,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.host && !state.killed && _settings.hostAutoRestartEnabled) {
       _setUiStatus(
         host: true,
-        message: 'Game server stopped. Restarting...',
+        message: 'Stopped. Restarting...',
         severity: _UiStatusSeverity.info,
       );
       unawaited(_autoRestartHosting(state.versionId));
+      return;
+    }
+
+    if (state.host && !state.killed && exitCode == 0 && state.launched) {
+      if (mounted) _toast('Host stopped.');
+      _setUiStatus(
+        host: true,
+        message: 'Stopped. Click Host to start again.',
+        severity: _UiStatusSeverity.warning,
+      );
       return;
     }
 
@@ -4144,6 +4716,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) async {
     if (_backendOnline) return true;
 
+    _toastBackendCheckingDuringLaunch(host: host);
+
     _setUiStatus(
       host: host,
       message: 'Checking backend connection...',
@@ -4182,6 +4756,27 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return false;
   }
 
+  void _toastBackendCheckingDuringLaunch({required bool host}) {
+    if (!mounted) return;
+
+    // Only toast this during a launch/host-start flow.
+    final launching =
+        _gameAction == _GameActionState.launching || _gameServerLaunching;
+    if (!launching) return;
+
+    // The game server prompt happens before the actual launch steps. Toasting
+    // here helps the user understand why Launch may be waiting.
+    final now = DateTime.now();
+    final lastAt = _lastBackendCheckingToastAt;
+    if (lastAt != null && now.difference(lastAt).inSeconds < 6) {
+      return;
+    }
+    _lastBackendCheckingToastAt = now;
+
+    final prefix = host ? 'Host' : 'Fortnite';
+    _toast('$prefix: Checking backend connection...');
+  }
+
   Future<void> _startFortnite({
     String? usernameOverride,
     bool launchingAdditionalClient = false,
@@ -4198,8 +4793,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     _FortniteProcessState? linkedHosting;
+    _clearStaleHostStoppedWarningOnNewSession();
     setState(() => _gameAction = _GameActionState.launching);
     try {
+      final shouldOfferPrompt =
+          !launchingAdditionalClient && _shouldOfferGameServerPrompt();
+      if (mounted) {
+        setState(() {
+          _gameServerPromptRequiredForLaunch = shouldOfferPrompt;
+          _gameServerPromptResolvedForLaunch = !shouldOfferPrompt;
+          _gameServerPromptVisible = false;
+        });
+      } else {
+        _gameServerPromptRequiredForLaunch = shouldOfferPrompt;
+        _gameServerPromptResolvedForLaunch = !shouldOfferPrompt;
+        _gameServerPromptVisible = false;
+      }
+
       _setUiStatus(
         host: false,
         message: 'Preparing launch...',
@@ -4214,10 +4824,29 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       final backendReady = await _ensureBackendReadyForSession(host: false);
       if (!backendReady) return;
-      final gameServerPrompt =
-          !launchingAdditionalClient && _shouldOfferGameServerPrompt()
-          ? await _promptAutomaticGameServerStart()
-          : _GameServerPromptAction.ignore;
+      _GameServerPromptAction? gameServerPrompt;
+      if (shouldOfferPrompt) {
+        if (mounted) {
+          setState(() => _gameServerPromptVisible = true);
+        } else {
+          _gameServerPromptVisible = true;
+        }
+        try {
+          gameServerPrompt = await _promptAutomaticGameServerStart();
+        } finally {
+          if (mounted) {
+            setState(() {
+              _gameServerPromptVisible = false;
+              _gameServerPromptResolvedForLaunch = true;
+            });
+          } else {
+            _gameServerPromptVisible = false;
+            _gameServerPromptResolvedForLaunch = true;
+          }
+        }
+      } else {
+        gameServerPrompt = _GameServerPromptAction.ignore;
+      }
       if (!mounted) return;
       if (gameServerPrompt == null) {
         _log('game', 'Launch cancelled at game server prompt.');
@@ -4379,6 +5008,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         severity: _UiStatusSeverity.error,
       );
     } finally {
+      if (mounted) {
+        setState(() {
+          _gameServerPromptVisible = false;
+          _gameServerPromptRequiredForLaunch = false;
+          _gameServerPromptResolvedForLaunch = true;
+        });
+      } else {
+        _gameServerPromptVisible = false;
+        _gameServerPromptRequiredForLaunch = false;
+        _gameServerPromptResolvedForLaunch = true;
+      }
       if (mounted) setState(() => _gameAction = _GameActionState.idle);
     }
   }
@@ -4682,6 +5322,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     } else {
       _gameServerLaunching = true;
     }
+
+    _clearStaleHostStoppedWarningOnNewSession();
 
     try {
       _setUiStatus(
@@ -5645,6 +6287,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           message: 'Waiting for login...',
           severity: _UiStatusSeverity.info,
         );
+        unawaited(_scheduleHostFallbackPostLoginInjections(instance));
       }
       _log(
         'gameserver',
@@ -5658,6 +6301,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (mounted) _toast('Failed to start automatic game server.');
       return null;
     }
+  }
+
+  Future<void> _scheduleHostFallbackPostLoginInjections(
+    _FortniteProcessState state,
+  ) async {
+    if (!state.host) return;
+    if (state.postLoginInjected) return;
+
+    // Dedicated/headless hosting flows may never emit the UI-based login
+    // markers used by `_isLoginCompleteSignal`. As a safety net, attempt
+    // post-login injections after a short delay if the server is still running.
+    await Future<void>.delayed(const Duration(seconds: 12));
+    if (state.killed || state.exited) return;
+    if (state.postLoginInjected) return;
+
+    state.launched = true;
+    state.postLoginInjected = true;
+    _log(
+      'gameserver',
+      'Login marker not seen. Running fallback post-login injections...',
+    );
+    _setUiStatus(
+      host: true,
+      message: 'Finalizing host launch...',
+      severity: _UiStatusSeverity.info,
+    );
+    unawaited(_performPostLoginInjections(state));
   }
 
   String _normalizeClientUsername(String username) {
@@ -8467,9 +9137,34 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   void _toast(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+
+    if (_toastOverlayEntry == null) {
+      final overlay = Overlay.maybeOf(context, rootOverlay: true);
+      if (overlay == null) return;
+
+      _toastOverlayEntry = OverlayEntry(
+        builder: (overlayContext) {
+          final safePadding = MediaQuery.of(overlayContext).padding;
+          return Positioned(
+            right: 18 + safePadding.right,
+            bottom: 18 + safePadding.bottom,
+            child: Material(
+              color: Colors.transparent,
+              child: _ToastOverlayHost(
+                key: _toastHostKey,
+                onEmpty: () {
+                  _toastOverlayEntry?.remove();
+                  _toastOverlayEntry = null;
+                },
+              ),
+            ),
+          );
+        },
+      );
+      overlay.insert(_toastOverlayEntry!);
+    }
+
+    _toastHostKey.currentState?.show(message);
   }
 
   ImageProvider<Object> _backgroundImage() {
@@ -8717,7 +9412,43 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                     ),
                   ),
+
                 ),
+              ),
+            ),
+
+          if (_startupConfigResolved &&
+              !_showStartup)
+            Positioned.fill(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 240),
+                reverseDuration: const Duration(milliseconds: 180),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) {
+                  final curved = CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeOutCubic,
+                    reverseCurve: Curves.easeInCubic,
+                  );
+                  return FadeTransition(
+                    opacity: curved,
+                    child: ScaleTransition(
+                      scale: Tween<double>(begin: 0.985, end: 1.0).animate(
+                        curved,
+                      ),
+                      child: child,
+                    ),
+                  );
+                },
+                child: _shouldShowLaunchProgressPopup()
+                    ? RepaintBoundary(
+                        key: const ValueKey('launch-progress-popup'),
+                        child: _buildLaunchProgressPopup(),
+                      )
+                    : const SizedBox.shrink(
+                        key: ValueKey('launch-progress-popup-hidden'),
+                      ),
               ),
             ),
           if (_startupConfigResolved && _showStartup)
@@ -9607,6 +10338,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         : installedVersions
               .where((entry) => entry.name.toLowerCase().contains(searchQuery))
               .toList();
+
+    _queueLibrarySplashPrefetch(
+      filteredVersions,
+      signature:
+        '${identityHashCode(installedVersions)}|$searchQuery|${filteredVersions.length}',
+    );
     final hasRunningGameClient = _hasRunningGameClient;
     final launchActsAsClose =
         hasRunningGameClient && !_settings.allowMultipleGameClients;
@@ -9626,10 +10363,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               LayoutBuilder(
                 builder: (context, constraints) {
                   final compact = constraints.maxWidth < 920;
+                  final dpr = MediaQuery.of(context).devicePixelRatio;
+                  final coverWidth = compact
+                      ? constraints.maxWidth
+                      : 250.0;
+                  final coverCacheWidth = (coverWidth * dpr)
+                      .round()
+                      .clamp(1, 4096);
                   final image = ClipRRect(
                     borderRadius: BorderRadius.circular(22),
                     child: Image(
-                      image: coverImage,
+                      image: ResizeImage(coverImage, width: coverCacheWidth),
                       width: compact ? double.infinity : 250,
                       height: 300,
                       fit: BoxFit.cover,
@@ -10051,6 +10795,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
 
     return CustomScrollView(
+      controller: _libraryScrollController,
       slivers: [
         SliverToBoxAdapter(child: topPanel),
         const SliverToBoxAdapter(child: SizedBox(height: 14)),
@@ -10061,6 +10806,49 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ],
       ],
     );
+  }
+
+  void _queueLibrarySplashPrefetch(
+    List<VersionEntry> versions, {
+    required String signature,
+  }) {
+    if (!mounted) return;
+    if (_tab != LauncherTab.library) return;
+    if (versions.isEmpty) return;
+    if (_librarySplashPrefetchQueued) return;
+    if (_librarySplashPrefetchSignature == signature) return;
+
+    _librarySplashPrefetchSignature = signature;
+    _librarySplashPrefetchQueued = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _librarySplashPrefetchQueued = false;
+      if (!mounted) return;
+
+      // Pre-cache the first batch of splash images so scrolling feels instant.
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final cacheWidth = (520 * dpr).round().clamp(1, 4096);
+      final count = min(8, versions.length);
+
+      unawaited(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        for (var i = 0; i < count; i++) {
+          if (!mounted) return;
+          if (_tab != LauncherTab.library) return;
+          final provider = ResizeImage(
+            _libraryCoverImage(versions[i]),
+            width: cacheWidth,
+          );
+          try {
+            await precacheImage(provider, context);
+          } catch (_) {
+            // Ignore bad images.
+          }
+          // Yield to the UI thread to avoid jank.
+          await Future<void>.delayed(const Duration(milliseconds: 8));
+        }
+      }());
+    });
   }
 
   Widget _installedVersionCard(VersionEntry entry) {
@@ -13692,6 +14480,186 @@ Color _adaptiveScrimColor(
   final dark = _isDarkTheme(context);
   final base = dark ? Colors.black : Colors.white;
   return base.withValues(alpha: dark ? darkAlpha : lightAlpha);
+}
+
+class _ToastOverlayHost extends StatefulWidget {
+  const _ToastOverlayHost({super.key, required this.onEmpty});
+
+  final VoidCallback onEmpty;
+
+  @override
+  State<_ToastOverlayHost> createState() => _ToastOverlayHostState();
+}
+
+class _ToastOverlayHostState extends State<_ToastOverlayHost> {
+  static const _toastDuration = Duration(seconds: 3);
+  final GlobalKey<_AnimatedToastCardState> _cardKey =
+      GlobalKey<_AnimatedToastCardState>();
+  Timer? _timer;
+  String _message = '';
+
+  void show(String message) {
+    if (!mounted) return;
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+
+    _timer?.cancel();
+    _message = trimmed;
+
+    if (mounted) {
+      setState(() {});
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _cardKey.currentState?.show(_message);
+    });
+
+    _timer = Timer(_toastDuration, () {
+      if (!mounted) return;
+      _cardKey.currentState?.dismiss();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: _AnimatedToastCard(
+        key: _cardKey,
+        initialMessage: _message,
+        onDismissed: widget.onEmpty,
+      ),
+    );
+  }
+}
+
+class _AnimatedToastCard extends StatefulWidget {
+  const _AnimatedToastCard({
+    super.key,
+    required this.initialMessage,
+    required this.onDismissed,
+  });
+
+  final String initialMessage;
+  final VoidCallback onDismissed;
+
+  @override
+  State<_AnimatedToastCard> createState() => _AnimatedToastCardState();
+}
+
+class _AnimatedToastCardState extends State<_AnimatedToastCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _fade;
+  late final Animation<Offset> _slide;
+  bool _dismissing = false;
+  String _message = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+      reverseDuration: const Duration(milliseconds: 180),
+    );
+    final curve = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    final reverseCurve = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOut,
+      reverseCurve: Curves.easeIn,
+    );
+    _fade = Tween<double>(begin: 0, end: 1).animate(reverseCurve);
+    _slide = Tween<Offset>(begin: const Offset(0, 0.18), end: Offset.zero)
+        .animate(curve);
+    _message = widget.initialMessage;
+    if (_message.trim().isNotEmpty) {
+      _controller.forward();
+    }
+  }
+
+  void show(String message) {
+    if (!mounted) return;
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+
+    setState(() => _message = trimmed);
+
+    final wasHidden = _controller.value <= 0.001;
+    _dismissing = false;
+
+    // If we're mid-dismiss and a new toast arrives, keep it visible without
+    // re-running an entrance animation.
+    _controller.stop();
+    if (wasHidden) {
+      _controller
+        ..value = 0
+        ..forward();
+    } else {
+      _controller.value = 1;
+    }
+  }
+
+  Future<void> dismiss() async {
+    if (!mounted || _dismissing) return;
+    _dismissing = true;
+    try {
+      // Reverse uses the same slide tween, so it slides back down.
+      await _controller.reverse();
+    } finally {
+      if (mounted) widget.onDismissed();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final onSurface = _onSurface(context, 0.92);
+    return FadeTransition(
+      opacity: _fade,
+      child: SlideTransition(
+        position: _slide,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: _dialogSurfaceColor(context),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: _onSurface(context, 0.12)),
+              boxShadow: [
+                BoxShadow(
+                  color: _dialogShadowColor(context),
+                  blurRadius: 34,
+                  offset: const Offset(0, 18),
+                ),
+              ],
+            ),
+            child: Text(
+              _message,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: onSurface,
+                fontWeight: FontWeight.w600,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _EventCardData {
