@@ -556,7 +556,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _logFileReady = false;
 
   OverlayEntry? _toastOverlayEntry;
-    final GlobalKey<_ToastOverlayHostState> _toastHostKey =
+  final GlobalKey<_ToastOverlayHostState> _toastHostKey =
       GlobalKey<_ToastOverlayHostState>();
 
   final _usernameController = TextEditingController();
@@ -565,6 +565,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _backendHostController = TextEditingController();
   final _backendPortController = TextEditingController();
   final _librarySearchController = TextEditingController();
+  final _savedBackendSearchController = TextEditingController();
   final ScrollController _libraryScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
   final _authenticationPatcherController = TextEditingController();
@@ -610,6 +611,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   BackendConnectionType? _backendQuickTipOriginalType;
   String? _backendQuickTipOriginalHost;
   String _versionSearchQuery = '';
+  String _savedBackendSearchQuery = '';
 
   Process? _gameProcess;
   Process? _gameServerProcess;
@@ -715,6 +717,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _backendHostController.dispose();
     _backendPortController.dispose();
     _librarySearchController.dispose();
+    _savedBackendSearchController.dispose();
     _libraryScrollController.dispose();
     _unrealEnginePatcherController.dispose();
     _authenticationPatcherController.dispose();
@@ -1631,8 +1634,18 @@ class _LauncherScreenState extends State<LauncherScreen>
     _settingsFile = File(_joinPath([_dataDir.path, 'settings.json']));
     _installStateFile = File(_joinPath([_dataDir.path, 'install_state.json']));
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
-    if (!await _logFile.exists()) {
-      await _logFile.create(recursive: true);
+    // Reset launcher logs on every app start so each run has a clean log.
+    // If truncation fails (locked, permissions), keep going.
+    try {
+      await _logFile.writeAsString('', flush: true);
+    } catch (_) {
+      try {
+        if (!await _logFile.exists()) {
+          await _logFile.create(recursive: true);
+        }
+      } catch (_) {
+        // Ignore log initialization failures.
+      }
     }
     _logFileReady = true;
   }
@@ -1787,7 +1800,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         await tmp.delete();
       }
 
-      _log('settings', 'Bundled $label DLL missing. Downloading from GitHub...');
+      _log(
+        'settings',
+        'Bundled $label DLL missing. Downloading from GitHub...',
+      );
       final displayLabel = _titleCaseLabel(label);
       if (mounted) {
         _toastProgress(
@@ -1831,7 +1847,10 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       return true;
     } catch (error) {
-      _log('settings', 'Failed to download default $label DLL from GitHub ($url): $error');
+      _log(
+        'settings',
+        'Failed to download default $label DLL from GitHub ($url): $error',
+      );
       if (mounted) {
         _toastProgressDismiss();
       }
@@ -3822,7 +3841,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _clearUiStatus(host: true);
   }
 
-  void _maybeToastLaunchStatus({required bool host, required _UiStatus status}) {
+  void _maybeToastLaunchStatus({
+    required bool host,
+    required _UiStatus status,
+  }) {
     if (!mounted) return;
     if (!_launchProgressPopupDismissed) return;
     if (status.severity != _UiStatusSeverity.info) return;
@@ -3957,11 +3979,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               lower.startsWith('fortnite starting'))) {
         return 'Starting...';
       }
-        if (labelLower == 'host' &&
+      if (labelLower == 'host' &&
           (lower.startsWith('starting host') ||
-            lower.startsWith('host starting') ||
-            lower.startsWith('starting game server') ||
-            lower.startsWith('game server starting'))) {
+              lower.startsWith('host starting') ||
+              lower.startsWith('starting game server') ||
+              lower.startsWith('game server starting'))) {
         return 'Starting...';
       }
 
@@ -4124,7 +4146,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   bool _shouldShowLaunchProgressPopup() {
     if (_launchProgressPopupDismissed) return false;
     if (_gameServerPromptVisible) return false;
-    if (_gameServerPromptRequiredForLaunch && !_gameServerPromptResolvedForLaunch) {
+    if (_gameServerPromptRequiredForLaunch &&
+        !_gameServerPromptResolvedForLaunch) {
       return false;
     }
     return _isLaunchInProgress();
@@ -4167,9 +4190,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             child: _settings.popupBackgroundBlurEnabled
                 ? BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 3.0, sigmaY: 3.0),
-                    child: Container(
-                      color: _dialogBarrierColor(context, 1.0),
-                    ),
+                    child: Container(color: _dialogBarrierColor(context, 1.0)),
                   )
                 : Container(color: _dialogBarrierColor(context, 1.0)),
           ),
@@ -4258,60 +4279,61 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                     ],
                   ),
-                    const SizedBox(height: 14),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(18),
-                        color: _onSurface(context, 0.05),
-                        border: Border.all(color: _onSurface(context, 0.10)),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.4,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                Theme.of(context).colorScheme.secondary,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              statusText,
-                              style: TextStyle(
-                                color: _onSurface(context, 0.88),
-                                fontSize: 13.5,
-                                height: 1.25,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                  const SizedBox(height: 14),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
                     ),
-                    const SizedBox(height: 14),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(999),
-                      child: LinearProgressIndicator(
-                        value: null,
-                        minHeight: 6,
-                        backgroundColor: _onSurface(context, 0.10),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          Theme.of(context).colorScheme.secondary
-                              .withValues(alpha: 0.9),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      color: _onSurface(context, 0.05),
+                      border: Border.all(color: _onSurface(context, 0.10)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.4,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Theme.of(context).colorScheme.secondary,
+                            ),
+                          ),
                         ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            statusText,
+                            style: TextStyle(
+                              color: _onSurface(context, 0.88),
+                              fontSize: 13.5,
+                              height: 1.25,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      value: null,
+                      minHeight: 6,
+                      backgroundColor: _onSurface(context, 0.10),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        Theme.of(
+                          context,
+                        ).colorScheme.secondary.withValues(alpha: 0.9),
                       ),
                     ),
-                  ],
+                  ),
+                ],
               ),
             ),
           ),
@@ -8847,6 +8869,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           '- Clear imported builds\n'
                           '- Reset profile (name + PFP) and show first-run setup again\n'
                           '- Reset launch options, backend settings, visuals, and DLL paths\n'
+                          '- Clear saved backends\n'
                           '- Clear internal caches (installer + bundled DLL copies)\n'
                           '- Clear launcher logs',
                           style: TextStyle(
@@ -9547,13 +9570,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                     ),
                   ),
-
                 ),
               ),
             ),
 
-          if (_startupConfigResolved &&
-              !_showStartup)
+          if (_startupConfigResolved && !_showStartup)
             Positioned.fill(
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 240),
@@ -9569,9 +9590,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   return FadeTransition(
                     opacity: curved,
                     child: ScaleTransition(
-                      scale: Tween<double>(begin: 0.985, end: 1.0).animate(
-                        curved,
-                      ),
+                      scale: Tween<double>(
+                        begin: 0.985,
+                        end: 1.0,
+                      ).animate(curved),
                       child: child,
                     ),
                   );
@@ -9827,6 +9849,42 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
+  Widget _tipPulseGlowIf(Widget child, {required bool enabled}) {
+    if (!enabled) return child;
+    return AnimatedBuilder(
+      animation: _libraryActionsNudgePulse,
+      child: child,
+      builder: (context, child) {
+        final t = _libraryActionsNudgePulse.value;
+        final outerAlpha = 0.10 + (0.14 * t);
+        final innerAlpha = 0.12 + (0.20 * t);
+        final outerBlur = 26.0 + (28.0 * t);
+        final innerBlur = 10.0 + (14.0 * t);
+        final outerSpread = 0.5 + (2.0 * t);
+        final innerSpread = 0.2 + (0.9 * t);
+
+        return Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.white.withValues(alpha: outerAlpha),
+                blurRadius: outerBlur,
+                spreadRadius: outerSpread,
+              ),
+              BoxShadow(
+                color: Colors.white.withValues(alpha: innerAlpha),
+                blurRadius: innerBlur,
+                spreadRadius: innerSpread,
+              ),
+            ],
+          ),
+          child: child,
+        );
+      },
+    );
+  }
+
   bool get _showBackendConnectionTip =>
       !_settings.backendConnectionTipComplete &&
       !_installState.backendConnectionTipComplete;
@@ -9887,15 +9945,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       setState(() => _backendQuickTipStep = 1);
       return;
     }
+    if (_backendQuickTipStep == 1) {
+      setState(() => _backendQuickTipStep = 2);
+      return;
+    }
     _completeBackendConnectionTip();
   }
 
   Widget _backendConnectionTipCard() {
     final secondary = Theme.of(context).colorScheme.secondary;
     final stepTwo = _backendQuickTipStep == 1;
+    final stepThree = _backendQuickTipStep == 2;
 
     Widget stepContent;
-    if (!stepTwo) {
+    if (!stepTwo && !stepThree) {
       stepContent = Text(
         'Running your own backend? Keep Type on Local so Link uses your local server settings.',
         style: TextStyle(
@@ -9905,7 +9968,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           fontWeight: FontWeight.w600,
         ),
       );
-    } else {
+    } else if (stepTwo) {
       stepContent = Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 4,
@@ -9947,6 +10010,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         ],
       );
+    } else {
+      stepContent = Text(
+        'You can save other backends too. Click the bookmark button next to Host to save an IP, then select a saved backend below to connect (Link will only connect if it\'s online).',
+        style: TextStyle(
+          fontSize: 12.5,
+          height: 1.28,
+          color: _onSurface(context, 0.86),
+          fontWeight: FontWeight.w600,
+        ),
+      );
     }
 
     return Container(
@@ -9985,7 +10058,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               ),
               const SizedBox(width: 8),
               Text(
-                '${_backendQuickTipStep + 1}/2',
+                '${_backendQuickTipStep + 1}/3',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -9994,10 +10067,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               ),
               const Spacer(),
               IconButton(
-                tooltip: _backendQuickTipStep == 0 ? 'Next tip' : 'Got it',
+                tooltip: _backendQuickTipStep < 2 ? 'Next tip' : 'Got it',
                 onPressed: _advanceBackendConnectionTip,
                 icon: Icon(
-                  _backendQuickTipStep == 0
+                  _backendQuickTipStep < 2
                       ? Icons.arrow_forward_rounded
                       : Icons.check_rounded,
                   size: 16,
@@ -10477,7 +10550,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _queueLibrarySplashPrefetch(
       filteredVersions,
       signature:
-        '${identityHashCode(installedVersions)}|$searchQuery|${filteredVersions.length}',
+          '${identityHashCode(installedVersions)}|$searchQuery|${filteredVersions.length}',
     );
     final hasRunningGameClient = _hasRunningGameClient;
     final launchActsAsClose =
@@ -10499,12 +10572,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 builder: (context, constraints) {
                   final compact = constraints.maxWidth < 920;
                   final dpr = MediaQuery.of(context).devicePixelRatio;
-                  final coverWidth = compact
-                      ? constraints.maxWidth
-                      : 250.0;
-                  final coverCacheWidth = (coverWidth * dpr)
-                      .round()
-                      .clamp(1, 4096);
+                  final coverWidth = compact ? constraints.maxWidth : 250.0;
+                  final coverCacheWidth = (coverWidth * dpr).round().clamp(
+                    1,
+                    4096,
+                  );
                   final image = ClipRRect(
                     borderRadius: BorderRadius.circular(22),
                     child: Image(
@@ -10798,30 +10870,42 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         onChanged: (value) {
           setState(() => _versionSearchQuery = value);
         },
-        decoration: InputDecoration(
-          hintText: 'Search by name',
-          isDense: true,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 10,
-          ),
-          prefixIcon: const Icon(Icons.search_rounded, size: 18),
-          suffixIcon: _versionSearchQuery.trim().isEmpty
-              ? null
-              : IconButton(
-                  onPressed: () {
-                    _librarySearchController.clear();
-                    setState(() => _versionSearchQuery = '');
-                  },
-                  icon: const Icon(Icons.close_rounded, size: 18),
-                ),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-        ),
+        decoration: _backendFieldDecoration(hintText: 'Search by name')
+            .copyWith(
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                size: 18,
+                color: _onSurface(context, 0.75),
+              ),
+              suffixIconConstraints: const BoxConstraints.tightFor(
+                width: 40,
+                height: 40,
+              ),
+              suffixIcon: _versionSearchQuery.trim().isEmpty
+                  ? null
+                  : SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: IconButton(
+                        tooltip: 'Clear search',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 40,
+                          height: 40,
+                        ),
+                        onPressed: () {
+                          _librarySearchController.clear();
+                          setState(() => _versionSearchQuery = '');
+                        },
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                      ),
+                    ),
+            ),
       );
-      final clearAllButton = OutlinedButton.icon(
-        onPressed: _clearAllVersions,
-        icon: const Icon(Icons.delete_sweep_rounded, size: 18),
-        label: const Text('Clear all'),
+      final clearAllButton = _versionCardAction(
+        icon: Icons.delete_sweep_rounded,
+        tooltip: 'Clear all versions',
+        onTap: () => unawaited(_clearAllVersions()),
       );
 
       return LayoutBuilder(
@@ -11343,7 +11427,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 title: 'Type',
                 subtitle:
                     'The type of backend to use when logging into Fortnite',
-                trailing: _libraryPulseGlow(
+                trailing: _tipPulseGlowIf(
                   DropdownButtonFormField<BackendConnectionType>(
                     initialValue: _settings.backendConnectionType,
                     decoration: _backendFieldDecoration(),
@@ -11360,6 +11444,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       unawaited(_setBackendConnectionType(type));
                     },
                   ),
+                  enabled:
+                      _showBackendConnectionTip && _backendQuickTipStep < 2,
                 ),
               ),
               if (_settings.backendConnectionType ==
@@ -11374,9 +11460,38 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   trailing: TextField(
                     controller: _backendHostController,
                     keyboardType: TextInputType.url,
-                    decoration: _backendFieldDecoration(
-                      hintText: 'example.com',
-                    ),
+                    decoration:
+                        _backendFieldDecoration(
+                          hintText: 'Enter IP Here',
+                        ).copyWith(
+                          suffixIconConstraints: const BoxConstraints.tightFor(
+                            width: 40,
+                            height: 40,
+                          ),
+                          suffixIcon: _tipPulseGlowIf(
+                            SizedBox(
+                              width: 40,
+                              height: 40,
+                              child: IconButton(
+                                tooltip: 'Save backend',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 40,
+                                  height: 40,
+                                ),
+                                onPressed: () =>
+                                    unawaited(_saveCurrentRemoteBackend()),
+                                icon: const Icon(
+                                  Icons.bookmark_add_rounded,
+                                  size: 18,
+                                ),
+                              ),
+                            ),
+                            enabled:
+                                _showBackendConnectionTip &&
+                                _backendQuickTipStep == 2,
+                          ),
+                        ),
                     onChanged: (value) {
                       final trimmed = value.trim();
                       if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
@@ -11533,6 +11648,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   );
                 },
               ),
+              if (_settings.backendConnectionType ==
+                  BackendConnectionType.remote) ...[
+                const SizedBox(height: 14),
+                if (_settings.savedBackends.isEmpty)
+                  _savedBackendsPanel()
+                else
+                  Expanded(child: _savedBackendsPanel()),
+              ],
             ],
           ),
         ),
@@ -12761,6 +12884,989 @@ foreach ($app in $appPaths) {
     await _saveSettings(toast: false);
     await _refreshRuntime();
     if (mounted) _toast('Backend settings reset.');
+  }
+
+  String _backendHostKey(String host) {
+    final normalized = host
+        .trim()
+        .toLowerCase()
+        .replaceFirst(RegExp(r'^http://', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'^https://', caseSensitive: false), '')
+        .split('/')
+        .first;
+    final bare = normalized.startsWith('[')
+        ? normalized.split(']').first.replaceFirst('[', '')
+        : normalized.split(':').first;
+    return bare.trim();
+  }
+
+  Future<void> _saveCurrentRemoteBackend() async {
+    if (!mounted) return;
+    if (_settings.backendConnectionType != BackendConnectionType.remote) return;
+
+    final host = _backendHostController.text.trim();
+    if (host.isEmpty) {
+      _toast('Enter a backend host first.');
+      return;
+    }
+    if (_isLocalHost(host)) {
+      _toast('Remote backend host cannot be localhost.');
+      return;
+    }
+
+    final port =
+        int.tryParse(_backendPortController.text.trim()) ??
+        _effectiveBackendPort();
+    if (port <= 0 || port > 65535) {
+      _toast('Enter a valid backend port.');
+      return;
+    }
+
+    final name = await _promptSavedBackendName();
+    if (!mounted) return;
+    final trimmedName = (name ?? '').trim();
+    if (trimmedName.isEmpty) return;
+
+    final next = List<SavedBackend>.from(_settings.savedBackends);
+    final lower = trimmedName.toLowerCase();
+    final nameConflict = next.any(
+      (entry) => entry.name.trim().toLowerCase() == lower,
+    );
+    if (nameConflict) {
+      _toast('A saved backend with that name already exists.');
+      return;
+    }
+
+    final hostKey = _backendHostKey(host);
+    final endpointConflict = next.any(
+      (entry) => _backendHostKey(entry.host) == hostKey && entry.port == port,
+    );
+    if (endpointConflict) {
+      _toast('That backend (IP + port) is already saved.');
+      return;
+    }
+
+    final entry = SavedBackend(name: trimmedName, host: host, port: port);
+    next.add(entry);
+
+    setState(() {
+      _settings = _settings.copyWith(savedBackends: next);
+    });
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Saved backend: ${entry.name}');
+  }
+
+  Future<void> _editSavedBackend(SavedBackend entry) async {
+    if (!mounted) return;
+    final index = _settings.savedBackends.indexWhere(
+      (candidate) =>
+          candidate.name == entry.name &&
+          candidate.host == entry.host &&
+          candidate.port == entry.port,
+    );
+    if (index < 0) return;
+
+    final others = <SavedBackend>[];
+    for (var i = 0; i < _settings.savedBackends.length; i++) {
+      if (i == index) continue;
+      others.add(_settings.savedBackends[i]);
+    }
+
+    final updated = await _promptEditSavedBackend(entry, others: others);
+    if (!mounted) return;
+    if (updated == null) return;
+
+    final next = List<SavedBackend>.from(_settings.savedBackends);
+    next[index] = updated;
+    setState(() {
+      _settings = _settings.copyWith(savedBackends: next);
+    });
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Updated backend: ${updated.name}');
+  }
+
+  Future<SavedBackend?> _promptEditSavedBackend(
+    SavedBackend entry, {
+    required List<SavedBackend> others,
+  }) async {
+    if (!mounted) return null;
+
+    final nameController = TextEditingController(text: entry.name);
+    final hostController = TextEditingController(text: entry.host);
+    final portController = TextEditingController(text: entry.port.toString());
+    var nameError = '';
+    var hostError = '';
+    var portError = '';
+
+    void clearErrors(StateSetter setDialogState) {
+      if (nameError.isEmpty && hostError.isEmpty && portError.isEmpty) return;
+      setDialogState(() {
+        nameError = '';
+        hostError = '';
+        portError = '';
+      });
+    }
+
+    final result = await showGeneralDialog<SavedBackend>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        final maxHeight = min(
+          640.0,
+          MediaQuery.sizeOf(dialogContext).height - 40,
+        );
+
+        void submit(StateSetter setDialogState) {
+          final name = nameController.text.trim();
+          final host = hostController.text.trim();
+          final portRaw = portController.text.trim();
+
+          var nextNameError = '';
+          var nextHostError = '';
+          var nextPortError = '';
+
+          if (name.isEmpty) nextNameError = 'Name is required';
+          if (host.isEmpty) nextHostError = 'Host is required';
+          if (host.isNotEmpty && _isLocalHost(host)) {
+            nextHostError = 'Host cannot be localhost';
+          }
+
+          final parsedPort = int.tryParse(portRaw);
+          if (parsedPort == null || parsedPort <= 0 || parsedPort > 65535) {
+            nextPortError = 'Invalid port';
+          }
+
+          if (nextNameError.isEmpty) {
+            final lower = name.toLowerCase();
+            final nameConflict = others.any(
+              (other) => other.name.trim().toLowerCase() == lower,
+            );
+            if (nameConflict) {
+              nextNameError = 'Name already exists';
+            }
+          }
+
+          if (nextHostError.isEmpty && nextPortError.isEmpty) {
+            final hostKey = _backendHostKey(host);
+            final endpointConflict = others.any(
+              (other) =>
+                  _backendHostKey(other.host) == hostKey &&
+                  other.port == parsedPort,
+            );
+            if (endpointConflict) {
+              nextHostError = 'Backend already saved';
+            }
+          }
+
+          if (nextNameError.isNotEmpty ||
+              nextHostError.isNotEmpty ||
+              nextPortError.isNotEmpty) {
+            setDialogState(() {
+              nameError = nextNameError;
+              hostError = nextHostError;
+              portError = nextPortError;
+            });
+            return;
+          }
+
+          Navigator.of(
+            dialogContext,
+          ).pop(SavedBackend(name: name, host: host, port: parsedPort!));
+        }
+
+        InputDecoration fieldDecoration({
+          required String label,
+          required String error,
+          String? hint,
+        }) {
+          return InputDecoration(
+            labelText: label,
+            hintText: hint,
+            isDense: true,
+            filled: true,
+            fillColor: _onSurface(dialogContext, 0.06),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 12,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: _onSurface(dialogContext, 0.18)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: secondary, width: 1.2),
+            ),
+            errorText: error.isEmpty ? null : error,
+          );
+        }
+
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 620,
+                  maxHeight: maxHeight,
+                ),
+                child: StatefulBuilder(
+                  builder: (dialogContext, setDialogState) {
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(dialogContext),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.1),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(dialogContext),
+                            blurRadius: 34,
+                            offset: const Offset(0, 18),
+                          ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.edit_rounded,
+                                  color: _onSurface(dialogContext, 0.94),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'Edit Saved Backend',
+                                  style: TextStyle(
+                                    fontSize: 34,
+                                    fontWeight: FontWeight.w700,
+                                    color: _onSurface(dialogContext, 0.96),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Flexible(
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Update the saved backend name and endpoint. Names and IP:port must be unique.',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w700,
+                                        color: _onSurface(dialogContext, 0.74),
+                                        height: 1.25,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    TextField(
+                                      controller: nameController,
+                                      textInputAction: TextInputAction.next,
+                                      onChanged: (_) =>
+                                          clearErrors(setDialogState),
+                                      decoration: fieldDecoration(
+                                        label: 'Name',
+                                        hint: 'My backend',
+                                        error: nameError,
+                                      ),
+                                      style: TextStyle(color: onSurface),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextField(
+                                      controller: hostController,
+                                      keyboardType: TextInputType.url,
+                                      textInputAction: TextInputAction.next,
+                                      onChanged: (_) =>
+                                          clearErrors(setDialogState),
+                                      decoration: fieldDecoration(
+                                        label: 'Host',
+                                        hint: 'Enter IP Here',
+                                        error: hostError,
+                                      ),
+                                      style: TextStyle(color: onSurface),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextField(
+                                      controller: portController,
+                                      keyboardType: TextInputType.number,
+                                      inputFormatters: [
+                                        FilteringTextInputFormatter.digitsOnly,
+                                      ],
+                                      textInputAction: TextInputAction.done,
+                                      onChanged: (_) =>
+                                          clearErrors(setDialogState),
+                                      onSubmitted: (_) =>
+                                          submit(setDialogState),
+                                      decoration: fieldDecoration(
+                                        label: 'Port',
+                                        hint: '3551',
+                                        error: portError,
+                                      ),
+                                      style: TextStyle(color: onSurface),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(
+                                            dialogContext,
+                                          ).pop(null),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        FilledButton.icon(
+                                          onPressed: () =>
+                                              submit(setDialogState),
+                                          style: FilledButton.styleFrom(
+                                            backgroundColor: secondary
+                                                .withValues(alpha: 0.92),
+                                            foregroundColor: Colors.white,
+                                            shape: const StadiumBorder(),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 18,
+                                              vertical: 12,
+                                            ),
+                                          ),
+                                          icon: const Icon(
+                                            Icons.save_rounded,
+                                            size: 18,
+                                          ),
+                                          label: const Text('Save'),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    nameController.dispose();
+    hostController.dispose();
+    portController.dispose();
+    return result;
+  }
+
+  Future<String?> _promptSavedBackendName() async {
+    if (!mounted) return null;
+
+    final controller = TextEditingController();
+    final focusNode = FocusNode();
+
+    final result = await showGeneralDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        var validation = '';
+
+        void submit(StateSetter setDialogState) {
+          final name = controller.text.trim();
+          if (name.isEmpty) {
+            setDialogState(() => validation = 'Name is required');
+            return;
+          }
+          Navigator.of(dialogContext).pop(name);
+        }
+
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: StatefulBuilder(
+                  builder: (dialogContext, setDialogState) {
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(dialogContext),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.1),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(dialogContext),
+                            blurRadius: 30,
+                            offset: const Offset(0, 16),
+                          ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.bookmark_add_rounded),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Save Backend',
+                                    style: TextStyle(
+                                      fontSize: 25,
+                                      fontWeight: FontWeight.w700,
+                                      color: _onSurface(dialogContext, 0.95),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: controller,
+                              focusNode: focusNode,
+                              autofocus: true,
+                              textInputAction: TextInputAction.done,
+                              onChanged: (_) {
+                                if (validation.isEmpty) return;
+                                setDialogState(() => validation = '');
+                              },
+                              onSubmitted: (_) => submit(setDialogState),
+                              decoration: InputDecoration(
+                                labelText: 'Name',
+                                hintText: 'My backend',
+                                isDense: true,
+                                filled: true,
+                                fillColor: _onSurface(dialogContext, 0.06),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.18),
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.18),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: secondary,
+                                    width: 1.2,
+                                  ),
+                                ),
+                                errorText: validation.isEmpty
+                                    ? null
+                                    : validation,
+                              ),
+                              style: TextStyle(color: onSurface),
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                TextButton(
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(null),
+                                  child: const Text('Cancel'),
+                                ),
+                                const SizedBox(width: 10),
+                                FilledButton.icon(
+                                  onPressed: () => submit(setDialogState),
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    shape: const StadiumBorder(),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 12,
+                                    ),
+                                  ),
+                                  icon: const Icon(
+                                    Icons.save_rounded,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Save'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    focusNode.dispose();
+    controller.dispose();
+    return result;
+  }
+
+  Future<void> _removeSavedBackend(SavedBackend entry) async {
+    final next = List<SavedBackend>.from(_settings.savedBackends)
+      ..removeWhere(
+        (candidate) =>
+            candidate.name == entry.name &&
+            candidate.host == entry.host &&
+            candidate.port == entry.port,
+      );
+    if (next.length == _settings.savedBackends.length) return;
+
+    if (mounted) {
+      setState(() {
+        _settings = _settings.copyWith(savedBackends: next);
+      });
+    } else {
+      _settings = _settings.copyWith(savedBackends: next);
+    }
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Removed backend: ${entry.name}');
+  }
+
+  Future<void> _clearAllSavedBackends() async {
+    if (_settings.savedBackends.isEmpty) return;
+    _savedBackendSearchController.clear();
+    _savedBackendSearchQuery = '';
+    if (mounted) {
+      setState(() {
+        _settings = _settings.copyWith(savedBackends: const <SavedBackend>[]);
+      });
+    } else {
+      _settings = _settings.copyWith(savedBackends: const <SavedBackend>[]);
+    }
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Cleared saved backends.');
+  }
+
+  Widget _savedBackendsPanel() {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final saved = _settings.savedBackends;
+    final query = _savedBackendSearchQuery.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? saved
+        : saved.where((entry) {
+            final name = entry.name.toLowerCase();
+            final host = entry.host.toLowerCase();
+            final port = entry.port.toString();
+            return name.contains(query) ||
+                host.contains(query) ||
+                port.contains(query) ||
+                '$host:$port'.contains(query);
+          }).toList();
+
+    final emptyState = Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.10, lightAlpha: 0.18),
+        border: Border.all(color: _onSurface(context, 0.10)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color: _adaptiveScrimColor(
+                context,
+                darkAlpha: 0.10,
+                lightAlpha: 0.18,
+              ),
+              border: Border.all(color: _onSurface(context, 0.10)),
+            ),
+            child: Icon(
+              Icons.bookmarks_outlined,
+              color: _onSurface(context, 0.90),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'No Saved Backends Yet',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: _onSurface(context, 0.94),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Switch Type to Remote, enter an IP, then click the bookmark button next to Host to save it.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.25,
+                    fontWeight: FontWeight.w600,
+                    color: _onSurface(context, 0.72),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    Widget header() {
+      final title = Text(
+        'Saved Backends',
+        style: TextStyle(
+          fontWeight: FontWeight.w800,
+          color: onSurface.withValues(alpha: 0.92),
+        ),
+      );
+
+      if (saved.isEmpty) return title;
+
+      final searchInput = TextField(
+        controller: _savedBackendSearchController,
+        onChanged: (value) => setState(() => _savedBackendSearchQuery = value),
+        decoration: _backendFieldDecoration(hintText: 'Search saved backends')
+            .copyWith(
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                size: 18,
+                color: onSurface.withValues(alpha: 0.75),
+              ),
+              suffixIconConstraints: const BoxConstraints.tightFor(
+                width: 40,
+                height: 40,
+              ),
+              suffixIcon: _savedBackendSearchQuery.trim().isEmpty
+                  ? null
+                  : SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: IconButton(
+                        tooltip: 'Clear search',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 40,
+                          height: 40,
+                        ),
+                        onPressed: () {
+                          _savedBackendSearchController.clear();
+                          setState(() => _savedBackendSearchQuery = '');
+                        },
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                      ),
+                    ),
+            ),
+      );
+
+      final clearAllIconButton = _versionCardAction(
+        icon: Icons.delete_sweep_rounded,
+        tooltip: 'Clear all saved backends',
+        onTap: () => unawaited(_clearAllSavedBackends()),
+      );
+
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 780;
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                title,
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: searchInput),
+                    const SizedBox(width: 8),
+                    clearAllIconButton,
+                  ],
+                ),
+              ],
+            );
+          }
+          return Row(
+            children: [
+              Expanded(child: title),
+              SizedBox(width: 290, child: searchInput),
+              const SizedBox(width: 8),
+              clearAllIconButton,
+            ],
+          );
+        },
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: onSurface.withValues(alpha: 0.04),
+        border: Border.all(color: onSurface.withValues(alpha: 0.10)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          header(),
+          const SizedBox(height: 8),
+          if (saved.isEmpty)
+            emptyState
+          else
+            Expanded(
+              child: filtered.isEmpty
+                  ? Align(
+                      alignment: Alignment.topLeft,
+                      child: Text(
+                        'No saved backends match your search.',
+                        style: TextStyle(
+                          color: onSurface.withValues(alpha: 0.70),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final entry = filtered[index];
+                        return FutureBuilder<Uri?>(
+                          future: _pingBackend(entry.host, entry.port),
+                          builder: (context, snapshot) {
+                            final checking =
+                                snapshot.connectionState ==
+                                ConnectionState.waiting;
+                            final online = snapshot.data != null;
+
+                            final statusColor = checking
+                                ? onSurface.withValues(alpha: 0.35)
+                                : online
+                                ? const Color(0xFF16C47F)
+                                : const Color(0xFFDC3545);
+                            final statusTooltip = checking
+                                ? 'Checking...'
+                                : online
+                                ? 'Online'
+                                : 'Offline';
+
+                            return Material(
+                              type: MaterialType.transparency,
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () async {
+                                  if (!online) {
+                                    _toast('Backend is offline.');
+                                    return;
+                                  }
+                                  setState(() {
+                                    _settings = _settings.copyWith(
+                                      backendConnectionType:
+                                          BackendConnectionType.remote,
+                                      backendHost: entry.host,
+                                      backendPort: entry.port,
+                                    );
+                                    _backendHostController.text = entry.host;
+                                    _backendPortController.text = entry.port
+                                        .toString();
+                                  });
+                                  await _saveSettings(
+                                    toast: false,
+                                    applyControllers: false,
+                                  );
+                                  await _refreshRuntime(force: true);
+                                  if (mounted) {
+                                    _toast(
+                                      'Connected to ${entry.host}:${entry.port}.',
+                                    );
+                                  }
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(12),
+                                    color: onSurface.withValues(alpha: 0.04),
+                                    border: Border.all(
+                                      color: onSurface.withValues(alpha: 0.10),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Tooltip(
+                                        message: statusTooltip,
+                                        child: Container(
+                                          width: 10,
+                                          height: 10,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: statusColor,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              entry.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                color: onSurface.withValues(
+                                                  alpha: 0.92,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              '${entry.host}:${entry.port}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                color: onSurface.withValues(
+                                                  alpha: 0.72,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      _versionCardAction(
+                                        icon: Icons.edit_rounded,
+                                        tooltip: 'Edit backend',
+                                        onTap: () =>
+                                            unawaited(_editSavedBackend(entry)),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      _versionCardAction(
+                                        icon: Icons.delete_outline_rounded,
+                                        tooltip: 'Delete backend',
+                                        onTap: () => unawaited(
+                                          _removeSavedBackend(entry),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _backendSettingTile({
@@ -14755,8 +15861,10 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       reverseCurve: Curves.easeIn,
     );
     _fade = Tween<double>(begin: 0, end: 1).animate(reverseCurve);
-    _slide = Tween<Offset>(begin: const Offset(0, 0.18), end: Offset.zero)
-        .animate(curve);
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 0.18),
+      end: Offset.zero,
+    ).animate(curve);
     _message = widget.initialMessage;
     if (_message.trim().isNotEmpty) {
       _controller.forward();
@@ -15351,6 +16459,7 @@ class LauncherSettings {
     required this.gameServerInjectType,
     required this.gameServerFilePath,
     required this.largePakPatcherFilePath,
+    required this.savedBackends,
     required this.versions,
     required this.selectedVersionId,
   });
@@ -15386,6 +16495,7 @@ class LauncherSettings {
   final GameServerInjectType gameServerInjectType;
   final String gameServerFilePath;
   final String largePakPatcherFilePath;
+  final List<SavedBackend> savedBackends;
   final List<VersionEntry> versions;
   final String selectedVersionId;
 
@@ -15428,6 +16538,7 @@ class LauncherSettings {
     GameServerInjectType? gameServerInjectType,
     String? gameServerFilePath,
     String? largePakPatcherFilePath,
+    List<SavedBackend>? savedBackends,
     List<VersionEntry>? versions,
     String? selectedVersionId,
   }) {
@@ -15477,6 +16588,7 @@ class LauncherSettings {
       gameServerFilePath: gameServerFilePath ?? this.gameServerFilePath,
       largePakPatcherFilePath:
           largePakPatcherFilePath ?? this.largePakPatcherFilePath,
+      savedBackends: savedBackends ?? this.savedBackends,
       versions: versions ?? this.versions,
       selectedVersionId: selectedVersionId ?? this.selectedVersionId,
     );
@@ -15515,6 +16627,7 @@ class LauncherSettings {
       gameServerInjectType: GameServerInjectType.custom,
       gameServerFilePath: '',
       largePakPatcherFilePath: '',
+      savedBackends: <SavedBackend>[],
       versions: <VersionEntry>[],
       selectedVersionId: '',
     );
@@ -15569,6 +16682,20 @@ class LauncherSettings {
     final selected = parsedVersions.any((entry) => entry.id == selectedFromFile)
         ? selectedFromFile
         : (parsedVersions.isNotEmpty ? parsedVersions.first.id : '');
+
+    final parsedSavedBackends = <SavedBackend>[];
+    final savedRaw = json['savedBackends'] ?? json['SavedBackends'];
+    if (savedRaw is List) {
+      for (final item in savedRaw) {
+        if (item is Map<String, dynamic>) {
+          parsedSavedBackends.add(SavedBackend.fromJson(item));
+        } else if (item is Map) {
+          parsedSavedBackends.add(
+            SavedBackend.fromJson(item.cast<String, dynamic>()),
+          );
+        }
+      }
+    }
 
     return LauncherSettings(
       username: ((json['username'] ?? 'Player').toString().trim().isEmpty)
@@ -15680,6 +16807,7 @@ class LauncherSettings {
                   json['LargePakPatcherFilePath'] ??
                   '')
               .toString(),
+      savedBackends: parsedSavedBackends,
       versions: parsedVersions,
       selectedVersionId: selected,
     );
@@ -15718,9 +16846,41 @@ class LauncherSettings {
       'gameServerInjectType': gameServerInjectType.name,
       'gameServerFilePath': gameServerFilePath,
       'largePakPatcherFilePath': largePakPatcherFilePath,
+      'savedBackends': savedBackends.map((entry) => entry.toJson()).toList(),
       'versions': versions.map((entry) => entry.toJson()).toList(),
       'selectedVersionId': selectedVersionId,
     };
+  }
+}
+
+class SavedBackend {
+  const SavedBackend({
+    required this.name,
+    required this.host,
+    required this.port,
+  });
+
+  final String name;
+  final String host;
+  final int port;
+
+  factory SavedBackend.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
+    return SavedBackend(
+      name: (json['name'] ?? '').toString(),
+      host: (json['host'] ?? '').toString(),
+      port: asInt(json['port'], 3551).clamp(1, 65535).toInt(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{'name': name, 'host': host, 'port': port};
   }
 }
 
