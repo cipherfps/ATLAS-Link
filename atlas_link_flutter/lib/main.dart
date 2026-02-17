@@ -5,6 +5,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:ffi/ffi.dart';
@@ -5087,6 +5088,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
 
+      _log('game', 'Starting with args: ${args.join(' ')}');
+
       Process child;
       try {
         _setUiStatus(
@@ -6365,6 +6368,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
       final exeDir = File(exe).parent.path;
 
+      // Patch exe for headless mode if enabled
+      if (_settings.hostHeadlessEnabled) {
+        final patched = await _patchExecutableForHeadless(exe);
+        if (patched) {
+          _log('gameserver', 'Patched executable for headless mode.');
+        } else {
+          _log('gameserver', 'Exe headless patch not needed or already applied.');
+        }
+      }
+
       await _deleteAftermathCrashDlls(version.location);
       final launcherPid = await _startPausedAuxiliaryProcess(
         version.location,
@@ -6395,6 +6408,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             )
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
+
+      _log('gameserver', 'Starting with args: ${args.join(' ')}');
 
       Process process;
       try {
@@ -6594,6 +6609,76 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
     flush();
     return args;
+  }
+
+  // Binary patch patterns for headless mode
+  // Original string: -invitesession -invitefrom -party_joiningfo_token -replay
+  static final Uint8List _originalHeadlessBytes = Uint8List.fromList([
+    45, 0, 105, 0, 110, 0, 118, 0, 105, 0, 116, 0, 101, 0, 115, 0, 101, 0,
+    115, 0, 115, 0, 105, 0, 111, 0, 110, 0, 32, 0, 45, 0, 105, 0, 110, 0,
+    118, 0, 105, 0, 116, 0, 101, 0, 102, 0, 114, 0, 111, 0, 109, 0, 32, 0,
+    45, 0, 112, 0, 97, 0, 114, 0, 116, 0, 121, 0, 95, 0, 106, 0, 111, 0,
+    105, 0, 110, 0, 105, 0, 110, 0, 102, 0, 111, 0, 95, 0, 116, 0, 111, 0,
+    107, 0, 101, 0, 110, 0, 32, 0, 45, 0, 114, 0, 101, 0, 112, 0, 108, 0,
+    97, 0, 121, 0
+  ]);
+
+  // Patched string: -log -nosplash -nosound -nullrhi -useolditemcards
+  static final Uint8List _patchedHeadlessBytes = Uint8List.fromList([
+    45, 0, 108, 0, 111, 0, 103, 0, 32, 0, 45, 0, 110, 0, 111, 0, 115, 0,
+    112, 0, 108, 0, 97, 0, 115, 0, 104, 0, 32, 0, 45, 0, 110, 0, 111, 0,
+    115, 0, 111, 0, 117, 0, 110, 0, 100, 0, 32, 0, 45, 0, 110, 0, 117, 0,
+    108, 0, 108, 0, 114, 0, 104, 0, 105, 0, 32, 0, 45, 0, 117, 0, 115, 0,
+    101, 0, 111, 0, 108, 0, 100, 0, 105, 0, 116, 0, 101, 0, 109, 0, 99, 0,
+    97, 0, 114, 0, 100, 0, 115, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0,
+    32, 0
+  ]);
+
+  Future<bool> _patchExecutableForHeadless(String exePath) async {
+    return Isolate.run(() async {
+      try {
+        final file = File(exePath);
+        if (!file.existsSync()) return false;
+
+        final original = _originalHeadlessBytes;
+        final patched = _patchedHeadlessBytes;
+
+        if (original.length != patched.length) {
+          throw Exception('Patch length mismatch');
+        }
+
+        final bytes = await file.readAsBytes();
+        var patchOffset = -1;
+        var matchCount = 0;
+
+        // Find the original pattern in the exe
+        for (var i = 0; i < bytes.length; i++) {
+          if (bytes[i] == original[matchCount]) {
+            if (patchOffset == -1) patchOffset = i;
+            matchCount++;
+            if (matchCount == original.length) break;
+          } else {
+            patchOffset = -1;
+            matchCount = 0;
+          }
+        }
+
+        if (patchOffset == -1) {
+          // Pattern not found - might be already patched or different version
+          return false;
+        }
+
+        // Apply the patch
+        for (var i = 0; i < patched.length; i++) {
+          bytes[patchOffset + i] = patched[i];
+        }
+
+        await file.writeAsBytes(bytes, flush: true);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    });
   }
 
   Future<void> _deleteAftermathCrashDlls(String buildRootPath) async {
