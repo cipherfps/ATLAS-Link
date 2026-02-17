@@ -18,12 +18,9 @@ Markdown Quick Key
 - Please note any issues or bugs on the GitHub or in our discord server!
 
 # Improvements
-- Added Quick Tips for first time users
-- New game launch interaction/pop up
-- Added new toasts to look cleaner
-- Downloading in internal files
+- Saving backend feature
+- More quick tips
 
 # Fixes
-- Fixed some library lag
-- Set up permissions
+- Fixed injection timings and other stuff (Large Pak Patcher may still be a bit unreliable)
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
