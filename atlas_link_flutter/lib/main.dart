@@ -477,14 +477,14 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const String _defaultBackendHost = '127.0.0.1';
   static const int _defaultBackendPort = 3551;
   static const int _defaultGameServerPort = 7777;
-  static const int _authInjectionInitialDelayMs = 900;
-  static const int _authInjectionRetryDelayMs = 1200;
+  static const int _authInjectionInitialDelayMs = 0;
+  static const int _authInjectionRetryDelayMs = 100;
   static const int _authInjectionMaxAttempts = 3;
   // Some machines (especially with AV scanning or heavy disk contention) can
   // take longer than 5s to finish LoadLibraryW in the target process. Use a
   // larger timeout to reduce false "Injection timed out" failures.
   static const int _dllInjectionWaitMs = 20000;
-  static const int _gameServerInjectionRetryDelayMs = 900;
+  static const int _gameServerInjectionRetryDelayMs = 100;
   static const int _gameServerInjectionMaxAttempts = 3;
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _atlasLinkRepository =
@@ -2383,6 +2383,31 @@ class _LauncherScreenState extends State<LauncherScreen>
   int _effectiveBackendPort() {
     final port = _settings.backendPort;
     return port > 0 ? port : 3551;
+  }
+
+  String _effectiveBackendHostForLaunchArgs() {
+    final host = _effectiveBackendHost().trim();
+    if (host.isEmpty) return _defaultBackendHost;
+
+    final normalized = host
+        .replaceFirst(RegExp(r'^http://', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'^https://', caseSensitive: false), '')
+        .split('/')
+        .first
+        .trim();
+    if (normalized.isEmpty) return _defaultBackendHost;
+
+    // Strip an inline port if one was provided.
+    if (normalized.startsWith('[')) {
+      final endBracket = normalized.indexOf(']');
+      if (endBracket > 0) {
+        return normalized.substring(1, endBracket).trim();
+      }
+      return normalized.replaceAll('[', '').replaceAll(']', '').trim();
+    }
+
+    final parts = normalized.split(':');
+    return parts.isEmpty ? _defaultBackendHost : parts.first.trim();
   }
 
   int _effectiveGameServerPort() {
@@ -4360,8 +4385,19 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return false;
   }
 
-  /// Marker that aligns with the client loading screen completing.
-  static const _clientLoadingCompleteMarker = 'UI.State.Startup.SubgameSelect';
+  /// Markers that indicate the client loading screen has completed.
+  /// Multiple markers increase chances of catching game fully loaded in various versions.
+  static const List<String> _clientLoadingCompleteMarkers = [
+    'UI.State.Startup.SubgameSelect',
+    'LobbyUI',
+    'Lobby',
+    'UI.State.Lobby',
+    'Started Application',
+    'Foreground',
+    'UGameEngine::Tick',
+    'World changed',
+    'Engine',
+  ];
 
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed || state.exited) return;
@@ -4396,7 +4432,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!state.host &&
         !state.largePakInjected &&
         state.postLoginInjected &&
-        line.contains(_clientLoadingCompleteMarker)) {
+        _clientLoadingCompleteMarkers.any(line.contains)) {
       state.largePakInjected = true;
       _log('game', 'Client fully loaded. Scheduling large pak injection...');
       unawaited(_performDeferredLargePakInjection(state));
@@ -4408,7 +4444,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         state.hostPostLoginPatchersInjected &&
         !state.gameServerInjected &&
         !state.gameServerInjectionScheduled &&
-        line.contains(_clientLoadingCompleteMarker)) {
+        _clientLoadingCompleteMarkers.any(line.contains)) {
       state.gameServerInjectionScheduled = true;
       _log(
         'gameserver',
@@ -5040,14 +5076,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         usernameOverride ?? _settings.username,
       );
       final rebootLogin = _buildRebootLoginUsername(launchClientName);
+      final backendHost = _effectiveBackendHostForLaunchArgs();
+      final backendPort = _effectiveBackendPort();
       final args =
           _createRebootLaunchArgs(
               username: rebootLogin,
               password: 'Rebooted',
               customArgs: _settings.playCustomLaunchArgs,
             )
-            ..add('-BackendHost=$_defaultBackendHost')
-            ..add('-BackendPort=$_defaultBackendPort');
+            ..add('-BackendHost=$backendHost')
+            ..add('-BackendPort=$backendPort');
 
       Process child;
       try {
@@ -6343,6 +6381,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ? 'host'
           : _settings.hostUsername;
       final rebootLogin = _buildRebootLoginUsername(hostUsername);
+      final backendHost = _effectiveBackendHostForLaunchArgs();
+      final backendPort = _effectiveBackendPort();
       final args =
           _createRebootLaunchArgs(
               username: rebootLogin,
@@ -6353,8 +6393,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               hostPort: _effectiveGameServerPort(),
               customArgs: _settings.hostCustomLaunchArgs,
             )
-            ..add('-BackendHost=$_defaultBackendHost')
-            ..add('-BackendPort=$_defaultBackendPort');
+            ..add('-BackendHost=$backendHost')
+            ..add('-BackendPort=$backendPort');
 
       Process process;
       try {
@@ -13182,7 +13222,7 @@ foreach ($app in $appPaths) {
                                           clearErrors(setDialogState),
                                       decoration: fieldDecoration(
                                         label: 'Name',
-                                        hint: 'My backend',
+                                        hint: 'Players Backend',
                                         error: nameError,
                                       ),
                                       style: TextStyle(color: onSurface),
@@ -13391,7 +13431,7 @@ foreach ($app in $appPaths) {
                               onSubmitted: (_) => submit(setDialogState),
                               decoration: InputDecoration(
                                 labelText: 'Name',
-                                hintText: 'My backend',
+                                hintText: 'Players Backend',
                                 isDense: true,
                                 filled: true,
                                 fillColor: _onSurface(dialogContext, 0.06),
