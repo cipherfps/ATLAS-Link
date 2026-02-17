@@ -19,4 +19,11 @@ Markdown Quick Key
 
 # Improvements
 - Added Quick Tips for first time users
+- New game launch interaction/pop up
+- Added new toasts to look cleaner
+- Downloading in internal files
+
+# Fixes
+- Fixed some library lag
+- Set up permissions
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
