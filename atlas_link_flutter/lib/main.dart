@@ -470,8 +470,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.0.5';
-  static const String _launcherBuildLabel = 'Stable 1.0.5';
+  static const String _launcherVersion = '1.0.6';
+  static const String _launcherBuildLabel = 'Stable 1.0.6';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1812,6 +1812,19 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   String? _resolveCurrentBundledDefaultDllPath(_BundledDllSpec spec) {
+    final configuredPath = _configuredDllPathForSpec(spec).trim();
+    final configuredLooksLikeDll =
+        configuredPath.isNotEmpty &&
+        configuredPath.toLowerCase().endsWith('.dll');
+    final configuredIsBundledDefaultLocation =
+        _isManagedBundledDllPath(configuredPath, spec.fileName) ||
+        _looksLikeBundledAssetDllPath(configuredPath, spec.fileName);
+    if (configuredLooksLikeDll &&
+        configuredIsBundledDefaultLocation &&
+        File(configuredPath).existsSync()) {
+      return configuredPath;
+    }
+
     final installedPath = _resolveBundledAssetFilePath(spec.assetPath);
     if (installedPath != null && installedPath.trim().isNotEmpty) {
       return installedPath;
@@ -10910,6 +10923,22 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return names.join(', ');
   }
 
+  String? _dllRowUpdateWarningMessage(String fileNameLower) {
+    final lower = fileNameLower.trim().toLowerCase();
+    final hasDefaultUpdate = _bundledDllUpdatedFileNames.contains(lower);
+    final configuredDiff = _configuredDllDifferentFileNames.contains(lower);
+    if (hasDefaultUpdate && configuredDiff) {
+      return 'Default update available. Configured DLL differs from latest GitHub default.';
+    }
+    if (hasDefaultUpdate) {
+      return 'Default update available';
+    }
+    if (configuredDiff) {
+      return 'Configured DLL differs from latest GitHub default';
+    }
+    return null;
+  }
+
   bool get _hasMissingConfiguredDllPaths =>
       _configuredDllPathMissing(_settings.unrealEnginePatcherPath) ||
       _configuredDllPathMissing(_settings.authenticationPatcherPath) ||
@@ -14868,6 +14897,7 @@ foreach ($app in $appPaths) {
     required ValueChanged<String> onChanged,
     required VoidCallback onPick,
     required VoidCallback onReset,
+    String? updateWarningMessage,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final rawPath = controller.text.trim();
@@ -14901,6 +14931,16 @@ foreach ($app in $appPaths) {
     } else if (showTypeWarning) {
       statusIcon = Tooltip(
         message: 'Not a DLL',
+        child: Icon(
+          Icons.warning_amber_rounded,
+          size: 18,
+          color: const Color(0xFFE7A008),
+        ),
+      );
+    } else if (updateWarningMessage != null &&
+        updateWarningMessage.isNotEmpty) {
+      statusIcon = Tooltip(
+        message: updateWarningMessage,
         child: Icon(
           Icons.warning_amber_rounded,
           size: 18,
@@ -15319,7 +15359,7 @@ foreach ($app in $appPaths) {
                                 label: Text(
                                   _updatingDefaultDlls
                                       ? 'Updating defaults...'
-                                      : 'Update default DLLs',
+                                      : 'Update Default DLLs',
                                 ),
                               ),
                               FilledButton.icon(
@@ -15382,7 +15422,7 @@ foreach ($app in $appPaths) {
                           label: Text(
                             _updatingDefaultDlls
                                 ? 'Updating defaults...'
-                                : 'Update default DLLs',
+                                : 'Update Default DLLs',
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -15439,7 +15479,7 @@ foreach ($app in $appPaths) {
                       ),
                     ),
                     child: Text(
-                      'One or more configured DLL paths are missing. Use Update default DLLs or each row\'s reset button.',
+                      'One or more configured DLL paths are missing. Use Update Default DLLs or each row\'s reset button.',
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
@@ -15461,7 +15501,7 @@ foreach ($app in $appPaths) {
                       ),
                     ),
                     child: Text(
-                      'Configured DLL differs from latest default: $_configuredDllDifferenceList. Use each row\'s reset button or Update default DLLs.',
+                      'Configured DLL differs from latest default: $_configuredDllDifferenceList. Use each row\'s reset button or Update Default DLLs.',
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
@@ -15479,6 +15519,9 @@ foreach ($app in $appPaths) {
                   trailing: _dataPathPicker(
                     controller: _unrealEnginePatcherController,
                     placeholder: 'No file selected',
+                    updateWarningMessage: _dllRowUpdateWarningMessage(
+                      'console.dll',
+                    ),
                     onChanged: (value) {
                       setState(() {
                         _settings = _settings.copyWith(
@@ -15500,6 +15543,9 @@ foreach ($app in $appPaths) {
                   trailing: _dataPathPicker(
                     controller: _authenticationPatcherController,
                     placeholder: 'No file selected',
+                    updateWarningMessage: _dllRowUpdateWarningMessage(
+                      'tellurium.dll',
+                    ),
                     onChanged: (value) {
                       setState(() {
                         _settings = _settings.copyWith(
@@ -15522,6 +15568,9 @@ foreach ($app in $appPaths) {
                   trailing: _dataPathPicker(
                     controller: _memoryPatcherController,
                     placeholder: 'No file selected',
+                    updateWarningMessage: _dllRowUpdateWarningMessage(
+                      'memory.dll',
+                    ),
                     onChanged: (value) {
                       setState(() {
                         _settings = _settings.copyWith(
@@ -15543,6 +15592,9 @@ foreach ($app in $appPaths) {
                   trailing: _dataPathPicker(
                     controller: _gameServerFileController,
                     placeholder: 'No file selected',
+                    updateWarningMessage: _dllRowUpdateWarningMessage(
+                      'magnesium.dll',
+                    ),
                     onChanged: (value) {
                       setState(() {
                         _settings = _settings.copyWith(
@@ -15565,6 +15617,9 @@ foreach ($app in $appPaths) {
                   trailing: _dataPathPicker(
                     controller: _largePakPatcherController,
                     placeholder: 'No file selected',
+                    updateWarningMessage: _dllRowUpdateWarningMessage(
+                      'largepakpatch.dll',
+                    ),
                     onChanged: (value) {
                       setState(() {
                         _settings = _settings.copyWith(
