@@ -18,8 +18,9 @@ Markdown Quick Key
 - Please note any issues or bugs on the GitHub or in our discord server!
 
 # Improvements
-- Saving backend feature
-- More quick tips
+- Added DLL Updater 
+- Updated Magnesium Game Server (Made by ralz)
+- Small Notification Changes
 
 # Fixes
 - Fixed injection timings and other stuff (Large Pak Patcher may still be a bit unreliable)

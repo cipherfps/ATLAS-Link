@@ -5,9 +5,9 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:ffi/ffi.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -470,8 +470,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.0.4';
-  static const String _launcherBuildLabel = 'Stable 1.0.4';
+  static const String _launcherVersion = '1.0.5';
+  static const String _launcherBuildLabel = 'Stable 1.0.5';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -491,6 +491,37 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const String _atlasLinkRepository =
       'https://github.com/cipherfps/ATLAS-Link';
   static const String _atlasLinkDiscordInvite = 'https://discord.gg/GqgakxU6bm';
+  static const String _atlasLinkBundledDllContentsApi =
+      'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
+  static const String _atlasLinkBundledDllFallbackBaseUrl =
+      'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
+  static const List<_BundledDllSpec> _bundledDllSpecs = <_BundledDllSpec>[
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/Magnesium.dll',
+      fileName: 'Magnesium.dll',
+      label: 'game server',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/LargePakPatch.dll',
+      fileName: 'LargePakPatch.dll',
+      label: 'large pak patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/memory.dll',
+      fileName: 'memory.dll',
+      label: 'memory patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/Tellurium.dll',
+      fileName: 'Tellurium.dll',
+      label: 'authentication patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/console.dll',
+      fileName: 'console.dll',
+      label: 'unreal engine patcher',
+    ),
+  ];
   static const String _atlasBackendLatestReleaseApi =
       'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases/latest';
   static const String _atlasBackendLatestReleasePage =
@@ -594,6 +625,13 @@ class _LauncherScreenState extends State<LauncherScreen>
   DateTime? _lastBackendUndetectedToastAt;
   DateTime? _lastBackendCheckingToastAt;
   bool _checkingLauncherUpdate = false;
+  bool _checkingBundledDllDefaultsUpdate = false;
+  bool _bundledDllDefaultsUpdateAvailable = false;
+  bool _updatingDefaultDlls = false;
+  Set<String> _bundledDllUpdatedFileNames = <String>{};
+  Set<String> _configuredDllDifferentFileNames = <String>{};
+  Map<String, _BundledDllRemoteAsset> _bundledDllRemoteAssetsByName =
+      <String, _BundledDllRemoteAsset>{};
   bool _launcherUpdateDialogVisible = false;
   bool _launcherUpdateAutoCheckQueued = false;
   bool _launcherUpdateAutoChecked = false;
@@ -761,6 +799,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       _syncControllers();
       await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
+      unawaited(_checkForBundledDllDefaultUpdates(silent: true));
       if (currentLauncherVersion.isNotEmpty &&
           _installState.lastSeenLauncherVersion != currentLauncherVersion) {
         _installState = _installState.copyWith(
@@ -1764,20 +1803,340 @@ class _LauncherScreenState extends State<LauncherScreen>
     return normalizedPath.startsWith(prefix);
   }
 
-  static const String _atlasLinkBundledDllFallbackBaseUrl =
-      'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
+  _BundledDllSpec _bundledDllSpecByFileName(String fileName) {
+    final lower = fileName.trim().toLowerCase();
+    for (final spec in _bundledDllSpecs) {
+      if (spec.fileNameLower == lower) return spec;
+    }
+    throw StateError('Unknown bundled DLL file name: $fileName');
+  }
 
-  String _titleCaseLabel(String label) {
-    final trimmed = label.trim();
-    if (trimmed.isEmpty) return trimmed;
-    final parts = trimmed.split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
-    final cased = parts.map((word) {
-      if (RegExp(r'^[A-Z0-9]+$').hasMatch(word)) return word;
-      final first = word[0].toUpperCase();
-      final rest = word.length > 1 ? word.substring(1) : '';
-      return '$first$rest';
-    }).toList();
-    return cased.join(' ');
+  String? _resolveCurrentBundledDefaultDllPath(_BundledDllSpec spec) {
+    final installedPath = _resolveBundledAssetFilePath(spec.assetPath);
+    if (installedPath != null && installedPath.trim().isNotEmpty) {
+      return installedPath;
+    }
+    final managedPath = _joinPath([_dataDir.path, 'dlls', spec.fileName]);
+    if (File(managedPath).existsSync()) return managedPath;
+    return null;
+  }
+
+  String _configuredDllPathForSpec(_BundledDllSpec spec) {
+    switch (spec.fileNameLower) {
+      case 'console.dll':
+        return _settings.unrealEnginePatcherPath;
+      case 'tellurium.dll':
+        return _settings.authenticationPatcherPath;
+      case 'memory.dll':
+        return _settings.memoryPatcherPath;
+      case 'magnesium.dll':
+        return _settings.gameServerFilePath;
+      case 'largepakpatch.dll':
+        return _settings.largePakPatcherFilePath;
+      default:
+        return '';
+    }
+  }
+
+  Future<String?> _computeGitBlobShaForFile(File file) async {
+    try {
+      if (!await file.exists()) return null;
+      final bytes = await file.readAsBytes();
+      final header = ascii.encode('blob ${bytes.length}\u0000');
+      final payload = Uint8List(header.length + bytes.length);
+      payload.setRange(0, header.length, header);
+      payload.setRange(header.length, payload.length, bytes);
+      return crypto.sha1.convert(payload).toString().toLowerCase();
+    } catch (error) {
+      _log('settings', 'Failed to hash DLL file (${file.path}): $error');
+      return null;
+    }
+  }
+
+  Future<Map<String, _BundledDllRemoteAsset>> _fetchBundledDllRemoteAssets({
+    bool forceRefresh = false,
+  }) async {
+    if (!forceRefresh && _bundledDllRemoteAssetsByName.isNotEmpty) {
+      return _bundledDllRemoteAssetsByName;
+    }
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(
+        Uri.parse(_atlasLinkBundledDllContentsApi),
+      );
+      request.followRedirects = true;
+      request.maxRedirects = 6;
+      request.headers.set('Accept', 'application/vnd.github+json');
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        final remaining = response.headers.value('x-ratelimit-remaining');
+        final hint = remaining == null || remaining.trim().isEmpty
+            ? ''
+            : ' (rate remaining $remaining)';
+        _log(
+          'settings',
+          'GitHub bundled DLL manifest request failed (HTTP ${response.statusCode})$hint.',
+        );
+        return const <String, _BundledDllRemoteAsset>{};
+      }
+
+      final body = await response.transform(utf8.decoder).join();
+      if (body.trim().isEmpty) {
+        return const <String, _BundledDllRemoteAsset>{};
+      }
+      final decoded = jsonDecode(body);
+      if (decoded is! List) {
+        return const <String, _BundledDllRemoteAsset>{};
+      }
+
+      final next = <String, _BundledDllRemoteAsset>{};
+      for (final entry in decoded) {
+        if (entry is! Map) continue;
+        final map = entry.cast<dynamic, dynamic>();
+        final type = (map['type'] ?? '').toString().trim().toLowerCase();
+        if (type != 'file') continue;
+
+        final name = (map['name'] ?? '').toString().trim();
+        final sha = (map['sha'] ?? '').toString().trim().toLowerCase();
+        final downloadUrl = (map['download_url'] ?? '').toString().trim();
+        if (name.isEmpty || sha.isEmpty) continue;
+
+        next[name.toLowerCase()] = _BundledDllRemoteAsset(
+          sha: sha,
+          downloadUrl: downloadUrl,
+        );
+      }
+
+      if (next.isNotEmpty) {
+        _bundledDllRemoteAssetsByName = next;
+      }
+      return next;
+    } catch (error) {
+      _log('settings', 'Failed to fetch bundled DLL manifest: $error');
+      return const <String, _BundledDllRemoteAsset>{};
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _checkForBundledDllDefaultUpdates({
+    required bool silent,
+    bool forceRefresh = true,
+  }) async {
+    if (_checkingBundledDllDefaultsUpdate) return;
+    _checkingBundledDllDefaultsUpdate = true;
+    try {
+      final remoteAssets = await _fetchBundledDllRemoteAssets(
+        forceRefresh: forceRefresh,
+      );
+      if (remoteAssets.isEmpty) {
+        if (!silent && mounted) {
+          _toast('Unable to check default DLL updates right now.');
+        }
+        return;
+      }
+
+      final updatedFiles = <String>{};
+      final configuredDifferentFiles = <String>{};
+      for (final spec in _bundledDllSpecs) {
+        final remote = remoteAssets[spec.fileNameLower];
+        if (remote == null) continue;
+
+        final configuredPath = _configuredDllPathForSpec(spec).trim();
+        final configuredLooksLikeDll =
+            configuredPath.isNotEmpty &&
+            configuredPath.toLowerCase().endsWith('.dll');
+        if (configuredLooksLikeDll && File(configuredPath).existsSync()) {
+          final configuredSha = await _computeGitBlobShaForFile(
+            File(configuredPath),
+          );
+          if (configuredSha == null || configuredSha != remote.sha) {
+            configuredDifferentFiles.add(spec.fileNameLower);
+          }
+        }
+
+        final localPath = _resolveCurrentBundledDefaultDllPath(spec);
+        if (localPath == null || localPath.trim().isEmpty) {
+          updatedFiles.add(spec.fileNameLower);
+          continue;
+        }
+        final localSha = await _computeGitBlobShaForFile(File(localPath));
+        if (localSha == null || localSha != remote.sha) {
+          updatedFiles.add(spec.fileNameLower);
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _bundledDllUpdatedFileNames = updatedFiles;
+          _configuredDllDifferentFileNames = configuredDifferentFiles;
+          _bundledDllDefaultsUpdateAvailable = updatedFiles.isNotEmpty;
+        });
+      } else {
+        _bundledDllUpdatedFileNames = updatedFiles;
+        _configuredDllDifferentFileNames = configuredDifferentFiles;
+        _bundledDllDefaultsUpdateAvailable = updatedFiles.isNotEmpty;
+      }
+
+      if (!silent && mounted) {
+        if (updatedFiles.isEmpty && configuredDifferentFiles.isEmpty) {
+          _toast('Default DLLs are up to date.');
+        } else if (updatedFiles.isNotEmpty &&
+            configuredDifferentFiles.isNotEmpty) {
+          _toast(
+            'New default DLL updates are available. Some configured DLLs differ from latest defaults.',
+          );
+        } else {
+          if (updatedFiles.isNotEmpty) {
+            _toast('New default DLL updates are available.');
+          } else {
+            _toast('Some configured DLLs differ from latest defaults.');
+          }
+        }
+      }
+    } catch (error) {
+      _log('settings', 'Failed to check for bundled DLL updates: $error');
+      if (!silent && mounted) {
+        _toast('Unable to check default DLL updates right now.');
+      }
+    } finally {
+      _checkingBundledDllDefaultsUpdate = false;
+    }
+  }
+
+  Future<String?> _downloadLatestBundledDllFromGitHub({
+    required _BundledDllSpec spec,
+    Map<String, _BundledDllRemoteAsset>? remoteAssets,
+  }) async {
+    final resolvedRemoteAssets =
+        remoteAssets ?? await _fetchBundledDllRemoteAssets(forceRefresh: true);
+    final remote = resolvedRemoteAssets[spec.fileNameLower];
+    final fallbackUrl =
+        '$_atlasLinkBundledDllFallbackBaseUrl${spec.normalizedAssetPath}';
+    final downloadUrl = remote?.downloadUrl.trim().isNotEmpty == true
+        ? remote!.downloadUrl.trim()
+        : fallbackUrl;
+
+    final dllDir = Directory(_joinPath([_dataDir.path, 'dlls']));
+    final outputPath = _joinPath([dllDir.path, spec.fileName]);
+    final outputFile = File(outputPath);
+    final tmp = File('$outputPath.tmp');
+    try {
+      await dllDir.create(recursive: true);
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
+
+      final progressMessage = 'Updating ${spec.fileName}...';
+      if (mounted) {
+        _toastProgress(progressMessage, progress: null, indeterminate: true);
+      }
+
+      await _downloadToFile(
+        downloadUrl,
+        tmp,
+        onProgress: (receivedBytes, totalBytes) {
+          if (!mounted) return;
+          if (totalBytes == null || totalBytes <= 0) {
+            _toastProgress(
+              progressMessage,
+              progress: null,
+              indeterminate: true,
+            );
+            return;
+          }
+          final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
+          _toastProgress(
+            progressMessage,
+            progress: ratio,
+            indeterminate: false,
+          );
+        },
+      );
+      final length = await tmp.length();
+      if (length <= 0) {
+        throw 'Downloaded file was empty.';
+      }
+
+      if (await outputFile.exists()) {
+        await outputFile.delete();
+      }
+      await tmp.rename(outputFile.path);
+
+      if (remote != null) {
+        final localSha = await _computeGitBlobShaForFile(outputFile);
+        if (localSha == null || localSha != remote.sha) {
+          throw 'Downloaded file hash did not match GitHub metadata.';
+        }
+      }
+
+      if (mounted) {
+        _toastProgressDismiss();
+      }
+      return outputPath;
+    } catch (error) {
+      _log(
+        'settings',
+        'Failed to download latest ${spec.label} DLL from GitHub ($downloadUrl): $error',
+      );
+      if (mounted) {
+        _toastProgressDismiss();
+      }
+      try {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      } catch (_) {
+        // Ignore cleanup failures.
+      }
+      return null;
+    }
+  }
+
+  Future<void> _resetBundledDllPathToLatest({
+    required _BundledDllSpec spec,
+    required LauncherSettings Function(LauncherSettings, String) applySetting,
+    required TextEditingController controller,
+    bool checkForUpdatesAfter = true,
+    Map<String, _BundledDllRemoteAsset>? remoteAssets,
+  }) async {
+    var nextPath = await _downloadLatestBundledDllFromGitHub(
+      spec: spec,
+      remoteAssets: remoteAssets,
+    );
+    if (nextPath == null || nextPath.trim().isEmpty) {
+      _log(
+        'settings',
+        'Falling back to packaged ${spec.label} DLL after GitHub refresh failed.',
+      );
+      if (mounted) {
+        _toast('Updating ${spec.fileName}...');
+      }
+      nextPath = await _ensureBundledDll(
+        bundledAssetPath: spec.assetPath,
+        bundledFileName: spec.fileName,
+        label: spec.label,
+        overwriteFallbackCopy: true,
+      );
+    }
+
+    final normalized = nextPath?.trim() ?? '';
+    if (mounted) {
+      setState(() {
+        _settings = applySetting(_settings, normalized);
+        controller.text = normalized;
+      });
+    } else {
+      _settings = applySetting(_settings, normalized);
+      controller.text = normalized;
+    }
+    await _saveSettings(toast: false);
+    if (checkForUpdatesAfter) {
+      unawaited(_checkForBundledDllDefaultUpdates(silent: true));
+    }
   }
 
   Future<bool> _tryDownloadBundledDllFromGitHub({
@@ -1805,13 +2164,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         'settings',
         'Bundled $label DLL missing. Downloading from GitHub...',
       );
-      final displayLabel = _titleCaseLabel(label);
+      final progressMessage = 'Updating ${_basename(outputFile.path)}...';
       if (mounted) {
-        _toastProgress(
-          'Downloading $displayLabel DLL...',
-          progress: null,
-          indeterminate: true,
-        );
+        _toastProgress(progressMessage, progress: null, indeterminate: true);
       }
       await _downloadToFile(
         url,
@@ -1820,7 +2175,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           if (!mounted) return;
           if (totalBytes == null || totalBytes <= 0) {
             _toastProgress(
-              'Downloading $displayLabel DLL...',
+              progressMessage,
               progress: null,
               indeterminate: true,
             );
@@ -1828,7 +2183,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
           final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
           _toastProgress(
-            'Downloading $displayLabel DLL...',
+            progressMessage,
             progress: ratio,
             indeterminate: false,
           );
@@ -1881,6 +2236,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       final outputPath = _joinPath([dllDir.path, bundledFileName]);
       final outputFile = File(outputPath);
       if (overwriteFallbackCopy || !outputFile.existsSync()) {
+        if (mounted && overwriteFallbackCopy) {
+          _toast('Updating $bundledFileName...');
+        }
         try {
           final bytes = await rootBundle.load(bundledAssetPath);
           await outputFile.writeAsBytes(
@@ -2831,6 +3189,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _handleRefreshPressed() async {
     await _refreshRuntime();
     await _checkForLauncherUpdates(silent: false);
+    await _checkForBundledDllDefaultUpdates(silent: false);
   }
 
   Future<void> _checkForLauncherUpdates({required bool silent}) async {
@@ -6374,7 +6733,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         if (patched) {
           _log('gameserver', 'Patched executable for headless mode.');
         } else {
-          _log('gameserver', 'Exe headless patch not needed or already applied.');
+          _log(
+            'gameserver',
+            'Exe headless patch not needed or already applied.',
+          );
         }
       }
 
@@ -6614,24 +6976,234 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   // Binary patch patterns for headless mode
   // Original string: -invitesession -invitefrom -party_joiningfo_token -replay
   static final Uint8List _originalHeadlessBytes = Uint8List.fromList([
-    45, 0, 105, 0, 110, 0, 118, 0, 105, 0, 116, 0, 101, 0, 115, 0, 101, 0,
-    115, 0, 115, 0, 105, 0, 111, 0, 110, 0, 32, 0, 45, 0, 105, 0, 110, 0,
-    118, 0, 105, 0, 116, 0, 101, 0, 102, 0, 114, 0, 111, 0, 109, 0, 32, 0,
-    45, 0, 112, 0, 97, 0, 114, 0, 116, 0, 121, 0, 95, 0, 106, 0, 111, 0,
-    105, 0, 110, 0, 105, 0, 110, 0, 102, 0, 111, 0, 95, 0, 116, 0, 111, 0,
-    107, 0, 101, 0, 110, 0, 32, 0, 45, 0, 114, 0, 101, 0, 112, 0, 108, 0,
-    97, 0, 121, 0
+    45,
+    0,
+    105,
+    0,
+    110,
+    0,
+    118,
+    0,
+    105,
+    0,
+    116,
+    0,
+    101,
+    0,
+    115,
+    0,
+    101,
+    0,
+    115,
+    0,
+    115,
+    0,
+    105,
+    0,
+    111,
+    0,
+    110,
+    0,
+    32,
+    0,
+    45,
+    0,
+    105,
+    0,
+    110,
+    0,
+    118,
+    0,
+    105,
+    0,
+    116,
+    0,
+    101,
+    0,
+    102,
+    0,
+    114,
+    0,
+    111,
+    0,
+    109,
+    0,
+    32,
+    0,
+    45,
+    0,
+    112,
+    0,
+    97,
+    0,
+    114,
+    0,
+    116,
+    0,
+    121,
+    0,
+    95,
+    0,
+    106,
+    0,
+    111,
+    0,
+    105,
+    0,
+    110,
+    0,
+    105,
+    0,
+    110,
+    0,
+    102,
+    0,
+    111,
+    0,
+    95,
+    0,
+    116,
+    0,
+    111,
+    0,
+    107,
+    0,
+    101,
+    0,
+    110,
+    0,
+    32,
+    0,
+    45,
+    0,
+    114,
+    0,
+    101,
+    0,
+    112,
+    0,
+    108,
+    0,
+    97,
+    0,
+    121,
+    0,
   ]);
 
   // Patched string: -log -nosplash -nosound -nullrhi -useolditemcards
   static final Uint8List _patchedHeadlessBytes = Uint8List.fromList([
-    45, 0, 108, 0, 111, 0, 103, 0, 32, 0, 45, 0, 110, 0, 111, 0, 115, 0,
-    112, 0, 108, 0, 97, 0, 115, 0, 104, 0, 32, 0, 45, 0, 110, 0, 111, 0,
-    115, 0, 111, 0, 117, 0, 110, 0, 100, 0, 32, 0, 45, 0, 110, 0, 117, 0,
-    108, 0, 108, 0, 114, 0, 104, 0, 105, 0, 32, 0, 45, 0, 117, 0, 115, 0,
-    101, 0, 111, 0, 108, 0, 100, 0, 105, 0, 116, 0, 101, 0, 109, 0, 99, 0,
-    97, 0, 114, 0, 100, 0, 115, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0,
-    32, 0
+    45,
+    0,
+    108,
+    0,
+    111,
+    0,
+    103,
+    0,
+    32,
+    0,
+    45,
+    0,
+    110,
+    0,
+    111,
+    0,
+    115,
+    0,
+    112,
+    0,
+    108,
+    0,
+    97,
+    0,
+    115,
+    0,
+    104,
+    0,
+    32,
+    0,
+    45,
+    0,
+    110,
+    0,
+    111,
+    0,
+    115,
+    0,
+    111,
+    0,
+    117,
+    0,
+    110,
+    0,
+    100,
+    0,
+    32,
+    0,
+    45,
+    0,
+    110,
+    0,
+    117,
+    0,
+    108,
+    0,
+    108,
+    0,
+    114,
+    0,
+    104,
+    0,
+    105,
+    0,
+    32,
+    0,
+    45,
+    0,
+    117,
+    0,
+    115,
+    0,
+    101,
+    0,
+    111,
+    0,
+    108,
+    0,
+    100,
+    0,
+    105,
+    0,
+    116,
+    0,
+    101,
+    0,
+    109,
+    0,
+    99,
+    0,
+    97,
+    0,
+    114,
+    0,
+    100,
+    0,
+    115,
+    0,
+    32,
+    0,
+    32,
+    0,
+    32,
+    0,
+    32,
+    0,
+    32,
+    0,
+    32,
+    0,
+    32,
+    0,
   ]);
 
   Future<bool> _patchExecutableForHeadless(String exePath) async {
@@ -9149,6 +9721,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _startupConfigResolved = true;
         _backendOnline = false;
         _checkingLauncherUpdate = false;
+        _checkingBundledDllDefaultsUpdate = false;
+        _bundledDllDefaultsUpdateAvailable = false;
+        _updatingDefaultDlls = false;
+        _bundledDllUpdatedFileNames = <String>{};
+        _configuredDllDifferentFileNames = <String>{};
+        _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
         _launcherUpdateDialogVisible = false;
         _launcherUpdateAutoCheckQueued = false;
         _launcherUpdateAutoChecked = false;
@@ -9184,6 +9762,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _startupConfigResolved = true;
       _backendOnline = false;
       _checkingLauncherUpdate = false;
+      _checkingBundledDllDefaultsUpdate = false;
+      _bundledDllDefaultsUpdateAvailable = false;
+      _updatingDefaultDlls = false;
+      _bundledDllUpdatedFileNames = <String>{};
+      _configuredDllDifferentFileNames = <String>{};
+      _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
       _launcherUpdateDialogVisible = false;
       _launcherUpdateAutoCheckQueued = false;
       _launcherUpdateAutoChecked = false;
@@ -9222,6 +9806,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     // clearing internal files.
     await _applyBundledDllDefaults();
     await _saveSettings(toast: false);
+    unawaited(_checkForBundledDllDefaultUpdates(silent: true));
 
     _installState = _installState.copyWith(
       lastSeenLauncherVersion: _launcherVersion,
@@ -9254,6 +9839,83 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return path;
   }
 
+  Future<void> _updateAllDefaultDlls() async {
+    if (_updatingDefaultDlls) return;
+    if (mounted) {
+      setState(() {
+        _updatingDefaultDlls = true;
+      });
+    } else {
+      _updatingDefaultDlls = true;
+    }
+
+    try {
+      final remoteAssets = await _fetchBundledDllRemoteAssets(
+        forceRefresh: true,
+      );
+      final sharedRemoteAssets = remoteAssets.isEmpty ? null : remoteAssets;
+
+      await _resetBundledDllPathToLatest(
+        spec: _bundledDllSpecByFileName('console.dll'),
+        applySetting: (settings, path) =>
+            settings.copyWith(unrealEnginePatcherPath: path),
+        controller: _unrealEnginePatcherController,
+        checkForUpdatesAfter: false,
+        remoteAssets: sharedRemoteAssets,
+      );
+      await _resetBundledDllPathToLatest(
+        spec: _bundledDllSpecByFileName('Tellurium.dll'),
+        applySetting: (settings, path) =>
+            settings.copyWith(authenticationPatcherPath: path),
+        controller: _authenticationPatcherController,
+        checkForUpdatesAfter: false,
+        remoteAssets: sharedRemoteAssets,
+      );
+      await _resetBundledDllPathToLatest(
+        spec: _bundledDllSpecByFileName('memory.dll'),
+        applySetting: (settings, path) =>
+            settings.copyWith(memoryPatcherPath: path),
+        controller: _memoryPatcherController,
+        checkForUpdatesAfter: false,
+        remoteAssets: sharedRemoteAssets,
+      );
+      await _resetBundledDllPathToLatest(
+        spec: _bundledDllSpecByFileName('Magnesium.dll'),
+        applySetting: (settings, path) =>
+            settings.copyWith(gameServerFilePath: path),
+        controller: _gameServerFileController,
+        checkForUpdatesAfter: false,
+        remoteAssets: sharedRemoteAssets,
+      );
+      await _resetBundledDllPathToLatest(
+        spec: _bundledDllSpecByFileName('LargePakPatch.dll'),
+        applySetting: (settings, path) =>
+            settings.copyWith(largePakPatcherFilePath: path),
+        controller: _largePakPatcherController,
+        checkForUpdatesAfter: false,
+        remoteAssets: sharedRemoteAssets,
+      );
+
+      await _checkForBundledDllDefaultUpdates(silent: true);
+      if (mounted) {
+        _toast('Default DLL update completed.');
+      }
+    } catch (error) {
+      _log('settings', 'Failed to update all default DLLs: $error');
+      if (mounted) {
+        _toast('Failed to update all default DLLs.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _updatingDefaultDlls = false;
+        });
+      } else {
+        _updatingDefaultDlls = false;
+      }
+    }
+  }
+
   Future<void> _pickUnrealEnginePatcher() async {
     final path = await _pickSingleFile(
       dialogTitle: 'Select Unreal Engine Patcher',
@@ -9265,20 +9927,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _unrealEnginePatcherController.text = path;
     });
     await _saveSettings(toast: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
   }
 
   Future<void> _clearUnrealEnginePatcher() async {
-    final bundledPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/console.dll',
-      bundledFileName: 'console.dll',
-      label: 'unreal engine patcher',
+    await _resetBundledDllPathToLatest(
+      spec: _bundledDllSpecByFileName('console.dll'),
+      applySetting: (settings, path) =>
+          settings.copyWith(unrealEnginePatcherPath: path),
+      controller: _unrealEnginePatcherController,
     );
-    final nextPath = bundledPath?.trim() ?? '';
-    setState(() {
-      _settings = _settings.copyWith(unrealEnginePatcherPath: nextPath);
-      _unrealEnginePatcherController.text = nextPath;
-    });
-    await _saveSettings(toast: false);
   }
 
   Future<void> _pickAuthenticationPatcher() async {
@@ -9292,20 +9952,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _authenticationPatcherController.text = path;
     });
     await _saveSettings(toast: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
   }
 
   Future<void> _clearAuthenticationPatcher() async {
-    final bundledPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/Tellurium.dll',
-      bundledFileName: 'Tellurium.dll',
-      label: 'authentication patcher',
+    await _resetBundledDllPathToLatest(
+      spec: _bundledDllSpecByFileName('Tellurium.dll'),
+      applySetting: (settings, path) =>
+          settings.copyWith(authenticationPatcherPath: path),
+      controller: _authenticationPatcherController,
     );
-    final nextPath = bundledPath?.trim() ?? '';
-    setState(() {
-      _settings = _settings.copyWith(authenticationPatcherPath: nextPath);
-      _authenticationPatcherController.text = nextPath;
-    });
-    await _saveSettings(toast: false);
   }
 
   Future<void> _pickMemoryPatcher() async {
@@ -9319,20 +9977,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _memoryPatcherController.text = path;
     });
     await _saveSettings(toast: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
   }
 
   Future<void> _clearMemoryPatcher() async {
-    final bundledPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/memory.dll',
-      bundledFileName: 'memory.dll',
-      label: 'memory patcher',
+    await _resetBundledDllPathToLatest(
+      spec: _bundledDllSpecByFileName('memory.dll'),
+      applySetting: (settings, path) =>
+          settings.copyWith(memoryPatcherPath: path),
+      controller: _memoryPatcherController,
     );
-    final nextPath = bundledPath?.trim() ?? '';
-    setState(() {
-      _settings = _settings.copyWith(memoryPatcherPath: nextPath);
-      _memoryPatcherController.text = nextPath;
-    });
-    await _saveSettings(toast: false);
   }
 
   Future<void> _pickGameServerFile() async {
@@ -9346,20 +10002,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _gameServerFileController.text = path;
     });
     await _saveSettings(toast: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
   }
 
   Future<void> _clearGameServerFile() async {
-    final bundledPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/Magnesium.dll',
-      bundledFileName: 'Magnesium.dll',
-      label: 'game server',
+    await _resetBundledDllPathToLatest(
+      spec: _bundledDllSpecByFileName('Magnesium.dll'),
+      applySetting: (settings, path) =>
+          settings.copyWith(gameServerFilePath: path),
+      controller: _gameServerFileController,
     );
-    final nextPath = bundledPath?.trim() ?? '';
-    setState(() {
-      _settings = _settings.copyWith(gameServerFilePath: nextPath);
-      _gameServerFileController.text = nextPath;
-    });
-    await _saveSettings(toast: false);
   }
 
   Future<void> _pickLargePakPatcherFile() async {
@@ -9373,20 +10027,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _largePakPatcherController.text = path;
     });
     await _saveSettings(toast: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
   }
 
   Future<void> _clearLargePakPatcherFile() async {
-    final bundledPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/LargePakPatch.dll',
-      bundledFileName: 'LargePakPatch.dll',
-      label: 'large pak patcher',
+    await _resetBundledDllPathToLatest(
+      spec: _bundledDllSpecByFileName('LargePakPatch.dll'),
+      applySetting: (settings, path) =>
+          settings.copyWith(largePakPatcherFilePath: path),
+      controller: _largePakPatcherController,
     );
-    final nextPath = bundledPath?.trim() ?? '';
-    setState(() {
-      _settings = _settings.copyWith(largePakPatcherFilePath: nextPath);
-      _largePakPatcherController.text = nextPath;
-    });
-    await _saveSettings(toast: false);
   }
 
   Future<void> _openUrl(String url) async {
@@ -9839,8 +10491,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 ),
               );
             },
-            tooltip: 'Data management',
-            icon: const Icon(Icons.settings_rounded),
+            tooltip: _dataManagementButtonTooltip,
+            icon: _settingsActionIcon(),
           ),
         ],
       ],
@@ -10237,6 +10889,97 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
+  bool _configuredDllPathMissing(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return false;
+    if (!trimmed.toLowerCase().endsWith('.dll')) return false;
+    return !File(trimmed).existsSync();
+  }
+
+  bool get _hasConfiguredDllDifferences =>
+      _configuredDllDifferentFileNames.isNotEmpty;
+
+  String get _configuredDllDifferenceList {
+    final names =
+        _configuredDllDifferentFileNames
+            .map((fileName) => _bundledDllSpecByFileName(fileName).fileName)
+            .toList()
+          ..sort(
+            (left, right) => left.toLowerCase().compareTo(right.toLowerCase()),
+          );
+    return names.join(', ');
+  }
+
+  bool get _hasMissingConfiguredDllPaths =>
+      _configuredDllPathMissing(_settings.unrealEnginePatcherPath) ||
+      _configuredDllPathMissing(_settings.authenticationPatcherPath) ||
+      _configuredDllPathMissing(_settings.memoryPatcherPath) ||
+      _configuredDllPathMissing(_settings.gameServerFilePath) ||
+      _configuredDllPathMissing(_settings.largePakPatcherFilePath);
+
+  bool get _showSettingsAlertBadge =>
+      _bundledDllDefaultsUpdateAvailable ||
+      _hasMissingConfiguredDllPaths ||
+      _hasConfiguredDllDifferences;
+
+  String get _dataManagementButtonTooltip {
+    final hasUpdate = _bundledDllDefaultsUpdateAvailable;
+    final hasMissing = _hasMissingConfiguredDllPaths;
+    final hasDifference = _hasConfiguredDllDifferences;
+    if (hasUpdate && hasMissing && hasDifference) {
+      return 'Data management (DLL updates, missing DLL warnings, and configured DLL differences)';
+    }
+    if (hasUpdate && hasMissing) {
+      return 'Data management (DLL updates and missing DLL warnings)';
+    }
+    if (hasUpdate && hasDifference) {
+      return 'Data management (DLL updates and configured DLL differences)';
+    }
+    if (hasMissing && hasDifference) {
+      return 'Data management (missing DLL warnings and configured DLL differences)';
+    }
+    if (hasUpdate) return 'Data management (DLL update available)';
+    if (hasMissing) return 'Data management (missing DLL warning)';
+    if (hasDifference) return 'Data management (configured DLL differs)';
+    return 'Data management';
+  }
+
+  Widget _settingsActionIcon() {
+    if (!_showSettingsAlertBadge) {
+      return const Icon(Icons.settings_rounded);
+    }
+    final badgeBorder = Theme.of(context).colorScheme.surface;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        const Icon(Icons.settings_rounded),
+        Positioned(
+          top: -2,
+          right: -2,
+          child: Container(
+            width: 14,
+            height: 14,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: const Color(0xFFD93025),
+              shape: BoxShape.circle,
+              border: Border.all(color: badgeBorder, width: 1.1),
+            ),
+            child: const Text(
+              '!',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                height: 1,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _titleActionButton(IconData icon, VoidCallback onTap) {
     return _HoverScale(
       child: InkWell(
@@ -10509,6 +11252,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _tab = tab;
       if (settingsSection != null) _settingsSection = settingsSection;
     });
+    if (tab == LauncherTab.general) {
+      unawaited(
+        _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+      );
+    }
     _syncLibraryActionsNudgePulse();
   }
 
@@ -14553,6 +15301,28 @@ foreach ($app in $appPaths) {
                                 label: const Text('View internal files'),
                               ),
                               FilledButton.icon(
+                                onPressed: _updatingDefaultDlls
+                                    ? null
+                                    : _updateAllDefaultDlls,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFF2E7D32),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 11,
+                                  ),
+                                ),
+                                icon: const Icon(
+                                  Icons.system_update_alt_rounded,
+                                ),
+                                label: Text(
+                                  _updatingDefaultDlls
+                                      ? 'Updating defaults...'
+                                      : 'Update default DLLs',
+                                ),
+                              ),
+                              FilledButton.icon(
                                 onPressed: _resetLauncher,
                                 style: FilledButton.styleFrom(
                                   backgroundColor: const Color(0xFFB3261E),
@@ -14596,6 +15366,27 @@ foreach ($app in $appPaths) {
                         ),
                         const SizedBox(width: 10),
                         FilledButton.icon(
+                          onPressed: _updatingDefaultDlls
+                              ? null
+                              : _updateAllDefaultDlls,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF2E7D32),
+                            foregroundColor: Colors.white,
+                            shape: const StadiumBorder(),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 11,
+                            ),
+                          ),
+                          icon: const Icon(Icons.system_update_alt_rounded),
+                          label: Text(
+                            _updatingDefaultDlls
+                                ? 'Updating defaults...'
+                                : 'Update default DLLs',
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        FilledButton.icon(
                           onPressed: _resetLauncher,
                           style: FilledButton.styleFrom(
                             backgroundColor: const Color(0xFFB3261E),
@@ -14614,6 +15405,72 @@ foreach ($app in $appPaths) {
                   },
                 ),
                 const SizedBox(height: 14),
+                if (_bundledDllDefaultsUpdateAvailable) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD93025).withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFD93025).withValues(alpha: 0.45),
+                      ),
+                    ),
+                    child: Text(
+                      '${_bundledDllUpdatedFileNames.length} default DLL update(s) available on GitHub. Use each row\'s reset button to apply latest.',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.9),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (_hasMissingConfiguredDllPaths) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD93025).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFD93025).withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Text(
+                      'One or more configured DLL paths are missing. Use Update default DLLs or each row\'s reset button.',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.9),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (_hasConfiguredDllDifferences) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF8F00).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFFF8F00).withValues(alpha: 0.42),
+                      ),
+                    ),
+                    child: Text(
+                      'Configured DLL differs from latest default: $_configuredDllDifferenceList. Use each row\'s reset button or Update default DLLs.',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.9),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 _backendSettingTile(
                   icon: Icons.description_outlined,
                   title: 'Unreal Engine Patcher',
@@ -16195,6 +17052,30 @@ class _BackendInstallProgress {
 
   final String message;
   final double? progress;
+}
+
+class _BundledDllSpec {
+  const _BundledDllSpec({
+    required this.assetPath,
+    required this.fileName,
+    required this.label,
+  });
+
+  final String assetPath;
+  final String fileName;
+  final String label;
+
+  String get fileNameLower => fileName.toLowerCase();
+
+  String get normalizedAssetPath =>
+      assetPath.trim().replaceAll('\\', '/').replaceFirst(RegExp(r'^/+'), '');
+}
+
+class _BundledDllRemoteAsset {
+  const _BundledDllRemoteAsset({required this.sha, required this.downloadUrl});
+
+  final String sha;
+  final String downloadUrl;
 }
 
 class LauncherReleaseInfo {
