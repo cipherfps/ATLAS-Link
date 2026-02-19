@@ -21,7 +21,4 @@ Markdown Quick Key
 - Added DLL Updater 
 - Updated Magnesium Game Server (Made by ralz)
 - Small Notification Changes
-
-# Fixes
-- Fixed injection timings and other stuff (Large Pak Patcher may still be a bit unreliable)
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
