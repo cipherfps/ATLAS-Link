@@ -17,8 +17,8 @@ Markdown Quick Key
 - Welcome to the new ATLAS Link Launcher!
 - Please note any issues or bugs on the GitHub or in our discord server!
 
-# Improvements
-- Added DLL Updater 
-- Updated Magnesium Game Server (Made by ralz)
-- Small Notification Changes
+# Fixes
+- Fixed Default DLL update notification
+- Fixed blurred Missing Build splash
+
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

@@ -629,7 +629,6 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _bundledDllDefaultsUpdateAvailable = false;
   bool _updatingDefaultDlls = false;
   Set<String> _bundledDllUpdatedFileNames = <String>{};
-  Set<String> _configuredDllDifferentFileNames = <String>{};
   Map<String, _BundledDllRemoteAsset> _bundledDllRemoteAssetsByName =
       <String, _BundledDllRemoteAsset>{};
   bool _launcherUpdateDialogVisible = false;
@@ -1953,23 +1952,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
 
       final updatedFiles = <String>{};
-      final configuredDifferentFiles = <String>{};
       for (final spec in _bundledDllSpecs) {
         final remote = remoteAssets[spec.fileNameLower];
         if (remote == null) continue;
-
-        final configuredPath = _configuredDllPathForSpec(spec).trim();
-        final configuredLooksLikeDll =
-            configuredPath.isNotEmpty &&
-            configuredPath.toLowerCase().endsWith('.dll');
-        if (configuredLooksLikeDll && File(configuredPath).existsSync()) {
-          final configuredSha = await _computeGitBlobShaForFile(
-            File(configuredPath),
-          );
-          if (configuredSha == null || configuredSha != remote.sha) {
-            configuredDifferentFiles.add(spec.fileNameLower);
-          }
-        }
 
         final localPath = _resolveCurrentBundledDefaultDllPath(spec);
         if (localPath == null || localPath.trim().isEmpty) {
@@ -1985,29 +1970,18 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (mounted) {
         setState(() {
           _bundledDllUpdatedFileNames = updatedFiles;
-          _configuredDllDifferentFileNames = configuredDifferentFiles;
           _bundledDllDefaultsUpdateAvailable = updatedFiles.isNotEmpty;
         });
       } else {
         _bundledDllUpdatedFileNames = updatedFiles;
-        _configuredDllDifferentFileNames = configuredDifferentFiles;
         _bundledDllDefaultsUpdateAvailable = updatedFiles.isNotEmpty;
       }
 
       if (!silent && mounted) {
-        if (updatedFiles.isEmpty && configuredDifferentFiles.isEmpty) {
+        if (updatedFiles.isEmpty) {
           _toast('Default DLLs are up to date.');
-        } else if (updatedFiles.isNotEmpty &&
-            configuredDifferentFiles.isNotEmpty) {
-          _toast(
-            'New default DLL updates are available. Some configured DLLs differ from latest defaults.',
-          );
         } else {
-          if (updatedFiles.isNotEmpty) {
-            _toast('New default DLL updates are available.');
-          } else {
-            _toast('Some configured DLLs differ from latest defaults.');
-          }
+          _toast('New default DLL updates are available.');
         }
       }
     } catch (error) {
@@ -9738,7 +9712,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _bundledDllDefaultsUpdateAvailable = false;
         _updatingDefaultDlls = false;
         _bundledDllUpdatedFileNames = <String>{};
-        _configuredDllDifferentFileNames = <String>{};
         _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
         _launcherUpdateDialogVisible = false;
         _launcherUpdateAutoCheckQueued = false;
@@ -9779,7 +9752,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _bundledDllDefaultsUpdateAvailable = false;
       _updatingDefaultDlls = false;
       _bundledDllUpdatedFileNames = <String>{};
-      _configuredDllDifferentFileNames = <String>{};
       _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
       _launcherUpdateDialogVisible = false;
       _launcherUpdateAutoCheckQueued = false;
@@ -10909,32 +10881,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return !File(trimmed).existsSync();
   }
 
-  bool get _hasConfiguredDllDifferences =>
-      _configuredDllDifferentFileNames.isNotEmpty;
-
-  String get _configuredDllDifferenceList {
-    final names =
-        _configuredDllDifferentFileNames
-            .map((fileName) => _bundledDllSpecByFileName(fileName).fileName)
-            .toList()
-          ..sort(
-            (left, right) => left.toLowerCase().compareTo(right.toLowerCase()),
-          );
-    return names.join(', ');
-  }
-
   String? _dllRowUpdateWarningMessage(String fileNameLower) {
     final lower = fileNameLower.trim().toLowerCase();
-    final hasDefaultUpdate = _bundledDllUpdatedFileNames.contains(lower);
-    final configuredDiff = _configuredDllDifferentFileNames.contains(lower);
-    if (hasDefaultUpdate && configuredDiff) {
-      return 'Default update available. Configured DLL differs from latest GitHub default.';
-    }
-    if (hasDefaultUpdate) {
+    if (_bundledDllUpdatedFileNames.contains(lower)) {
       return 'Default update available';
-    }
-    if (configuredDiff) {
-      return 'Configured DLL differs from latest GitHub default';
     }
     return null;
   }
@@ -10948,28 +10898,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   bool get _showSettingsAlertBadge =>
       _bundledDllDefaultsUpdateAvailable ||
-      _hasMissingConfiguredDllPaths ||
-      _hasConfiguredDllDifferences;
+      _hasMissingConfiguredDllPaths;
 
   String get _dataManagementButtonTooltip {
     final hasUpdate = _bundledDllDefaultsUpdateAvailable;
     final hasMissing = _hasMissingConfiguredDllPaths;
-    final hasDifference = _hasConfiguredDllDifferences;
-    if (hasUpdate && hasMissing && hasDifference) {
-      return 'Data management (DLL updates, missing DLL warnings, and configured DLL differences)';
-    }
     if (hasUpdate && hasMissing) {
       return 'Data management (DLL updates and missing DLL warnings)';
     }
-    if (hasUpdate && hasDifference) {
-      return 'Data management (DLL updates and configured DLL differences)';
-    }
-    if (hasMissing && hasDifference) {
-      return 'Data management (missing DLL warnings and configured DLL differences)';
-    }
     if (hasUpdate) return 'Data management (DLL update available)';
     if (hasMissing) return 'Data management (missing DLL warning)';
-    if (hasDifference) return 'Data management (configured DLL differs)';
     return 'Data management';
   }
 
@@ -11479,10 +11417,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     1,
                     4096,
                   );
+                  final ImageProvider<Object> heroCoverProvider =
+                      selected == null
+                      ? coverImage
+                      : ResizeImage(coverImage, width: coverCacheWidth);
                   final image = ClipRRect(
                     borderRadius: BorderRadius.circular(22),
                     child: Image(
-                      image: ResizeImage(coverImage, width: coverCacheWidth),
+                      image: heroCoverProvider,
                       width: compact ? double.infinity : 250,
                       height: 300,
                       fit: BoxFit.cover,
@@ -15480,28 +15422,6 @@ foreach ($app in $appPaths) {
                     ),
                     child: Text(
                       'One or more configured DLL paths are missing. Use Update Default DLLs or each row\'s reset button.',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: _onSurface(context, 0.9),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                if (_hasConfiguredDllDifferences) ...[
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFF8F00).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: const Color(0xFFFF8F00).withValues(alpha: 0.42),
-                      ),
-                    ),
-                    child: Text(
-                      'Configured DLL differs from latest default: $_configuredDllDifferenceList. Use each row\'s reset button or Update Default DLLs.',
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
