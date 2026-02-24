@@ -18,7 +18,6 @@ Markdown Quick Key
 - Please note any issues or bugs on the GitHub or in our discord server!
 
 # Fixes
-- Fixed Default DLL update notification
-- Fixed blurred Missing Build splash
+- Hopefully fixed injection issues + low end PC support
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

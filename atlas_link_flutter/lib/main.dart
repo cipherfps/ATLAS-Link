@@ -480,13 +480,19 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _defaultGameServerPort = 7777;
   static const int _authInjectionInitialDelayMs = 0;
   static const int _authInjectionRetryDelayMs = 100;
+  static const int _authInjectionMaxRetryDelayMs = 800;
   static const int _authInjectionMaxAttempts = 3;
-  // Some machines (especially with AV scanning or heavy disk contention) can
-  // take longer than 5s to finish LoadLibraryW in the target process. Use a
-  // larger timeout to reduce false "Injection timed out" failures.
-  static const int _dllInjectionWaitMs = 20000;
+  // Optimized for low-end PCs: increased from 20s to 40s timeout to account for
+  // slow disk I/O, AV scanning, and heavy system contention. This significantly
+  // reduces "Injection timed out" failures on low-end hardware.
+  static const int _dllInjectionWaitMs = 40000;
   static const int _gameServerInjectionRetryDelayMs = 100;
+  static const int _gameServerInjectionMaxRetryDelayMs = 800;
   static const int _gameServerInjectionMaxAttempts = 3;
+  // Reduced post-login delay for faster injection start on low-end PCs
+  static const int _postLoginInjectionDelayMs = 300;
+  // Reduced UI status delay for snappier feedback
+  static const int _uiStatusDelayMs = 20;
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _atlasLinkRepository =
       'https://github.com/cipherfps/ATLAS-Link';
@@ -4801,10 +4807,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
+  int _calculateExponentialBackoffMs(int attempt, int baseDelayMs, int maxDelayMs) {
+    // Calculate delay: baseDelay * (2 ^ (attempt - 2)) with jitter, capped at maxDelay
+    // attempt 2: baseDelay, attempt 3: baseDelay * 2, attempt 4: baseDelay * 4, etc.
+    final exponentialDelay = baseDelayMs * (1 << (attempt - 2));
+    final cappedDelay = exponentialDelay > maxDelayMs ? maxDelayMs : exponentialDelay;
+    // Add ±10% random jitter to prevent thundering herd
+    final jitter = (cappedDelay * 0.1 * (_rng.nextDouble() * 2 - 1)).toInt();
+    return (cappedDelay + jitter).clamp(0, maxDelayMs);
+  }
+
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
-    // Give Fortnite a moment after login completes so late-stage injections
-    // (like the game server DLL) happen when the client is fully initialized.
-    await Future.delayed(const Duration(milliseconds: 900));
+    // Optimized for low-end PCs: reduced from 900ms to 300ms to start injections faster
+    // while still giving the client time to initialize.
+    await Future.delayed(const Duration(milliseconds: _postLoginInjectionDelayMs));
     if (state.killed || state.exited) return;
 
     if (state.host) {
@@ -4815,7 +4831,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Injecting post-login patchers...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await Future<void>.delayed(const Duration(milliseconds: _uiStatusDelayMs));
 
       final report = await _injectConfiguredPatchers(
         state.pid,
@@ -4854,7 +4870,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Injecting launch patchers...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await Future<void>.delayed(const Duration(milliseconds: _uiStatusDelayMs));
 
       final report = await _injectConfiguredPatchers(
         state.pid,
@@ -7361,6 +7377,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) async {
     final attempts = <_InjectionAttempt>[];
 
+    // Inject authentication patcher first (must be done sequentially)
     if (includeAuth) {
       final authPath = _settings.authenticationPatcherPath.trim();
       if (authPath.isEmpty) {
@@ -7387,21 +7404,26 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     }
 
+    // Parallelize non-dependent patcher injections for better low-end PC performance
+    final parallelInjections = <Future<_InjectionAttempt>>[];
+
     if (includeMemory && _isChapterOneVersion(gameVersion)) {
       final memoryPath = _settings.memoryPatcherPath.trim();
       if (memoryPath.isEmpty) {
-        attempts.add(
-          const _InjectionAttempt(
-            name: 'memory patcher',
-            required: false,
-            attempted: false,
-            success: true,
-            skippedReason: 'Not configured.',
+        parallelInjections.add(
+          Future.value(
+            const _InjectionAttempt(
+              name: 'memory patcher',
+              required: false,
+              attempted: false,
+              success: true,
+              skippedReason: 'Not configured.',
+            ),
           ),
         );
       } else {
-        attempts.add(
-          await _injectSinglePatcher(
+        parallelInjections.add(
+          _injectSinglePatcher(
             gamePid: gamePid,
             patcherPath: memoryPath,
             patcherName: 'memory patcher',
@@ -7415,18 +7437,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final pakPath = _settings.largePakPatcherFilePath.trim();
       if (pakPath.isEmpty) {
         _log('gameserver', 'Large pak patcher is enabled but not configured.');
-        attempts.add(
-          const _InjectionAttempt(
-            name: 'large pak patcher',
-            required: false,
-            attempted: false,
-            success: false,
-            error: 'Not configured.',
+        parallelInjections.add(
+          Future.value(
+            const _InjectionAttempt(
+              name: 'large pak patcher',
+              required: false,
+              attempted: false,
+              success: false,
+              error: 'Not configured.',
+            ),
           ),
         );
       } else {
-        attempts.add(
-          await _injectSinglePatcher(
+        parallelInjections.add(
+          _injectSinglePatcher(
             gamePid: gamePid,
             patcherPath: pakPath,
             patcherName: 'large pak patcher',
@@ -7439,18 +7463,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (includeUnreal) {
       final unrealPath = _settings.unrealEnginePatcherPath.trim();
       if (unrealPath.isEmpty) {
-        attempts.add(
-          const _InjectionAttempt(
-            name: 'unreal engine patcher',
-            required: false,
-            attempted: false,
-            success: true,
-            skippedReason: 'Not configured.',
+        parallelInjections.add(
+          Future.value(
+            const _InjectionAttempt(
+              name: 'unreal engine patcher',
+              required: false,
+              attempted: false,
+              success: true,
+              skippedReason: 'Not configured.',
+            ),
           ),
         );
       } else {
-        attempts.add(
-          await _injectSinglePatcher(
+        parallelInjections.add(
+          _injectSinglePatcher(
             gamePid: gamePid,
             patcherPath: unrealPath,
             patcherName: 'unreal engine patcher',
@@ -7463,24 +7489,31 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (includeGameServer) {
       final gameServerPath = _settings.gameServerFilePath.trim();
       if (gameServerPath.isNotEmpty) {
-        attempts.add(
-          await _injectGameServerPatcherWithRetry(
+        parallelInjections.add(
+          _injectGameServerPatcherWithRetry(
             gamePid: gamePid,
             gameServerPath: gameServerPath,
           ),
         );
       } else {
         _log('game', 'Game server patcher path is empty.');
-        attempts.add(
-          const _InjectionAttempt(
-            name: 'game server patcher',
-            required: true,
-            attempted: false,
-            success: false,
-            error: 'Not configured.',
+        parallelInjections.add(
+          Future.value(
+            const _InjectionAttempt(
+              name: 'game server patcher',
+              required: true,
+              attempted: false,
+              success: false,
+              error: 'Not configured.',
+            ),
           ),
         );
       }
+    }
+
+    // Wait for all parallel injections to complete concurrently
+    if (parallelInjections.isNotEmpty) {
+      attempts.addAll(await Future.wait(parallelInjections));
     }
 
     return _InjectionReport(attempts);
@@ -7503,9 +7536,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         'game',
         'Game server patcher injection retry $retry/$_gameServerInjectionMaxAttempts.',
       );
-      await Future<void>.delayed(
-        const Duration(milliseconds: _gameServerInjectionRetryDelayMs),
+      // Use exponential backoff instead of fixed delay for better low-end PC performance
+      final delayMs = _calculateExponentialBackoffMs(
+        retry,
+        _gameServerInjectionRetryDelayMs,
+        _gameServerInjectionMaxRetryDelayMs,
       );
+      await Future<void>.delayed(Duration(milliseconds: delayMs));
       attempt = await _injectSinglePatcher(
         gamePid: gamePid,
         patcherPath: gameServerPath,
@@ -7585,9 +7622,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         'game',
         'Authentication patcher injection retry $retry/$_authInjectionMaxAttempts.',
       );
-      await Future<void>.delayed(
-        const Duration(milliseconds: _authInjectionRetryDelayMs),
+      // Use exponential backoff instead of fixed delay for better low-end PC performance
+      final delayMs = _calculateExponentialBackoffMs(
+        retry,
+        _authInjectionRetryDelayMs,
+        _authInjectionMaxRetryDelayMs,
       );
+      await Future<void>.delayed(Duration(milliseconds: delayMs));
       resolvedAuthPath = await repairAuthPathIfNeeded(resolvedAuthPath);
       attempt = await _injectSinglePatcher(
         gamePid: gamePid,
