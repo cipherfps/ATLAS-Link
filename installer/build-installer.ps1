@@ -106,6 +106,53 @@ function Find-Iscc {
   return $null
 }
 
+function Get-VcRedistPath {
+  param([string]$ScriptDir)
+
+  $repoCopy = Join-Path $ScriptDir "vc_redist.x64.exe"
+  if (Test-Path $repoCopy) {
+    $resolvedRepoCopy = Resolve-Path $repoCopy
+    Write-Step "Using repository VC++ redistributable: $resolvedRepoCopy"
+    return [string]$resolvedRepoCopy
+  }
+
+  $cacheDir = Join-Path $env:TEMP "ATLAS-Link"
+  if (-not (Test-Path $cacheDir)) {
+    New-Item -ItemType Directory -Path $cacheDir | Out-Null
+  }
+
+  $cacheCopy = Join-Path $cacheDir "vc_redist.x64.exe"
+  if (-not (Test-Path $cacheCopy)) {
+    $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    Write-Step "Downloading VC++ redistributable from $url"
+    try {
+      Invoke-WebRequest -Uri $url -OutFile $cacheCopy
+    } catch {
+      throw @"
+Failed to download vc_redist.x64.exe from:
+  $url
+
+Either restore internet access and rerun the build, or place a local copy at:
+  $repoCopy
+"@
+    }
+  } else {
+    Write-Step "Using cached VC++ redistributable: $cacheCopy"
+  }
+
+  if (-not (Test-Path $cacheCopy)) {
+    throw "VC++ redistributable not found at $cacheCopy"
+  }
+
+  $size = (Get-Item -LiteralPath $cacheCopy).Length
+  if ($size -lt 1048576) {
+    throw "VC++ redistributable at $cacheCopy looks invalid (size: $size bytes)"
+  }
+
+  $resolvedCacheCopy = Resolve-Path $cacheCopy
+  return [string]$resolvedCacheCopy
+}
+
 function Get-PubspecVersion {
   param([string]$PubspecPath)
   $line = Get-Content $PubspecPath | Where-Object { $_ -match '^\s*version:\s*' } | Select-Object -First 1
@@ -270,6 +317,9 @@ if ($SkipInnoCompile) {
   exit 0
 }
 
+$vcRedistPath = Get-VcRedistPath -ScriptDir $scriptDir
+Write-Step "Bundling VC++ redistributable: $vcRedistPath"
+
 $isccPath = Find-Iscc
 if (-not $isccPath) {
   throw @"
@@ -286,7 +336,8 @@ $isccArgs = @(
   "/DSourceDir=$releaseDir",
   "/DExecutableName=$executableName",
   "/DOutputDir=$distDir",
-  "/DOutputBaseFilename=$outputBaseFilename"
+  "/DOutputBaseFilename=$outputBaseFilename",
+  "/DVcRedistPath=$vcRedistPath"
 )
 
 if (Test-Path $setupIcon) {

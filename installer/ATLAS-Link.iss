@@ -26,6 +26,10 @@
   #define SetupIconFile ""
 #endif
 
+#ifndef VcRedistPath
+  #define VcRedistPath ""
+#endif
+
 [Setup]
 AppId={{A28DB5CE-E9A2-4E14-A78A-E1298A0A6B55}
 AppName={#MyAppName}
@@ -64,15 +68,48 @@ Name: "defenderexclusions"; Description: "Add {#MyAppName} DLL folder to Windows
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#if VcRedistPath != ""
+Source: "{#VcRedistPath}"; DestDir: "{tmp}"; DestName: "vc_redist.x64.exe"; Flags: deleteafterinstall
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#ExecutableName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#ExecutableName}"; Tasks: desktopicon
 
 [Run]
+#if VcRedistPath != ""
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Check: NeedsVCRedist; Flags: runhidden waituntilterminated
+#endif
 Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+function IsVCRedistInstalled: Boolean;
+var
+  Installed: Cardinal;
+begin
+  Result :=
+    RegQueryDWordValue(
+      HKLM64,
+      'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64',
+      'Installed',
+      Installed
+    ) and (Installed = 1);
+
+  if not Result then
+    Result :=
+      RegQueryDWordValue(
+        HKLM,
+        'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64',
+        'Installed',
+        Installed
+      ) and (Installed = 1);
+end;
+
+function NeedsVCRedist: Boolean;
+begin
+  Result := not IsVCRedistInstalled;
+end;
+
 function PowerShellQuoted(const Value: string): string;
 begin
   Result := Value;
