@@ -17,7 +17,11 @@ Markdown Quick Key
 - Welcome to the new ATLAS Link Launcher!
 - Please note any issues or bugs on the GitHub or in our discord server!
 
+# Improvements
+- Added email/password login authentication
+- Added a ? button for quick tips to reappear
+
 # Fixes
-- Hopefully fixed injection issues + low end PC support
+- Backend saves not storing
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

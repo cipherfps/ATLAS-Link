@@ -453,10 +453,23 @@ class _ProfileSetupResult {
   const _ProfileSetupResult({
     required this.username,
     required this.profileAvatarPath,
+    required this.useEmailPasswordAuth,
+    required this.authEmail,
+    required this.authPassword,
   });
 
   final String username;
   final String profileAvatarPath;
+  final bool useEmailPasswordAuth;
+  final String authEmail;
+  final String authPassword;
+}
+
+class _LaunchAuthCredentials {
+  const _LaunchAuthCredentials({required this.login, required this.password});
+
+  final String login;
+  final String password;
 }
 
 class LauncherScreen extends StatefulWidget {
@@ -470,8 +483,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.0.8';
-  static const String _launcherBuildLabel = 'Stable 1.0.8';
+  static const String _launcherVersion = '1.0.9';
+  static const String _launcherBuildLabel = 'Stable 1.0.9';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -598,6 +611,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       GlobalKey<_ToastOverlayHostState>();
 
   final _usernameController = TextEditingController();
+  final _profileAuthEmailController = TextEditingController();
+  final _profileAuthPasswordController = TextEditingController();
   final _backendDirController = TextEditingController();
   final _backendCommandController = TextEditingController();
   final _backendHostController = TextEditingController();
@@ -650,6 +665,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _stoppingSessionLinkedHosting = false;
   bool _profileSetupDialogVisible = false;
   bool _profileSetupDialogQueued = false;
+  bool _showProfileAuthPassword = false;
+  bool _profileAuthValidationAttempted = false;
+  bool _profileAuthQuickTipManualVisible = false;
   bool _libraryImportTipFadingOut = false;
   bool _libraryQuickTipManualVisible = false;
   bool _backendQuickTipManualVisible = false;
@@ -759,6 +777,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     _shellEntranceController.dispose();
     _libraryActionsNudgeController.dispose();
     _usernameController.dispose();
+    _profileAuthEmailController.dispose();
+    _profileAuthPasswordController.dispose();
     _backendDirController.dispose();
     _backendCommandController.dispose();
     _backendHostController.dispose();
@@ -879,6 +899,12 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     var preservedUsername = _settings.username.trim();
     if (preservedUsername.isEmpty) preservedUsername = 'Player';
+    final preservedProfileUseEmailPasswordAuth =
+        _settings.profileUseEmailPasswordAuth;
+    final preservedProfileAuthEmail = _settings.profileAuthEmail.trim();
+    final preservedProfileAuthPassword = _settings.profileAuthPassword;
+    final preservedProfileAuthQuickTipComplete =
+        _settings.profileAuthQuickTipComplete;
 
     var preservedAvatarPath = _settings.profileAvatarPath.trim();
     if (preservedAvatarPath.isNotEmpty) {
@@ -963,6 +989,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     final defaults = LauncherSettings.defaults();
     final nextSettings = defaults.copyWith(
       username: preservedUsername,
+      profileUseEmailPasswordAuth: preservedProfileUseEmailPasswordAuth,
+      profileAuthEmail: preservedProfileAuthEmail,
+      profileAuthPassword: preservedProfileAuthPassword,
+      profileAuthQuickTipComplete: preservedProfileAuthQuickTipComplete,
       profileAvatarPath: preservedAvatarPath,
       profileSetupComplete: preservedProfileSetupComplete,
       libraryActionsNudgeComplete: preservedLibraryActionsNudgeComplete,
@@ -1168,12 +1198,23 @@ class _LauncherScreenState extends State<LauncherScreen>
         _setActiveSettingsUsername(resolvedUsername);
         _settings = _settings.copyWith(
           profileAvatarPath: result.profileAvatarPath.trim(),
+          profileUseEmailPasswordAuth: result.useEmailPasswordAuth,
+          profileAuthEmail: result.authEmail.trim(),
+          profileAuthPassword: result.authPassword,
           profileSetupComplete: true,
         );
         _installState = _installState.copyWith(profileSetupComplete: true);
         _usernameController.text = resolvedUsername;
+        _profileAuthEmailController.text = result.authEmail.trim();
+        _profileAuthPasswordController.text = result.authPassword;
       });
+      final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
       await _saveSettings(toast: false);
+      if (forcedRemote && mounted) {
+        _toast(
+          'Email/password auth enabled. Backend Type was switched to Remote.',
+        );
+      }
       try {
         await _saveInstallState();
       } catch (error) {
@@ -1193,7 +1234,15 @@ class _LauncherScreenState extends State<LauncherScreen>
     // Start blank so profile setup always feels like a fresh choice (especially
     // after a Reset Launcher) and never pre-fills from environment/usernames.
     final usernameController = TextEditingController();
+    final emailController = TextEditingController(
+      text: _settings.profileAuthEmail,
+    );
+    final passwordController = TextEditingController(
+      text: _settings.profileAuthPassword,
+    );
     final usernameFocusNode = FocusNode();
+    final emailFocusNode = FocusNode();
+    final passwordFocusNode = FocusNode();
     try {
       return await showGeneralDialog<_ProfileSetupResult>(
         context: context,
@@ -1208,6 +1257,9 @@ class _LauncherScreenState extends State<LauncherScreen>
           var validation = '';
           var submitted = false;
           var focusRequested = false;
+          var useEmailPasswordAuth = _settings.profileUseEmailPasswordAuth;
+          var showPassword = false;
+          var authValidationAttempted = false;
 
           ImageProvider<Object> avatarProvider() {
             final selected = selectedAvatarPath.trim();
@@ -1232,27 +1284,73 @@ class _LauncherScreenState extends State<LauncherScreen>
             selectedAvatarPath = '';
           }
 
+          TextEditingController activePrimaryController() {
+            return useEmailPasswordAuth ? emailController : usernameController;
+          }
+
+          FocusNode activePrimaryFocusNode() {
+            return useEmailPasswordAuth ? emailFocusNode : usernameFocusNode;
+          }
+
+          void focusActivePrimaryField() {
+            final activeController = activePrimaryController();
+            final activeFocusNode = activePrimaryFocusNode();
+            activeFocusNode.requestFocus();
+            activeController.selection = TextSelection(
+              baseOffset: 0,
+              extentOffset: activeController.text.length,
+            );
+          }
+
           void submitDialog(StateSetter setDialogState) {
             if (submitted) return;
-            final name = usernameController.text.trim();
-            if (name.isEmpty) {
+            final displayName = usernameController.text.trim();
+            if (!useEmailPasswordAuth && displayName.isEmpty) {
               setDialogState(() {
                 validation = 'Enter a display name.';
               });
               return;
             }
+            final authError = _profileAuthValidationError(
+              useEmailPassword: useEmailPasswordAuth,
+              email: emailController.text.trim(),
+              password: passwordController.text,
+            );
+            if (authError != null) {
+              setDialogState(() {
+                validation = '';
+                authValidationAttempted = true;
+              });
+              return;
+            }
             setDialogState(() {
               validation = '';
+              authValidationAttempted = false;
               submitted = true;
             });
 
+            final emailDerivedDisplayName = _usernameFromEmail(
+              emailController.text,
+            );
+            final resolvedDisplayName = useEmailPasswordAuth
+                ? (emailDerivedDisplayName.isEmpty
+                      ? 'Player'
+                      : emailDerivedDisplayName)
+                : (displayName.isEmpty ? 'Player' : displayName);
             FocusManager.instance.primaryFocus?.unfocus();
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop(
                 _ProfileSetupResult(
-                  username: name,
+                  username: resolvedDisplayName,
                   profileAvatarPath: selectedAvatarPath,
+                  useEmailPasswordAuth: useEmailPasswordAuth,
+                  authEmail: useEmailPasswordAuth
+                      ? emailController.text.trim()
+                      : '',
+                  authPassword: useEmailPasswordAuth
+                      ? passwordController.text
+                      : '',
                 ),
               );
             });
@@ -1264,11 +1362,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                 focusRequested = true;
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   if (!dialogContext.mounted) return;
-                  usernameFocusNode.requestFocus();
-                  usernameController.selection = TextSelection(
-                    baseOffset: 0,
-                    extentOffset: usernameController.text.length,
-                  );
+                  focusActivePrimaryField();
                 });
               }
 
@@ -1352,24 +1446,171 @@ class _LauncherScreenState extends State<LauncherScreen>
                 ),
               );
 
-              final nameField = TextField(
-                controller: usernameController,
-                focusNode: usernameFocusNode,
+              Widget buildAuthSwitchButton() {
+                return Tooltip(
+                  message: 'Switch Login Authentication',
+                  child: SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 40,
+                        height: 40,
+                      ),
+                      onPressed: submitted
+                          ? null
+                          : () {
+                              setDialogState(() {
+                                useEmailPasswordAuth = !useEmailPasswordAuth;
+                                showPassword = false;
+                                validation = '';
+                                authValidationAttempted = false;
+                              });
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (!dialogContext.mounted) return;
+                                focusActivePrimaryField();
+                              });
+                            },
+                      icon: Icon(
+                        useEmailPasswordAuth
+                            ? Icons.alternate_email_rounded
+                            : Icons.person_rounded,
+                        size: 18,
+                      ),
+                    ),
+                  ),
+                );
+              }
+
+              final authValidationError = authValidationAttempted
+                  ? _profileAuthValidationError(
+                      useEmailPassword: useEmailPasswordAuth,
+                      email: emailController.text.trim(),
+                      password: passwordController.text,
+                    )
+                  : null;
+              final showPrimaryAuthError =
+                  useEmailPasswordAuth &&
+                  authValidationError != null &&
+                  authValidationError.toLowerCase().contains('email');
+
+              final primaryField = TextField(
+                controller: activePrimaryController(),
+                focusNode: activePrimaryFocusNode(),
                 onChanged: (_) {
+                  if (useEmailPasswordAuth) {
+                    if (!authValidationAttempted) return;
+                    setDialogState(() => authValidationAttempted = false);
+                    return;
+                  }
                   if (validation.isEmpty) return;
                   setDialogState(() => validation = '');
                 },
-                onSubmitted: (_) => submitDialog(setDialogState),
-                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  if (useEmailPasswordAuth) {
+                    passwordFocusNode.requestFocus();
+                    return;
+                  }
+                  submitDialog(setDialogState);
+                },
+                textInputAction: useEmailPasswordAuth
+                    ? TextInputAction.next
+                    : TextInputAction.done,
+                keyboardType: useEmailPasswordAuth
+                    ? TextInputType.emailAddress
+                    : TextInputType.text,
                 decoration: InputDecoration(
-                  labelText: 'Display name',
-                  hintText: 'Player',
+                  labelText: useEmailPasswordAuth ? 'Email' : 'Display name',
+                  hintText: useEmailPasswordAuth
+                      ? 'name@example.com'
+                      : 'Player',
                   isDense: true,
                   filled: true,
                   fillColor: _onSurface(dialogContext, 0.06),
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 14,
                     vertical: 12,
+                  ),
+                  suffixIconConstraints: const BoxConstraints.tightFor(
+                    width: 40,
+                    height: 40,
+                  ),
+                  suffixIcon: buildAuthSwitchButton(),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: _onSurface(dialogContext, 0.18),
+                    ),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: _onSurface(dialogContext, 0.18),
+                    ),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: Theme.of(dialogContext).colorScheme.secondary,
+                      width: 1.2,
+                    ),
+                  ),
+                  errorText: useEmailPasswordAuth
+                      ? (showPrimaryAuthError ? authValidationError : null)
+                      : (validation.isEmpty ? null : validation),
+                ),
+                style: TextStyle(color: onSurface),
+              );
+
+              final passwordField = TextField(
+                controller: passwordController,
+                focusNode: passwordFocusNode,
+                onChanged: (_) {
+                  if (!authValidationAttempted) return;
+                  setDialogState(() => authValidationAttempted = false);
+                },
+                onSubmitted: (_) => submitDialog(setDialogState),
+                textInputAction: TextInputAction.done,
+                obscureText: !showPassword,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  hintText: 'Set password',
+                  isDense: true,
+                  filled: true,
+                  fillColor: _onSurface(dialogContext, 0.06),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  suffixIconConstraints: const BoxConstraints.tightFor(
+                    width: 40,
+                    height: 40,
+                  ),
+                  suffixIcon: SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: IconButton(
+                      tooltip: showPassword ? 'Hide password' : 'Show password',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 40,
+                        height: 40,
+                      ),
+                      onPressed: passwordController.text.isEmpty
+                          ? null
+                          : () {
+                              setDialogState(
+                                () => showPassword = !showPassword,
+                              );
+                            },
+                      icon: Icon(
+                        showPassword
+                            ? Icons.visibility_off_rounded
+                            : Icons.visibility_rounded,
+                        size: 18,
+                      ),
+                    ),
                   ),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -1390,9 +1631,25 @@ class _LauncherScreenState extends State<LauncherScreen>
                       width: 1.2,
                     ),
                   ),
-                  errorText: validation.isEmpty ? null : validation,
+                  errorText:
+                      useEmailPasswordAuth &&
+                          authValidationError != null &&
+                          !showPrimaryAuthError
+                      ? authValidationError
+                      : null,
                 ),
                 style: TextStyle(color: onSurface),
+              );
+
+              final profileFields = Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  primaryField,
+                  if (useEmailPasswordAuth) ...[
+                    const SizedBox(height: 8),
+                    passwordField,
+                  ],
+                ],
               );
 
               final mainRow = compact
@@ -1401,7 +1658,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                       children: [
                         Center(child: avatar),
                         const SizedBox(height: 14),
-                        nameField,
+                        profileFields,
                         const SizedBox(height: 10),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -1442,7 +1699,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              nameField,
+                              profileFields,
                               const SizedBox(height: 10),
                               Wrap(
                                 spacing: 8,
@@ -1654,7 +1911,11 @@ class _LauncherScreenState extends State<LauncherScreen>
         },
       );
     } finally {
+      passwordFocusNode.dispose();
+      emailFocusNode.dispose();
       usernameFocusNode.dispose();
+      passwordController.dispose();
+      emailController.dispose();
       usernameController.dispose();
     }
   }
@@ -2598,6 +2859,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       } else {
         _settings = LauncherSettings.defaults();
       }
+      final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
+      if (forcedRemote) {
+        _log(
+          'settings',
+          'Email/password auth was enabled with local backend. Switched backend type to remote.',
+        );
+      }
       await _migrateAppearanceSettingsFileIfNeeded();
     } catch (error) {
       _settings = LauncherSettings.defaults();
@@ -2693,11 +2961,65 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  Future<void> _saveProfileSettings() async {
+    final useEmailPasswordAuth = _settings.profileUseEmailPasswordAuth;
+    final trimmedEmail = _profileAuthEmailController.text.trim();
+    final rawPassword = _profileAuthPasswordController.text;
+    final validationError = _profileAuthValidationError(
+      useEmailPassword: useEmailPasswordAuth,
+      email: trimmedEmail,
+      password: rawPassword,
+    );
+    if (validationError != null) {
+      if (mounted) {
+        setState(() => _profileAuthValidationAttempted = true);
+      } else {
+        _profileAuthValidationAttempted = true;
+      }
+      _toast(validationError);
+      return;
+    }
+
+    final resolvedUsername = useEmailPasswordAuth
+        ? _usernameFromEmail(trimmedEmail)
+        : _usernameController.text.trim();
+    final nextUsername = resolvedUsername.isEmpty ? 'Player' : resolvedUsername;
+
+    if (mounted) {
+      setState(() {
+        _setActiveSettingsUsername(nextUsername);
+        _usernameController.text = _settings.username;
+        _settings = _settings.copyWith(
+          profileAuthEmail: useEmailPasswordAuth ? trimmedEmail : '',
+          profileAuthPassword: useEmailPasswordAuth ? rawPassword : '',
+        );
+        _profileAuthValidationAttempted = false;
+      });
+    } else {
+      _setActiveSettingsUsername(nextUsername);
+      _usernameController.text = _settings.username;
+      _settings = _settings.copyWith(
+        profileAuthEmail: useEmailPasswordAuth ? trimmedEmail : '',
+        profileAuthPassword: useEmailPasswordAuth ? rawPassword : '',
+      );
+      _profileAuthValidationAttempted = false;
+    }
+
+    final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
+    await _saveSettings(applyControllers: false);
+    if (forcedRemote && mounted) {
+      _toast(
+        'Email/password auth requires Remote backend. Switched to Remote.',
+      );
+    }
+  }
+
   Future<void> _saveSettings({
     bool toast = true,
     bool applyControllers = true,
   }) async {
     if (applyControllers) _applyControllers();
+    _forceRemoteBackendForEmailPasswordAuth();
     _syncSavedBackendsForActiveProfile();
     final pretty = const JsonEncoder.withIndent(
       '  ',
@@ -2769,6 +3091,8 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   void _syncControllers() {
     _usernameController.text = _settings.username;
+    _profileAuthEmailController.text = _settings.profileAuthEmail;
+    _profileAuthPasswordController.text = _settings.profileAuthPassword;
     _backendDirController.text = _settings.backendWorkingDirectory;
     _backendCommandController.text = _settings.backendStartCommand;
     _backendHostController.text = _effectiveBackendHost();
@@ -2785,10 +3109,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     final normalizedRemoteHost = hostInput.isEmpty || _isLocalHost(hostInput)
         ? ''
         : hostInput;
-    final resolvedUsername = _usernameController.text.trim().isEmpty
-        ? 'Player'
-        : _usernameController.text.trim();
-    _setActiveSettingsUsername(resolvedUsername);
     _settings = _settings.copyWith(
       backendWorkingDirectory: _backendDirController.text.trim(),
       backendStartCommand: _backendCommandController.text.trim(),
@@ -2887,6 +3207,11 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _setBackendConnectionType(BackendConnectionType type) async {
     if (_settings.backendConnectionType == type) return;
+    if (type == BackendConnectionType.local &&
+        _settings.profileUseEmailPasswordAuth) {
+      if (mounted) _toast(_emailAuthRemoteBackendRequiredMessage);
+      return;
+    }
     setState(() {
       _settings = _settings.copyWith(
         backendConnectionType: type,
@@ -4322,8 +4647,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final prefix = host ? 'Host' : 'Fortnite';
     final rawMessage = status.message.trim();
-    final toastDetail =
-        rawMessage.endsWith('.') && !rawMessage.endsWith('...')
+    final toastDetail = rawMessage.endsWith('.') && !rawMessage.endsWith('...')
         ? rawMessage.substring(0, rawMessage.length - 1)
         : rawMessage;
     final toastMessage = '$prefix: $toastDetail';
@@ -5344,6 +5668,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     required bool host,
     bool toastOnFailure = true,
   }) async {
+    final backendValidationError = _emailPasswordBackendValidationError();
+    if (backendValidationError != null) {
+      if (toastOnFailure && mounted) _toast(backendValidationError);
+      _setUiStatus(
+        host: host,
+        message: backendValidationError,
+        severity: _UiStatusSeverity.error,
+      );
+      return false;
+    }
+
     if (_backendOnline) return true;
 
     _toastBackendCheckingDuringLaunch(host: host);
@@ -5521,6 +5856,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Preparing build...',
         severity: _UiStatusSeverity.info,
       );
+      final requestedClientName = usernameOverride ?? _settings.username;
+      final launchAuth = _resolveLaunchAuthCredentials(
+        username: requestedClientName,
+        host: false,
+      );
+      if (launchAuth == null) return;
+      final launchClientName = _normalizeClientUsername(requestedClientName);
+
       await _deleteAftermathCrashDlls(version.location);
       final launcherPid = await _startPausedAuxiliaryProcess(
         version.location,
@@ -5533,22 +5876,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final launchClientName = _normalizeClientUsername(
-        usernameOverride ?? _settings.username,
-      );
-      final rebootLogin = _buildRebootLoginUsername(launchClientName);
       final backendHost = _effectiveBackendHostForLaunchArgs();
       final backendPort = _effectiveBackendPort();
       final args =
           _createRebootLaunchArgs(
-              username: rebootLogin,
-              password: 'Rebooted',
+              username: launchAuth.login,
+              password: launchAuth.password,
               customArgs: _settings.playCustomLaunchArgs,
             )
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
 
-      _log('game', 'Starting with args: ${args.join(' ')}');
+      _log(
+        'game',
+        'Starting with args: ${_redactSensitiveLaunchArgs(args).join(' ')}',
+      );
 
       Process child;
       try {
@@ -6841,6 +7183,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         }
       }
 
+      final hostUsername = _settings.hostUsername.trim().isEmpty
+          ? 'host'
+          : _settings.hostUsername;
+      final launchAuth = _resolveLaunchAuthCredentials(
+        username: hostUsername,
+        host: true,
+      );
+      if (launchAuth == null) return null;
+
       await _deleteAftermathCrashDlls(version.location);
       final launcherPid = await _startPausedAuxiliaryProcess(
         version.location,
@@ -6853,16 +7204,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final hostUsername = _settings.hostUsername.trim().isEmpty
-          ? 'host'
-          : _settings.hostUsername;
-      final rebootLogin = _buildRebootLoginUsername(hostUsername);
       final backendHost = _effectiveBackendHostForLaunchArgs();
       final backendPort = _effectiveBackendPort();
       final args =
           _createRebootLaunchArgs(
-              username: rebootLogin,
-              password: 'Rebooted',
+              username: launchAuth.login,
+              password: launchAuth.password,
               host: true,
               headless: _settings.hostHeadlessEnabled,
               logging: false,
@@ -6872,7 +7219,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
 
-      _log('gameserver', 'Starting with args: ${args.join(' ')}');
+      _log(
+        'gameserver',
+        'Starting with args: ${_redactSensitiveLaunchArgs(args).join(' ')}',
+      );
 
       Process process;
       try {
@@ -6982,16 +7332,161 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   String _normalizeClientUsername(String username) {
-    var normalized = username.trim();
-    if (normalized.isEmpty) normalized = 'Player';
-    normalized = normalized.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    var normalized = username.trim().replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
     if (normalized.isEmpty) normalized = 'Player';
     return normalized;
   }
 
+  String? _launchUsernameValidationError({
+    required String username,
+    required bool host,
+  }) {
+    final trimmed = username.trim();
+    if (trimmed.isEmpty) {
+      return host ? 'Host username is required.' : 'Username is required.';
+    }
+    final normalized = trimmed.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    if (normalized.isEmpty) {
+      return host
+          ? 'Host username is invalid. Use at least one letter or number.'
+          : 'Username is invalid. Use at least one letter or number.';
+    }
+    return null;
+  }
+
   String _buildRebootLoginUsername(String username) {
     final normalized = _normalizeClientUsername(username);
-    return '$normalized@projectreboot.dev';
+    return '$normalized@atlas.dev';
+  }
+
+  String _usernameFromEmail(String email) {
+    final trimmed = email.trim();
+    if (trimmed.isEmpty) return '';
+    final atIndex = trimmed.indexOf('@');
+    final local = atIndex == -1 ? trimmed : trimmed.substring(0, atIndex);
+    return local.trim();
+  }
+
+  static const String _emailAuthRemoteBackendRequiredMessage =
+      'Email/password authentication requires Backend Type set to Remote.';
+  static const String _emailAuthRemoteHostRequiredMessage =
+      'Email/password authentication requires a non-local Remote backend host.';
+
+  String? _emailPasswordBackendValidationError() {
+    if (!_settings.profileUseEmailPasswordAuth) return null;
+    if (_settings.backendConnectionType != BackendConnectionType.remote) {
+      return _emailAuthRemoteBackendRequiredMessage;
+    }
+    if (_effectiveBackendHost().trim().isEmpty) {
+      return _emailAuthRemoteHostRequiredMessage;
+    }
+    return null;
+  }
+
+  bool _forceRemoteBackendForEmailPasswordAuth() {
+    if (!_settings.profileUseEmailPasswordAuth) return false;
+    if (_settings.backendConnectionType == BackendConnectionType.remote) {
+      return false;
+    }
+    _settings = _settings.copyWith(
+      backendConnectionType: BackendConnectionType.remote,
+      backendHost: '',
+    );
+    _backendHostController.text = _effectiveBackendHost();
+    return true;
+  }
+
+  bool _isLikelyEmail(String value) {
+    final email = value.trim();
+    if (email.isEmpty) return false;
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+  }
+
+  String? _profileAuthValidationError({
+    required bool useEmailPassword,
+    required String email,
+    required String password,
+  }) {
+    if (!useEmailPassword) return null;
+    if (!_isLikelyEmail(email)) {
+      return 'Profile email is invalid. Enter a valid email address.';
+    }
+    if (password.trim().isEmpty) {
+      return 'Profile password is required when email login is enabled.';
+    }
+    return null;
+  }
+
+  _LaunchAuthCredentials? _resolveLaunchAuthCredentials({
+    required String username,
+    required bool host,
+  }) {
+    final useEmailPassword = _settings.profileUseEmailPasswordAuth;
+    final email = _settings.profileAuthEmail.trim();
+    final password = _settings.profileAuthPassword;
+    final validationError = _profileAuthValidationError(
+      useEmailPassword: useEmailPassword,
+      email: email,
+      password: password,
+    );
+    if (validationError != null) {
+      _setUiStatus(
+        host: host,
+        message: validationError,
+        severity: _UiStatusSeverity.error,
+      );
+      if (mounted) _toast(validationError);
+      return null;
+    }
+
+    final backendValidationError = _emailPasswordBackendValidationError();
+    if (useEmailPassword && backendValidationError != null) {
+      _setUiStatus(
+        host: host,
+        message: backendValidationError,
+        severity: _UiStatusSeverity.error,
+      );
+      if (mounted) _toast(backendValidationError);
+      return null;
+    }
+
+    if (useEmailPassword) {
+      return _LaunchAuthCredentials(login: email, password: password);
+    }
+
+    final usernameError = _launchUsernameValidationError(
+      username: username,
+      host: host,
+    );
+    if (usernameError != null) {
+      _setUiStatus(
+        host: host,
+        message: usernameError,
+        severity: _UiStatusSeverity.error,
+      );
+      if (mounted) _toast(usernameError);
+      return null;
+    }
+
+    return _LaunchAuthCredentials(
+      login: _buildRebootLoginUsername(username),
+      password: 'Rebooted',
+    );
+  }
+
+  List<String> _redactSensitiveLaunchArgs(List<String> args) {
+    return args
+        .map((arg) {
+          final upper = arg.toUpperCase();
+          if (upper.startsWith('-AUTH_LOGIN=')) {
+            return '-AUTH_LOGIN=<redacted>';
+          }
+          if (upper.startsWith('-AUTH_PASSWORD=')) {
+            return '-AUTH_PASSWORD=<redacted>';
+          }
+          return arg;
+        })
+        .toList(growable: false);
   }
 
   List<String> _createRebootLaunchArgs({
@@ -10380,9 +10875,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 ),
               ),
             ),
-          if (_startupConfigResolved &&
-              !_showStartup &&
-              _showLibraryQuickTip)
+          if (_startupConfigResolved && !_showStartup && _showLibraryQuickTip)
             Positioned(
               top: 104,
               right: 28,
@@ -10477,7 +10970,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                             switchInCurve: Curves.easeOut,
                             switchOutCurve: Curves.easeOut,
                             transitionBuilder: (child, animation) =>
-                                FadeTransition(opacity: animation, child: child),
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: child,
+                                ),
                             child: KeyedSubtree(
                               key: ValueKey<int>(_libraryQuickTipStep),
                               child: _libraryQuickTipStep == 0
@@ -10542,7 +11038,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                               style: TextStyle(
                                                 fontSize: 13,
                                                 fontWeight: FontWeight.w700,
-                                                color: _onSurface(context, 0.78),
+                                                color: _onSurface(
+                                                  context,
+                                                  0.78,
+                                                ),
                                               ),
                                             ),
                                             _buildVersionTag(
@@ -10760,7 +11259,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   bool get _shouldPulseLibraryActions =>
       (_tab == LauncherTab.library && _settings.versions.isEmpty) ||
-      (_tab == LauncherTab.backend && _showBackendConnectionTip);
+      (_tab == LauncherTab.backend && _showBackendConnectionTip) ||
+      _showProfileAuthQuickTip;
 
   void _syncLibraryActionsNudgePulse() {
     final shouldPulse = _shouldPulseLibraryActions;
@@ -10802,7 +11302,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) async {
     if (_libraryImportTipFadingOut) return;
 
-    if (_settings.libraryActionsNudgeComplete && _libraryQuickTipManualVisible) {
+    if (_settings.libraryActionsNudgeComplete &&
+        _libraryQuickTipManualVisible) {
       if (mounted) {
         setState(() {
           _libraryQuickTipManualVisible = false;
@@ -10928,6 +11429,25 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       (!_settings.backendConnectionTipComplete &&
           !_installState.backendConnectionTipComplete);
 
+  bool get _showProfileAuthQuickTip =>
+      _tab == LauncherTab.general &&
+      _settingsSection == SettingsSection.profile &&
+      (_profileAuthQuickTipManualVisible ||
+          !_settings.profileAuthQuickTipComplete);
+
+  void _completeProfileAuthQuickTip() {
+    if (_settings.profileAuthQuickTipComplete &&
+        !_profileAuthQuickTipManualVisible) {
+      return;
+    }
+    setState(() {
+      _settings = _settings.copyWith(profileAuthQuickTipComplete: true);
+      _profileAuthQuickTipManualVisible = false;
+    });
+    _syncLibraryActionsNudgePulse();
+    unawaited(_saveSettings(toast: false, applyControllers: false));
+  }
+
   void _showQuickTipForCurrentTab() {
     if (_tab == LauncherTab.library) {
       setState(() {
@@ -10935,6 +11455,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _libraryQuickTipStep = 0;
         _libraryImportTipFadingOut = false;
       });
+      _syncLibraryActionsNudgePulse();
       return;
     }
     if (_tab == LauncherTab.backend) {
@@ -10942,6 +11463,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _backendQuickTipManualVisible = true;
         _backendQuickTipStep = 0;
       });
+      _syncLibraryActionsNudgePulse();
+      return;
+    }
+    if (_tab == LauncherTab.general &&
+        _settingsSection == SettingsSection.profile) {
+      setState(() {
+        _profileAuthQuickTipManualVisible = true;
+      });
+      _syncLibraryActionsNudgePulse();
       return;
     }
     _toast('No quick tips are available on this page');
@@ -11173,6 +11703,91 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             child: KeyedSubtree(
               key: ValueKey<int>(_backendQuickTipStep),
               child: stepContent,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _profileAuthQuickTipCard() {
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+      decoration: BoxDecoration(
+        color: _dialogSurfaceColor(context),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _onSurface(context, 0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: _dialogShadowColor(context),
+            blurRadius: 30,
+            offset: const Offset(0, 16),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.tips_and_updates_rounded,
+                size: 16,
+                color: _onSurface(context, 0.86),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Quick tip',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: _onSurface(context, 0.92),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '1/1',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: _onSurface(context, 0.72),
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Got it',
+                onPressed: _completeProfileAuthQuickTip,
+                icon: const Icon(Icons.check_rounded, size: 16),
+                color: secondary,
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(26, 26),
+                  padding: const EdgeInsets.all(4),
+                ),
+              ),
+              InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: _completeProfileAuthQuickTip,
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 16,
+                    color: _onSurface(context, 0.62),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'You can switch to email and password login authentication if needed.',
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.28,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -12574,20 +13189,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               _backendSettingTile(
                 icon: Icons.settings_ethernet_rounded,
                 title: 'Type',
-                subtitle:
-                    'The type of backend to use when logging into Fortnite',
+                subtitle: _settings.profileUseEmailPasswordAuth
+                    ? 'Remote is required while email/password login is enabled'
+                    : 'The type of backend to use when logging into Fortnite',
                 trailing: _tipPulseGlowIf(
                   DropdownButtonFormField<BackendConnectionType>(
                     initialValue: _settings.backendConnectionType,
                     decoration: _backendFieldDecoration(),
-                    items: BackendConnectionType.values
-                        .map(
-                          (type) => DropdownMenuItem<BackendConnectionType>(
-                            value: type,
-                            child: Text(type.label),
-                          ),
-                        )
-                        .toList(),
+                    items: BackendConnectionType.values.map((type) {
+                      final localBlocked =
+                          _settings.profileUseEmailPasswordAuth &&
+                          type == BackendConnectionType.local;
+                      return DropdownMenuItem<BackendConnectionType>(
+                        value: type,
+                        enabled: !localBlocked,
+                        child: Text(type.label),
+                      );
+                    }).toList(),
                     onChanged: (type) {
                       if (type == null) return;
                       unawaited(_setBackendConnectionType(type));
@@ -14021,10 +14639,13 @@ foreach ($app in $appPaths) {
   }
 
   Future<void> _resetBackendPreferences() async {
+    final requireRemote = _settings.profileUseEmailPasswordAuth;
     setState(() {
       _settings = _settings.copyWith(
-        backendConnectionType: BackendConnectionType.local,
-        backendHost: '127.0.0.1',
+        backendConnectionType: requireRemote
+            ? BackendConnectionType.remote
+            : BackendConnectionType.local,
+        backendHost: requireRemote ? '' : '127.0.0.1',
         backendPort: 3551,
       );
       _backendHostController.text = _effectiveBackendHost();
@@ -14032,7 +14653,13 @@ foreach ($app in $appPaths) {
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
-    if (mounted) _toast('Backend settings reset');
+    if (mounted) {
+      _toast(
+        requireRemote
+            ? 'Backend settings reset. Remote remains required for email/password auth.'
+            : 'Backend settings reset',
+      );
+    }
   }
 
   String _backendHostKey(String host) {
@@ -15246,6 +15873,14 @@ foreach ($app in $appPaths) {
     final username = _settings.username.trim().isEmpty
         ? 'Player'
         : _settings.username.trim();
+    final rawProfileAuthValidationError = _profileAuthValidationError(
+      useEmailPassword: _settings.profileUseEmailPasswordAuth,
+      email: _profileAuthEmailController.text.trim(),
+      password: _profileAuthPasswordController.text,
+    );
+    final profileAuthValidationError = _profileAuthValidationAttempted
+        ? rawProfileAuthValidationError
+        : null;
     final sectionTitleStyle = Theme.of(context).textTheme.titleLarge;
 
     Widget body;
@@ -15279,6 +15914,60 @@ foreach ($app in $appPaths) {
                         fit: BoxFit.cover,
                       ),
                     );
+
+                    Widget buildAuthSwitchButton() {
+                      return _tipPulseGlowIf(
+                        Tooltip(
+                          message: 'Switch Login Authentication',
+                          child: SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: IconButton(
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 40,
+                                height: 40,
+                              ),
+                              onPressed: () {
+                                var forcedRemote = false;
+                                final shouldCompleteQuickTip =
+                                    _showProfileAuthQuickTip;
+                                setState(() {
+                                  final nextAuthMode =
+                                      !_settings.profileUseEmailPasswordAuth;
+                                  _settings = _settings.copyWith(
+                                    profileUseEmailPasswordAuth: nextAuthMode,
+                                  );
+                                  if (nextAuthMode) {
+                                    forcedRemote =
+                                        _forceRemoteBackendForEmailPasswordAuth();
+                                  }
+                                  if (!nextAuthMode) {
+                                    _showProfileAuthPassword = false;
+                                  }
+                                  _profileAuthValidationAttempted = false;
+                                });
+                                if (forcedRemote && mounted) {
+                                  _toast(
+                                    'Email/password auth requires Remote backend. Switched to Remote.',
+                                  );
+                                }
+                                if (shouldCompleteQuickTip) {
+                                  _completeProfileAuthQuickTip();
+                                }
+                              },
+                              icon: Icon(
+                                _settings.profileUseEmailPasswordAuth
+                                    ? Icons.alternate_email_rounded
+                                    : Icons.person_rounded,
+                                size: 18,
+                              ),
+                            ),
+                          ),
+                        ),
+                        enabled: _showProfileAuthQuickTip,
+                      );
+                    }
 
                     final details = Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -15314,11 +16003,74 @@ foreach ($app in $appPaths) {
                           ],
                         ),
                         const SizedBox(height: 12),
-                        _input(
-                          label: 'Username',
-                          controller: _usernameController,
-                          hint: 'Set username',
-                        ),
+                        if (_showProfileAuthQuickTip) ...[
+                          _profileAuthQuickTipCard(),
+                          const SizedBox(height: 10),
+                        ],
+                        if (_settings.profileUseEmailPasswordAuth) ...[
+                          _input(
+                            label: 'Email',
+                            controller: _profileAuthEmailController,
+                            hint: 'name@example.com',
+                            keyboardType: TextInputType.emailAddress,
+                            onChanged: (_) => setState(() {}),
+                            suffix: buildAuthSwitchButton(),
+                          ),
+                          const SizedBox(height: 8),
+                          _input(
+                            label: 'Password',
+                            controller: _profileAuthPasswordController,
+                            hint: 'Set password',
+                            obscureText: !_showProfileAuthPassword,
+                            onChanged: (_) => setState(() {}),
+                            suffix: IconButton(
+                              tooltip: _showProfileAuthPassword
+                                  ? 'Hide password'
+                                  : 'Show password',
+                              onPressed:
+                                  _profileAuthPasswordController.text.isEmpty
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _showProfileAuthPassword =
+                                            !_showProfileAuthPassword;
+                                      });
+                                    },
+                              icon: Icon(
+                                _showProfileAuthPassword
+                                    ? Icons.visibility_off_rounded
+                                    : Icons.visibility_rounded,
+                              ),
+                            ),
+                          ),
+                          if (profileAuthValidationError != null) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              profileAuthValidationError,
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.error,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ] else ...[
+                          _input(
+                            label: 'Username',
+                            controller: _usernameController,
+                            hint: 'Set username',
+                            onChanged: (_) => setState(() {}),
+                            suffix: buildAuthSwitchButton(),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Default login: ${_buildRebootLoginUsername(_usernameController.text)}',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.72),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 8),
                         Wrap(
                           spacing: 8,
@@ -15337,7 +16089,7 @@ foreach ($app in $appPaths) {
                               label: const Text('Default'),
                             ),
                             FilledButton.icon(
-                              onPressed: _saveSettings,
+                              onPressed: _saveProfileSettings,
                               icon: const Icon(Icons.save_rounded),
                               label: const Text('Save'),
                             ),
@@ -16042,7 +16794,10 @@ foreach ($app in $appPaths) {
         padding: const EdgeInsets.only(bottom: 8),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () => setState(() => _settingsSection = section),
+          onTap: () {
+            setState(() => _settingsSection = section);
+            _syncLibraryActionsNudgePulse();
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             decoration: BoxDecoration(
@@ -16156,6 +16911,8 @@ foreach ($app in $appPaths) {
     String? hint,
     TextInputType? keyboardType,
     Widget? suffix,
+    bool obscureText = false,
+    ValueChanged<String>? onChanged,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -16172,7 +16929,9 @@ foreach ($app in $appPaths) {
         const SizedBox(height: 5),
         TextField(
           controller: controller,
+          onChanged: onChanged,
           keyboardType: keyboardType,
+          obscureText: obscureText,
           style: TextStyle(
             color: Theme.of(
               context,
@@ -16186,6 +16945,9 @@ foreach ($app in $appPaths) {
                 context,
               ).colorScheme.onSurface.withValues(alpha: 0.45),
             ),
+            suffixIconConstraints: suffix == null
+                ? null
+                : const BoxConstraints.tightFor(width: 40, height: 40),
             suffixIcon: suffix,
             isDense: true,
             contentPadding: const EdgeInsets.symmetric(
@@ -17719,6 +18481,10 @@ class LauncherInstallState {
 class LauncherSettings {
   const LauncherSettings({
     required this.username,
+    required this.profileUseEmailPasswordAuth,
+    required this.profileAuthEmail,
+    required this.profileAuthPassword,
+    required this.profileAuthQuickTipComplete,
     required this.profileAvatarPath,
     required this.profileSetupComplete,
     required this.libraryActionsNudgeComplete,
@@ -17756,6 +18522,10 @@ class LauncherSettings {
   });
 
   final String username;
+  final bool profileUseEmailPasswordAuth;
+  final String profileAuthEmail;
+  final String profileAuthPassword;
+  final bool profileAuthQuickTipComplete;
   final String profileAvatarPath;
   final bool profileSetupComplete;
   final bool libraryActionsNudgeComplete;
@@ -17806,6 +18576,10 @@ class LauncherSettings {
 
   LauncherSettings copyWith({
     String? username,
+    bool? profileUseEmailPasswordAuth,
+    String? profileAuthEmail,
+    String? profileAuthPassword,
+    bool? profileAuthQuickTipComplete,
     String? profileAvatarPath,
     bool? profileSetupComplete,
     bool? libraryActionsNudgeComplete,
@@ -17843,6 +18617,12 @@ class LauncherSettings {
   }) {
     return LauncherSettings(
       username: username ?? this.username,
+      profileUseEmailPasswordAuth:
+          profileUseEmailPasswordAuth ?? this.profileUseEmailPasswordAuth,
+      profileAuthEmail: profileAuthEmail ?? this.profileAuthEmail,
+      profileAuthPassword: profileAuthPassword ?? this.profileAuthPassword,
+      profileAuthQuickTipComplete:
+          profileAuthQuickTipComplete ?? this.profileAuthQuickTipComplete,
       profileAvatarPath: profileAvatarPath ?? this.profileAvatarPath,
       profileSetupComplete: profileSetupComplete ?? this.profileSetupComplete,
       libraryActionsNudgeComplete:
@@ -17898,6 +18678,10 @@ class LauncherSettings {
   static LauncherSettings defaults() {
     return const LauncherSettings(
       username: 'Player',
+      profileUseEmailPasswordAuth: false,
+      profileAuthEmail: '',
+      profileAuthPassword: '',
+      profileAuthQuickTipComplete: false,
       profileAvatarPath: '',
       profileSetupComplete: false,
       libraryActionsNudgeComplete: false,
@@ -18044,6 +18828,27 @@ class LauncherSettings {
 
     return LauncherSettings(
       username: resolvedUsername,
+      profileUseEmailPasswordAuth: asBool(
+        json['profileUseEmailPasswordAuth'] ??
+            json['profileEmailPasswordAuth'] ??
+            json['ProfileUseEmailPasswordAuth'],
+        false,
+      ),
+      profileAuthEmail:
+          (json['profileAuthEmail'] ??
+                  json['profileEmail'] ??
+                  json['accountEmail'] ??
+                  '')
+              .toString()
+              .trim(),
+      profileAuthPassword:
+          (json['profileAuthPassword'] ?? json['accountPassword'] ?? '')
+              .toString(),
+      profileAuthQuickTipComplete: asBool(
+        json['profileAuthQuickTipComplete'] ??
+            json['ProfileAuthQuickTipComplete'],
+        false,
+      ),
       profileAvatarPath: (json['profileAvatarPath'] ?? '').toString(),
       profileSetupComplete: asBool(
         json['profileSetupComplete'] ?? json['ProfileSetupComplete'],
@@ -18160,6 +18965,10 @@ class LauncherSettings {
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'username': username,
+      'profileUseEmailPasswordAuth': profileUseEmailPasswordAuth,
+      'profileAuthEmail': profileAuthEmail,
+      'profileAuthPassword': profileAuthPassword,
+      'profileAuthQuickTipComplete': profileAuthQuickTipComplete,
       'profileAvatarPath': profileAvatarPath,
       'profileSetupComplete': profileSetupComplete,
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
@@ -18292,4 +19101,3 @@ class VersionEntry {
     };
   }
 }
-
