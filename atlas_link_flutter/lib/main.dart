@@ -651,6 +651,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _profileSetupDialogVisible = false;
   bool _profileSetupDialogQueued = false;
   bool _libraryImportTipFadingOut = false;
+  bool _libraryQuickTipManualVisible = false;
+  bool _backendQuickTipManualVisible = false;
+  int _libraryQuickTipStep = 0;
   int _backendQuickTipStep = 0;
   BackendConnectionType? _backendQuickTipOriginalType;
   String? _backendQuickTipOriginalHost;
@@ -856,7 +859,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _log(
       'settings',
-      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile + appearance settings).',
+      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile + appearance + saved backend settings).',
     );
 
     final preservedVersions = List<VersionEntry>.from(_settings.versions);
@@ -887,6 +890,22 @@ class _LauncherScreenState extends State<LauncherScreen>
         preservedAvatarPath = '';
       }
     }
+
+    final preservedSavedBackendsByProfile = <String, List<SavedBackend>>{};
+    for (final entry in _settings.savedBackendsByProfile.entries) {
+      final normalizedKey = LauncherSettings.profileBackendsKey(entry.key);
+      preservedSavedBackendsByProfile[normalizedKey] = List<SavedBackend>.from(
+        entry.value,
+      );
+    }
+    final preservedProfileSavedBackendsKey =
+        LauncherSettings.profileBackendsKey(preservedUsername);
+    final preservedSavedBackends = List<SavedBackend>.from(
+      preservedSavedBackendsByProfile[preservedProfileSavedBackendsKey] ??
+          _settings.savedBackends,
+    );
+    preservedSavedBackendsByProfile[preservedProfileSavedBackendsKey] =
+        List<SavedBackend>.from(preservedSavedBackends);
 
     final preservedDarkModeEnabled = _settings.darkModeEnabled;
     final preservedPopupBackgroundBlurEnabled =
@@ -954,6 +973,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       backgroundParticlesOpacity: preservedBackgroundParticlesOpacity,
       startupAnimationEnabled: preservedStartupAnimationEnabled,
       backendConnectionTipComplete: preservedBackendConnectionTipComplete,
+      savedBackends: preservedSavedBackends,
+      savedBackendsByProfile: preservedSavedBackendsByProfile,
       versions: preservedVersions,
       selectedVersionId: preservedSelectedVersionId,
     );
@@ -982,7 +1003,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _log(
       'settings',
-      'Post-update reinstall reset completed (library + profile + appearance settings preserved).',
+      'Post-update reinstall reset completed (library + profile + appearance + saved backend settings preserved).',
     );
   }
 
@@ -1144,8 +1165,8 @@ class _LauncherScreenState extends State<LauncherScreen>
           ? 'Player'
           : result.username.trim();
       setState(() {
+        _setActiveSettingsUsername(resolvedUsername);
         _settings = _settings.copyWith(
-          username: resolvedUsername,
           profileAvatarPath: result.profileAvatarPath.trim(),
           profileSetupComplete: true,
         );
@@ -1952,7 +1973,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       if (remoteAssets.isEmpty) {
         if (!silent && mounted) {
-          _toast('Unable to check default DLL updates right now.');
+          _toast('Unable to check default DLL updates right now');
         }
         return;
       }
@@ -1985,15 +2006,15 @@ class _LauncherScreenState extends State<LauncherScreen>
 
       if (!silent && mounted) {
         if (updatedFiles.isEmpty) {
-          _toast('Default DLLs are up to date.');
+          _toast('Default DLLs are up to date');
         } else {
-          _toast('New default DLL updates are available.');
+          _toast('New Default DLL updates are available');
         }
       }
     } catch (error) {
       _log('settings', 'Failed to check for bundled DLL updates: $error');
       if (!silent && mounted) {
-        _toast('Unable to check default DLL updates right now.');
+        _toast('Unable to check default DLL updates right now');
       }
     } finally {
       _checkingBundledDllDefaultsUpdate = false;
@@ -2677,6 +2698,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     bool applyControllers = true,
   }) async {
     if (applyControllers) _applyControllers();
+    _syncSavedBackendsForActiveProfile();
     final pretty = const JsonEncoder.withIndent(
       '  ',
     ).convert(_settings.toJson());
@@ -2684,7 +2706,65 @@ class _LauncherScreenState extends State<LauncherScreen>
     _log('settings', 'Settings saved.');
     if (!mounted) return;
     setState(() {});
-    if (toast) _toast('Settings saved.');
+    if (toast) _toast('Settings saved');
+  }
+
+  Map<String, List<SavedBackend>> _cloneSavedBackendsByProfile({
+    Map<String, List<SavedBackend>>? source,
+  }) {
+    final original = source ?? _settings.savedBackendsByProfile;
+    final cloned = <String, List<SavedBackend>>{};
+    for (final entry in original.entries) {
+      final normalizedKey = LauncherSettings.profileBackendsKey(entry.key);
+      cloned[normalizedKey] = List<SavedBackend>.from(entry.value);
+    }
+    return cloned;
+  }
+
+  LauncherSettings _settingsWithSavedBackendsForActiveProfile(
+    List<SavedBackend> backends,
+  ) {
+    final normalizedBackends = List<SavedBackend>.from(backends);
+    final scopedBackends = _cloneSavedBackendsByProfile();
+    final profileKey = LauncherSettings.profileBackendsKey(_settings.username);
+    scopedBackends[profileKey] = normalizedBackends;
+    return _settings.copyWith(
+      savedBackends: normalizedBackends,
+      savedBackendsByProfile: scopedBackends,
+    );
+  }
+
+  void _syncSavedBackendsForActiveProfile() {
+    _settings = _settingsWithSavedBackendsForActiveProfile(
+      _settings.savedBackends,
+    );
+  }
+
+  void _setActiveSettingsUsername(String username) {
+    final resolvedUsername = username.trim().isEmpty
+        ? 'Player'
+        : username.trim();
+    final currentProfileKey = LauncherSettings.profileBackendsKey(
+      _settings.username,
+    );
+    final nextProfileKey = LauncherSettings.profileBackendsKey(
+      resolvedUsername,
+    );
+    final scopedBackends = _cloneSavedBackendsByProfile();
+    final currentBackends = List<SavedBackend>.from(_settings.savedBackends);
+    scopedBackends[currentProfileKey] = currentBackends;
+
+    final nextBackends = currentProfileKey == nextProfileKey
+        ? currentBackends
+        : List<SavedBackend>.from(
+            scopedBackends[nextProfileKey] ?? const <SavedBackend>[],
+          );
+
+    _settings = _settings.copyWith(
+      username: resolvedUsername,
+      savedBackends: nextBackends,
+      savedBackendsByProfile: scopedBackends,
+    );
   }
 
   void _syncControllers() {
@@ -2705,10 +2785,11 @@ class _LauncherScreenState extends State<LauncherScreen>
     final normalizedRemoteHost = hostInput.isEmpty || _isLocalHost(hostInput)
         ? ''
         : hostInput;
+    final resolvedUsername = _usernameController.text.trim().isEmpty
+        ? 'Player'
+        : _usernameController.text.trim();
+    _setActiveSettingsUsername(resolvedUsername);
     _settings = _settings.copyWith(
-      username: _usernameController.text.trim().isEmpty
-          ? 'Player'
-          : _usernameController.text.trim(),
       backendWorkingDirectory: _backendDirController.text.trim(),
       backendStartCommand: _backendCommandController.text.trim(),
       backendHost:
@@ -2940,7 +3021,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _lastBackendUndetectedToastAt = now;
 
     final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
-    _toast('Backend undetected (configured: $configured).');
+    _toast('Backend undetected (configured: $configured)');
   }
 
   bool _backendProxyRequired() {
@@ -3039,7 +3120,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         'backend',
         'Unable to bind backend proxy on port $_defaultBackendPort',
       );
-      if (mounted) _toast('Port $_defaultBackendPort is already in use.');
+      if (mounted) _toast('Port $_defaultBackendPort is already in use');
     }
     return server;
   }
@@ -3195,13 +3276,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       if (!mounted) return;
       if (info == null) {
-        if (!silent) _toast('No updates available.');
+        if (!silent) _toast('No updates available');
         return;
       }
       await _showLauncherUpdateDialog(info);
     } catch (_) {
       if (!mounted || silent) return;
-      _toast('Unable to check for updates right now.');
+      _toast('Unable to check for updates right now');
     } finally {
       _checkingLauncherUpdate = false;
     }
@@ -3571,7 +3652,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final release = await LauncherUpdateService.fetchLatestReleaseWithNotes();
     if (!mounted) return;
     if (release == null || (release.notes ?? '').trim().isEmpty) {
-      _toast('No update notes found.');
+      _toast('No update notes found');
       return;
     }
     await _showLauncherNotesDialog(
@@ -4240,7 +4321,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!isLaunchMessage) return;
 
     final prefix = host ? 'Host' : 'Fortnite';
-    final toastMessage = '$prefix: ${status.message.trim()}';
+    final rawMessage = status.message.trim();
+    final toastDetail =
+        rawMessage.endsWith('.') && !rawMessage.endsWith('...')
+        ? rawMessage.substring(0, rawMessage.length - 1)
+        : rawMessage;
+    final toastMessage = '$prefix: $toastDetail';
     if (toastMessage.trim().isEmpty) return;
 
     final now = DateTime.now();
@@ -4807,11 +4893,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
-  int _calculateExponentialBackoffMs(int attempt, int baseDelayMs, int maxDelayMs) {
+  int _calculateExponentialBackoffMs(
+    int attempt,
+    int baseDelayMs,
+    int maxDelayMs,
+  ) {
     // Calculate delay: baseDelay * (2 ^ (attempt - 2)) with jitter, capped at maxDelay
     // attempt 2: baseDelay, attempt 3: baseDelay * 2, attempt 4: baseDelay * 4, etc.
     final exponentialDelay = baseDelayMs * (1 << (attempt - 2));
-    final cappedDelay = exponentialDelay > maxDelayMs ? maxDelayMs : exponentialDelay;
+    final cappedDelay = exponentialDelay > maxDelayMs
+        ? maxDelayMs
+        : exponentialDelay;
     // Add ±10% random jitter to prevent thundering herd
     final jitter = (cappedDelay * 0.1 * (_rng.nextDouble() * 2 - 1)).toInt();
     return (cappedDelay + jitter).clamp(0, maxDelayMs);
@@ -4820,7 +4912,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
     // Optimized for low-end PCs: reduced from 900ms to 300ms to start injections faster
     // while still giving the client time to initialize.
-    await Future.delayed(const Duration(milliseconds: _postLoginInjectionDelayMs));
+    await Future.delayed(
+      const Duration(milliseconds: _postLoginInjectionDelayMs),
+    );
     if (state.killed || state.exited) return;
 
     if (state.host) {
@@ -4831,7 +4925,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Injecting post-login patchers...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(const Duration(milliseconds: _uiStatusDelayMs));
+      await Future<void>.delayed(
+        const Duration(milliseconds: _uiStatusDelayMs),
+      );
 
       final report = await _injectConfiguredPatchers(
         state.pid,
@@ -4870,7 +4966,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Injecting launch patchers...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(const Duration(milliseconds: _uiStatusDelayMs));
+      await Future<void>.delayed(
+        const Duration(milliseconds: _uiStatusDelayMs),
+      );
 
       final report = await _injectConfiguredPatchers(
         state.pid,
@@ -5142,7 +5240,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     if (state.host && !state.killed && exitCode == 0 && state.launched) {
-      if (mounted) _toast('Host stopped.');
+      if (mounted) _toast('Host stopped');
       _setUiStatus(
         host: true,
         message: 'Stopped. Click Host to start again.',
@@ -5154,12 +5252,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final crashed = !state.killed && (exitCode != 0 || !state.launched);
     if (crashed) {
       final message = state.tokenError
-          ? 'Unable to connect to the backend.'
+          ? 'Unable to connect to the backend'
           : state.corrupted
-          ? 'This build looks corrupted (see launcher.log).'
+          ? 'This build looks corrupted (see launcher.log)'
           : state.host
-          ? 'Game server crashed.'
-          : 'Fortnite crashed.';
+          ? 'Game server crashed'
+          : 'Fortnite crashed';
       if (mounted) _toast(message);
       _setUiStatus(
         host: state.host,
@@ -5282,7 +5380,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     final msg =
-        'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}.';
+        'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}';
     if (toastOnFailure && mounted) _toast(msg);
     _setUiStatus(host: host, message: msg, severity: _UiStatusSeverity.error);
     return false;
@@ -5316,11 +5414,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (_gameAction != _GameActionState.idle) return;
     final version = _settings.selectedVersion;
     if (version == null) {
-      _toast('Import and select a version first.');
+      _toast('Import and select a version first');
       return;
     }
     if (!Platform.isWindows) {
-      _toast('Fortnite launch is only available on Windows.');
+      _toast('Fortnite launch is only available on Windows');
       return;
     }
 
@@ -5349,7 +5447,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
       final exe = await _resolveExecutable(version);
       if (exe == null) {
-        _toast('Fortnite executable not found for selected version.');
+        _toast('Fortnite executable not found for selected version');
         return;
       }
       final exeDir = File(exe).parent.path;
@@ -5382,7 +5480,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (!mounted) return;
       if (gameServerPrompt == null) {
         _log('game', 'Launch cancelled at game server prompt.');
-        if (mounted) _toast('Launch cancelled.');
+        if (mounted) _toast('Launch cancelled');
         _clearUiStatus(host: false);
         return;
       }
@@ -5530,14 +5628,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (mounted) {
         _toast(
           launchingAdditionalClient
-              ? 'Additional Fortnite client launched.'
-              : 'Fortnite launched.',
+              ? 'Additional Fortnite client launched'
+              : 'Fortnite launched',
         );
       }
     } catch (error) {
       linkedHosting?.killAll();
       _log('game', 'Failed to launch Fortnite: $error');
-      if (mounted) _toast('Failed to launch Fortnite.');
+      if (mounted) _toast('Failed to launch Fortnite');
       _setUiStatus(
         host: false,
         message: 'Launch failed. See launcher.log.',
@@ -5825,25 +5923,25 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final version = overrideVersion ?? _settings.selectedVersion;
     if (version == null) {
       if (!triggeredByAutoRestart) {
-        _toast('Import and select a version first.');
+        _toast('Import and select a version first');
       }
       return;
     }
     if (!Platform.isWindows) {
       if (!triggeredByAutoRestart) {
-        _toast('Hosting is only available on Windows.');
+        _toast('Hosting is only available on Windows');
       }
       return;
     }
     if (_gameServerProcess != null) {
       if (!triggeredByAutoRestart) {
-        _toast('Hosting is already running.');
+        _toast('Hosting is already running');
       }
       return;
     }
     if (_settings.gameServerFilePath.trim().isEmpty) {
       if (!triggeredByAutoRestart) {
-        _toast('Set your Game server DLL in Data Management first.');
+        _toast('Set your Game server DLL in Data Management first');
       }
       return;
     }
@@ -6381,7 +6479,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         );
       });
       await _saveSettings(toast: false);
-      if (mounted) _toast('Host settings saved.');
+      if (mounted) _toast('Host settings saved');
     } finally {
       await Future<void>.delayed(const Duration(milliseconds: 260));
       hostUsernameFocusNode.dispose();
@@ -6712,12 +6810,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final gameServerFile = File(gameServerPath);
     if (!gameServerFile.existsSync()) {
       _log('gameserver', 'Game server DLL not found at $gameServerPath.');
-      if (mounted) _toast('Game server DLL file not found.');
+      if (mounted) _toast('Game server DLL file not found');
       return null;
     }
     if (!gameServerPath.toLowerCase().endsWith('.dll')) {
       _log('gameserver', 'Game server path is not a DLL: $gameServerPath.');
-      if (mounted) _toast('Game server file must be a DLL.');
+      if (mounted) _toast('Game server file must be a DLL');
       return null;
     }
 
@@ -6725,7 +6823,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final exe = await _resolveExecutable(version);
       if (exe == null) {
         _log('gameserver', 'Cannot start server: shipping executable missing.');
-        if (mounted) _toast('Cannot start game server for this build.');
+        if (mounted) _toast('Cannot start game server for this build');
         return null;
       }
       final exeDir = File(exe).parent.path;
@@ -6851,7 +6949,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return instance;
     } catch (error) {
       _log('gameserver', 'Failed to start automatic game server: $error');
-      if (mounted) _toast('Failed to start automatic game server.');
+      if (mounted) _toast('Failed to start automatic game server');
       return null;
     }
   }
@@ -7845,7 +7943,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     setState(() => _gameAction = _GameActionState.closing);
     try {
       if (!Platform.isWindows) {
-        _toast('Close Fortnite is only available on Windows.');
+        _toast('Close Fortnite is only available on Windows');
         return;
       }
       final instances = <_FortniteProcessState>[
@@ -7893,7 +7991,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _gameProcess = null;
       _extraGameInstances.clear();
       _log('game', 'Close Fortnite command executed.');
-      if (mounted) _toast('Fortnite closed.');
+      if (mounted) _toast('Fortnite closed');
     } finally {
       _clearUiStatus(host: false);
       if (mounted) setState(() => _gameAction = _GameActionState.idle);
@@ -7904,7 +8002,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (_gameAction != _GameActionState.idle) return;
     if (_gameServerLaunching) return;
     if (!Platform.isWindows) {
-      _toast('Hosting close is only available on Windows.');
+      _toast('Hosting close is only available on Windows');
       return;
     }
 
@@ -7947,7 +8045,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _stopHostingWhenNoClientsRemain = false;
     _clearUiStatus(host: true);
     _log('gameserver', 'Close hosting command executed.');
-    if (mounted) _toast('Game server closed.');
+    if (mounted) _toast('Game server closed');
   }
 
   Future<void> _importVersion() async {
@@ -7964,13 +8062,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _settings = _settings.copyWith(selectedVersionId: existing.id);
       });
       await _saveSettings(toast: false);
-      _toast('That build folder is already imported.');
+      _toast('That build folder is already imported');
       return;
     }
 
     final executable = await _findBuildExecutable(importRequest.buildRootPath);
     if (executable == null) {
-      _toast('Fortnite executable not found inside selected build.');
+      _toast('Fortnite executable not found inside selected build');
       return;
     }
 
@@ -8000,7 +8098,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     });
     _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
-    if (mounted) _toast('Version imported.');
+    if (mounted) _toast('Version imported');
   }
 
   Future<void> _importManyVersionsFromParent(String parentPath) async {
@@ -8010,7 +8108,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final buildRoots = await _discoverBuildRoots(rootPath);
     if (buildRoots.length < 2) {
       _toast(
-        'Select a folder that contains multiple build folders with FortniteGame and Engine.',
+        'Select a folder that contains multiple build folders with FortniteGame and Engine',
       );
       return;
     }
@@ -8082,7 +8180,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     if (selectedFolders.isEmpty) {
-      _toast('No build folders selected.');
+      _toast('No build folders selected');
       return;
     }
 
@@ -8141,8 +8239,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       ].join(', ');
       _toast(
         details.isEmpty
-            ? 'No builds imported.'
-            : 'No builds imported ($details).',
+            ? 'No builds imported'
+            : 'No builds imported ($details)',
       );
       return;
     }
@@ -8161,7 +8259,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (skippedDuplicates > 0) '$skippedDuplicates duplicate',
       if (skippedInvalid > 0) '$skippedInvalid invalid',
     ];
-    _toast('${summaryParts.join(' | ')}.');
+    _toast(summaryParts.join(' | '));
   }
 
   Future<void> _editVersion(VersionEntry entry) async {
@@ -8182,13 +8280,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       editRequest.buildRootPath,
       excludeVersionId: entry.id,
     )) {
-      _toast('Another imported build already uses that folder.');
+      _toast('Another imported build already uses that folder');
       return;
     }
 
     final executable = await _findBuildExecutable(editRequest.buildRootPath);
     if (executable == null) {
-      _toast('Fortnite executable not found inside selected build.');
+      _toast('Fortnite executable not found inside selected build');
       return;
     }
 
@@ -8217,7 +8315,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
     });
     await _saveSettings(toast: false);
-    if (mounted) _toast('Version updated.');
+    if (mounted) _toast('Version updated');
   }
 
   Future<_BuildImportRequest?> _promptImportBuildDialog({
@@ -9478,7 +9576,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     });
     _syncLibraryActionsNudgePulse();
     await _saveSettings(toast: false);
-    if (mounted) _toast('All builds cleared.');
+    if (mounted) _toast('All builds cleared');
   }
 
   Future<void> _pickAvatar() async {
@@ -9529,7 +9627,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _gameProcess != null ||
         _gameServerProcess != null ||
         _atlasBackendProcess != null) {
-      _toast('Close Fortnite, game server, and backend before resetting.');
+      _toast('Close Fortnite, game server, and backend before resetting');
       return;
     }
 
@@ -9847,7 +9945,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _startRuntimeRefreshLoopIfNeeded();
     }
 
-    if (mounted) _toast('Launcher reset.');
+    if (mounted) _toast('Launcher reset');
     _log('settings', 'Launcher reset completed.');
   }
 
@@ -9924,12 +10022,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       await _checkForBundledDllDefaultUpdates(silent: true);
       if (mounted) {
-        _toast('Default DLL update completed.');
+        _toast('Default DLL update completed');
       }
     } catch (error) {
       _log('settings', 'Failed to update all default DLLs: $error');
       if (mounted) {
-        _toast('Failed to update all default DLLs.');
+        _toast('Failed to update all default DLLs');
       }
     } finally {
       if (mounted) {
@@ -10284,9 +10382,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ),
           if (_startupConfigResolved &&
               !_showStartup &&
-              _tab == LauncherTab.library &&
-              (!_settings.libraryActionsNudgeComplete ||
-                  _libraryImportTipFadingOut))
+              _showLibraryQuickTip)
             Positioned(
               top: 104,
               right: 28,
@@ -10332,7 +10428,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                   color: _onSurface(context, 0.92),
                                 ),
                               ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${_libraryQuickTipStep + 1}/2',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(context, 0.72),
+                                ),
+                              ),
                               const Spacer(),
+                              IconButton(
+                                tooltip: _libraryQuickTipStep == 0
+                                    ? 'Next tip'
+                                    : 'Got it',
+                                onPressed: _advanceLibraryQuickTip,
+                                icon: Icon(
+                                  _libraryQuickTipStep == 0
+                                      ? Icons.arrow_forward_rounded
+                                      : Icons.check_rounded,
+                                  size: 16,
+                                ),
+                                color: Theme.of(context).colorScheme.secondary,
+                                style: IconButton.styleFrom(
+                                  minimumSize: const Size(26, 26),
+                                  padding: const EdgeInsets.all(4),
+                                ),
+                              ),
                               InkWell(
                                 borderRadius: BorderRadius.circular(999),
                                 onTap: () {
@@ -10350,23 +10472,100 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                             ],
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            'Import a build using the + button in the top-right.',
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              height: 1.28,
-                              color: _onSurface(context, 0.86),
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'You can also use the download button to browse builds.',
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              height: 1.28,
-                              color: _onSurface(context, 0.86),
-                              fontWeight: FontWeight.w600,
+                          AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 170),
+                            switchInCurve: Curves.easeOut,
+                            switchOutCurve: Curves.easeOut,
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(opacity: animation, child: child),
+                            child: KeyedSubtree(
+                              key: ValueKey<int>(_libraryQuickTipStep),
+                              child: _libraryQuickTipStep == 0
+                                  ? Column(
+                                      key: const ValueKey('library-tip-step-0'),
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'Import a build using the + button in the top-right.',
+                                          style: TextStyle(
+                                            fontSize: 12.5,
+                                            height: 1.28,
+                                            color: _onSurface(context, 0.86),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'You can also use the download button to browse builds.',
+                                          style: TextStyle(
+                                            fontSize: 12.5,
+                                            height: 1.28,
+                                            color: _onSurface(context, 0.86),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  : Column(
+                                      key: const ValueKey('library-tip-step-1'),
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'ATLAS Link only supports the following versions natively:',
+                                          style: TextStyle(
+                                            fontSize: 12.5,
+                                            height: 1.28,
+                                            color: _onSurface(context, 0.86),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Wrap(
+                                          crossAxisAlignment:
+                                              WrapCrossAlignment.center,
+                                          spacing: 6,
+                                          runSpacing: 6,
+                                          children: [
+                                            _buildVersionTag(
+                                              context,
+                                              label: 'v1.7.2',
+                                              accent: Theme.of(
+                                                context,
+                                              ).colorScheme.secondary,
+                                            ),
+                                            Text(
+                                              '-',
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w700,
+                                                color: _onSurface(context, 0.78),
+                                              ),
+                                            ),
+                                            _buildVersionTag(
+                                              context,
+                                              label: 'v30.00',
+                                              accent: Theme.of(
+                                                context,
+                                              ).colorScheme.secondary,
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'Note: This is subject to change in the future',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.25,
+                                            color: _onSurface(context, 0.74),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                             ),
                           ),
                         ],
@@ -10509,6 +10708,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
           const SizedBox(width: 8),
           IconButton(
+            onPressed: _showQuickTipForCurrentTab,
+            tooltip: 'Show quick tips',
+            icon: const Icon(Icons.help_outline_rounded),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
             onPressed: () {
               unawaited(
                 _switchMenu(
@@ -10576,16 +10781,40 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     setState(() {
       _settings = _settings.copyWith(libraryActionsNudgeComplete: true);
       _installState = _installState.copyWith(libraryActionsNudgeComplete: true);
+      _libraryQuickTipManualVisible = false;
+      _libraryQuickTipStep = 0;
     });
     _syncLibraryActionsNudgePulse();
     unawaited(_saveInstallState());
     unawaited(_saveSettings(toast: false));
   }
 
+  void _advanceLibraryQuickTip() {
+    if (_libraryQuickTipStep == 0) {
+      setState(() => _libraryQuickTipStep = 1);
+      return;
+    }
+    unawaited(_dismissLibraryImportTip());
+  }
+
   Future<void> _dismissLibraryImportTip({
     Future<void> Function()? onDismissedAction,
   }) async {
     if (_libraryImportTipFadingOut) return;
+
+    if (_settings.libraryActionsNudgeComplete && _libraryQuickTipManualVisible) {
+      if (mounted) {
+        setState(() {
+          _libraryQuickTipManualVisible = false;
+          _libraryQuickTipStep = 0;
+        });
+      } else {
+        _libraryQuickTipManualVisible = false;
+        _libraryQuickTipStep = 0;
+      }
+      if (onDismissedAction != null) await onDismissedAction();
+      return;
+    }
 
     if (_settings.libraryActionsNudgeComplete) {
       if (onDismissedAction != null) await onDismissedAction();
@@ -10688,9 +10917,35 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
+  bool get _showLibraryQuickTip =>
+      _tab == LauncherTab.library &&
+      (_libraryQuickTipManualVisible ||
+          !_settings.libraryActionsNudgeComplete ||
+          _libraryImportTipFadingOut);
+
   bool get _showBackendConnectionTip =>
-      !_settings.backendConnectionTipComplete &&
-      !_installState.backendConnectionTipComplete;
+      _backendQuickTipManualVisible ||
+      (!_settings.backendConnectionTipComplete &&
+          !_installState.backendConnectionTipComplete);
+
+  void _showQuickTipForCurrentTab() {
+    if (_tab == LauncherTab.library) {
+      setState(() {
+        _libraryQuickTipManualVisible = true;
+        _libraryQuickTipStep = 0;
+        _libraryImportTipFadingOut = false;
+      });
+      return;
+    }
+    if (_tab == LauncherTab.backend) {
+      setState(() {
+        _backendQuickTipManualVisible = true;
+        _backendQuickTipStep = 0;
+      });
+      return;
+    }
+    _toast('No quick tips are available on this page');
+  }
 
   void _beginBackendTipPreviewIfNeeded() {
     _backendQuickTipOriginalType ??= _settings.backendConnectionType;
@@ -10728,13 +10983,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   void _completeBackendConnectionTip() {
-    if (_settings.backendConnectionTipComplete) return;
+    if (_settings.backendConnectionTipComplete) {
+      _restoreBackendTypeAfterTipPreview();
+      if (_backendQuickTipManualVisible) {
+        setState(() {
+          _backendQuickTipManualVisible = false;
+          _backendQuickTipStep = 0;
+        });
+      }
+      return;
+    }
     _restoreBackendTypeAfterTipPreview();
     setState(() {
       _settings = _settings.copyWith(backendConnectionTipComplete: true);
       _installState = _installState.copyWith(
         backendConnectionTipComplete: true,
       );
+      _backendQuickTipManualVisible = false;
       _backendQuickTipStep = 0;
     });
     _syncLibraryActionsNudgePulse();
@@ -10938,8 +11203,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _configuredDllPathMissing(_settings.largePakPatcherFilePath);
 
   bool get _showSettingsAlertBadge =>
-      _bundledDllDefaultsUpdateAvailable ||
-      _hasMissingConfiguredDllPaths;
+      _bundledDllDefaultsUpdateAvailable || _hasMissingConfiguredDllPaths;
 
   String get _dataManagementButtonTooltip {
     final hasUpdate = _bundledDllDefaultsUpdateAvailable;
@@ -12392,7 +12656,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                         unawaited(_refreshRuntime());
                         if (mounted) {
                           _toast(
-                            'Remote backend host cannot be localhost. Use an external host or IP.',
+                            'Remote backend host cannot be localhost. Use an external host or IP',
                           );
                         }
                         return;
@@ -12551,11 +12815,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _launchManagedAtlasBackend() async {
     if (_atlasBackendActionBusy) return;
     if (!Platform.isWindows) {
-      _toast('Launching ATLAS Backend is only available on Windows.');
+      _toast('Launching ATLAS Backend is only available on Windows');
       return;
     }
     if (_atlasBackendProcess != null) {
-      _toast('ATLAS Backend is already running.');
+      _toast('ATLAS Backend is already running');
       await _checkBackendNow();
       return;
     }
@@ -12599,12 +12863,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       });
       await _rememberBackendExecutablePath(backendExePath);
 
-      if (mounted) _toast('ATLAS Backend launched.');
+      if (mounted) _toast('ATLAS Backend launched');
       await Future<void>.delayed(const Duration(milliseconds: 1200));
       await _refreshRuntime();
     } catch (error) {
       _log('backend', 'Failed to launch managed ATLAS Backend: $error');
-      if (mounted) _toast('Failed to launch ATLAS Backend.');
+      if (mounted) _toast('Failed to launch ATLAS Backend');
     } finally {
       if (mounted) {
         setState(() => _atlasBackendActionBusy = false);
@@ -12830,7 +13094,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           message: 'Installer not found. Opening release page...',
           progress: null,
         );
-        if (mounted) _toast('Unable to resolve backend installer URL.');
+        if (mounted) _toast('Unable to resolve backend installer URL');
         await _openUrl(_atlasBackendLatestReleasePage);
         return false;
       }
@@ -12978,14 +13242,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       await _hideAtlasBackendInstallDialog();
       if (mounted) {
         _toast(
-          'ATLAS Backend setup launched. Finish setup, then click Launch ATLAS Backend again.',
+          'ATLAS Backend setup launched. Finish setup, then click Launch ATLAS Backend again',
         );
       }
       return true;
     } catch (error) {
       await _hideAtlasBackendInstallDialog();
       _log('backend', 'ATLAS Backend install failed: $error');
-      if (mounted) _toast('Failed to install ATLAS Backend.');
+      if (mounted) _toast('Failed to install ATLAS Backend');
       if (!downloadedInstaller) {
         try {
           if (mounted) _toast('Opening ATLAS Backend release page...');
@@ -13740,7 +14004,7 @@ foreach ($app in $appPaths) {
     if (_settings.backendConnectionType == BackendConnectionType.remote) {
       final host = _backendHostController.text.trim();
       if (host.isEmpty || _isLocalHost(host)) {
-        _toast('Remote host is required and cannot be localhost.');
+        _toast('Remote host is required and cannot be localhost');
         return;
       }
     }
@@ -13750,9 +14014,9 @@ foreach ($app in $appPaths) {
     final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
     final effective = '$_defaultBackendHost:$_defaultBackendPort';
     if (_backendOnline) {
-      _toast('Connected to backend on $effective (configured: $configured).');
+      _toast('Connected to backend on $effective (configured: $configured)');
     } else {
-      _toast('No backend detected (configured: $configured).');
+      _toast('No backend detected (configured: $configured)');
     }
   }
 
@@ -13768,7 +14032,7 @@ foreach ($app in $appPaths) {
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
-    if (mounted) _toast('Backend settings reset.');
+    if (mounted) _toast('Backend settings reset');
   }
 
   String _backendHostKey(String host) {
@@ -13791,11 +14055,11 @@ foreach ($app in $appPaths) {
 
     final host = _backendHostController.text.trim();
     if (host.isEmpty) {
-      _toast('Enter a backend host first.');
+      _toast('Enter a backend host first');
       return;
     }
     if (_isLocalHost(host)) {
-      _toast('Remote backend host cannot be localhost.');
+      _toast('Remote backend host cannot be localhost');
       return;
     }
 
@@ -13803,7 +14067,7 @@ foreach ($app in $appPaths) {
         int.tryParse(_backendPortController.text.trim()) ??
         _effectiveBackendPort();
     if (port <= 0 || port > 65535) {
-      _toast('Enter a valid backend port.');
+      _toast('Enter a valid backend port');
       return;
     }
 
@@ -13818,7 +14082,7 @@ foreach ($app in $appPaths) {
       (entry) => entry.name.trim().toLowerCase() == lower,
     );
     if (nameConflict) {
-      _toast('A saved backend with that name already exists.');
+      _toast('A saved backend with that name already exists');
       return;
     }
 
@@ -13827,7 +14091,7 @@ foreach ($app in $appPaths) {
       (entry) => _backendHostKey(entry.host) == hostKey && entry.port == port,
     );
     if (endpointConflict) {
-      _toast('That backend (IP + port) is already saved.');
+      _toast('That backend (IP + port) is already saved');
       return;
     }
 
@@ -13835,7 +14099,7 @@ foreach ($app in $appPaths) {
     next.add(entry);
 
     setState(() {
-      _settings = _settings.copyWith(savedBackends: next);
+      _settings = _settingsWithSavedBackendsForActiveProfile(next);
     });
     await _saveSettings(toast: false, applyControllers: false);
     if (mounted) _toast('Saved backend: ${entry.name}');
@@ -13864,7 +14128,7 @@ foreach ($app in $appPaths) {
     final next = List<SavedBackend>.from(_settings.savedBackends);
     next[index] = updated;
     setState(() {
-      _settings = _settings.copyWith(savedBackends: next);
+      _settings = _settingsWithSavedBackendsForActiveProfile(next);
     });
     await _saveSettings(toast: false, applyControllers: false);
     if (mounted) _toast('Updated backend: ${updated.name}');
@@ -14402,10 +14666,10 @@ foreach ($app in $appPaths) {
 
     if (mounted) {
       setState(() {
-        _settings = _settings.copyWith(savedBackends: next);
+        _settings = _settingsWithSavedBackendsForActiveProfile(next);
       });
     } else {
-      _settings = _settings.copyWith(savedBackends: next);
+      _settings = _settingsWithSavedBackendsForActiveProfile(next);
     }
     await _saveSettings(toast: false, applyControllers: false);
     if (mounted) _toast('Removed backend: ${entry.name}');
@@ -14417,13 +14681,17 @@ foreach ($app in $appPaths) {
     _savedBackendSearchQuery = '';
     if (mounted) {
       setState(() {
-        _settings = _settings.copyWith(savedBackends: const <SavedBackend>[]);
+        _settings = _settingsWithSavedBackendsForActiveProfile(
+          const <SavedBackend>[],
+        );
       });
     } else {
-      _settings = _settings.copyWith(savedBackends: const <SavedBackend>[]);
+      _settings = _settingsWithSavedBackendsForActiveProfile(
+        const <SavedBackend>[],
+      );
     }
     await _saveSettings(toast: false, applyControllers: false);
-    if (mounted) _toast('Cleared saved backends.');
+    if (mounted) _toast('Cleared saved backends');
   }
 
   Widget _savedBackendsPanel() {
@@ -14642,7 +14910,7 @@ foreach ($app in $appPaths) {
                                 borderRadius: BorderRadius.circular(12),
                                 onTap: () async {
                                   if (!online) {
-                                    _toast('Backend is offline.');
+                                    _toast('Backend is offline');
                                     return;
                                   }
                                   setState(() {
@@ -14663,7 +14931,7 @@ foreach ($app in $appPaths) {
                                   await _refreshRuntime(force: true);
                                   if (mounted) {
                                     _toast(
-                                      'Connected to ${entry.host}:${entry.port}.',
+                                      'Connected to ${entry.host}:${entry.port}',
                                     );
                                   }
                                 },
@@ -15321,7 +15589,7 @@ foreach ($app in $appPaths) {
                                   ),
                                 ),
                                 icon: const Icon(Icons.folder_rounded),
-                                label: const Text('View internal files'),
+                                label: const Text('View Internal Files'),
                               ),
                               FilledButton.icon(
                                 onPressed: _updatingDefaultDlls
@@ -15385,7 +15653,7 @@ foreach ($app in $appPaths) {
                             ),
                           ),
                           icon: const Icon(Icons.folder_rounded),
-                          label: const Text('View internal files'),
+                          label: const Text('View Internal Files'),
                         ),
                         const SizedBox(width: 10),
                         FilledButton.icon(
@@ -17482,6 +17750,7 @@ class LauncherSettings {
     required this.gameServerFilePath,
     required this.largePakPatcherFilePath,
     required this.savedBackends,
+    required this.savedBackendsByProfile,
     required this.versions,
     required this.selectedVersionId,
   });
@@ -17518,6 +17787,7 @@ class LauncherSettings {
   final String gameServerFilePath;
   final String largePakPatcherFilePath;
   final List<SavedBackend> savedBackends;
+  final Map<String, List<SavedBackend>> savedBackendsByProfile;
   final List<VersionEntry> versions;
   final String selectedVersionId;
 
@@ -17526,6 +17796,12 @@ class LauncherSettings {
       if (version.id == selectedVersionId) return version;
     }
     return versions.isEmpty ? null : versions.first;
+  }
+
+  static String profileBackendsKey(String username) {
+    final normalized = username.trim().toLowerCase();
+    if (normalized.isEmpty) return 'player';
+    return normalized.replaceAll(RegExp(r'\s+'), ' ');
   }
 
   LauncherSettings copyWith({
@@ -17561,6 +17837,7 @@ class LauncherSettings {
     String? gameServerFilePath,
     String? largePakPatcherFilePath,
     List<SavedBackend>? savedBackends,
+    Map<String, List<SavedBackend>>? savedBackendsByProfile,
     List<VersionEntry>? versions,
     String? selectedVersionId,
   }) {
@@ -17611,6 +17888,8 @@ class LauncherSettings {
       largePakPatcherFilePath:
           largePakPatcherFilePath ?? this.largePakPatcherFilePath,
       savedBackends: savedBackends ?? this.savedBackends,
+      savedBackendsByProfile:
+          savedBackendsByProfile ?? this.savedBackendsByProfile,
       versions: versions ?? this.versions,
       selectedVersionId: selectedVersionId ?? this.selectedVersionId,
     );
@@ -17650,6 +17929,7 @@ class LauncherSettings {
       gameServerFilePath: '',
       largePakPatcherFilePath: '',
       savedBackends: <SavedBackend>[],
+      savedBackendsByProfile: <String, List<SavedBackend>>{},
       versions: <VersionEntry>[],
       selectedVersionId: '',
     );
@@ -17686,6 +17966,31 @@ class LauncherSettings {
       return BackendConnectionType.local;
     }
 
+    Map<String, List<SavedBackend>> parseScopedSavedBackends(dynamic value) {
+      final parsed = <String, List<SavedBackend>>{};
+      if (value is! Map) return parsed;
+      for (final entry in value.entries) {
+        final key = profileBackendsKey(entry.key.toString());
+        final rawList = entry.value;
+        if (rawList is! List) continue;
+        final parsedList = <SavedBackend>[];
+        for (final item in rawList) {
+          if (item is Map<String, dynamic>) {
+            parsedList.add(SavedBackend.fromJson(item));
+          } else if (item is Map) {
+            parsedList.add(SavedBackend.fromJson(item.cast<String, dynamic>()));
+          }
+        }
+        parsed[key] = parsedList;
+      }
+      return parsed;
+    }
+
+    final resolvedUsername =
+        ((json['username'] ?? 'Player').toString().trim().isEmpty)
+        ? 'Player'
+        : (json['username'] ?? 'Player').toString().trim();
+
     final parsedVersions = <VersionEntry>[];
     final versionsRaw = json['versions'];
     if (versionsRaw is List) {
@@ -17719,10 +18024,26 @@ class LauncherSettings {
       }
     }
 
+    final parsedSavedBackendsByProfile = parseScopedSavedBackends(
+      json['savedBackendsByProfile'] ??
+          json['SavedBackendsByProfile'] ??
+          json['savedBackendsByUser'] ??
+          json['SavedBackendsByUser'],
+    );
+    final profileSavedBackendsKey = profileBackendsKey(resolvedUsername);
+    final hasProfileScopedSavedBackends = parsedSavedBackendsByProfile
+        .containsKey(profileSavedBackendsKey);
+    if (!hasProfileScopedSavedBackends && parsedSavedBackends.isNotEmpty) {
+      parsedSavedBackendsByProfile[profileSavedBackendsKey] =
+          List<SavedBackend>.from(parsedSavedBackends);
+    }
+    final resolvedSavedBackends = List<SavedBackend>.from(
+      parsedSavedBackendsByProfile[profileSavedBackendsKey] ??
+          parsedSavedBackends,
+    );
+
     return LauncherSettings(
-      username: ((json['username'] ?? 'Player').toString().trim().isEmpty)
-          ? 'Player'
-          : (json['username'] ?? 'Player').toString().trim(),
+      username: resolvedUsername,
       profileAvatarPath: (json['profileAvatarPath'] ?? '').toString(),
       profileSetupComplete: asBool(
         json['profileSetupComplete'] ?? json['ProfileSetupComplete'],
@@ -17829,7 +18150,8 @@ class LauncherSettings {
                   json['LargePakPatcherFilePath'] ??
                   '')
               .toString(),
-      savedBackends: parsedSavedBackends,
+      savedBackends: resolvedSavedBackends,
+      savedBackendsByProfile: parsedSavedBackendsByProfile,
       versions: parsedVersions,
       selectedVersionId: selected,
     );
@@ -17869,6 +18191,12 @@ class LauncherSettings {
       'gameServerFilePath': gameServerFilePath,
       'largePakPatcherFilePath': largePakPatcherFilePath,
       'savedBackends': savedBackends.map((entry) => entry.toJson()).toList(),
+      'savedBackendsByProfile': savedBackendsByProfile.map(
+        (profileKey, profileSavedBackends) => MapEntry(
+          profileKey,
+          profileSavedBackends.map((entry) => entry.toJson()).toList(),
+        ),
+      ),
       'versions': versions.map((entry) => entry.toJson()).toList(),
       'selectedVersionId': selectedVersionId,
     };
@@ -17964,3 +18292,4 @@ class VersionEntry {
     };
   }
 }
+
