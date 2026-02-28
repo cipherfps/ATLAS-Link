@@ -18,10 +18,9 @@ Markdown Quick Key
 - Please note any issues or bugs on the GitHub or in our discord server!
 
 # Improvements
-- Added email/password login authentication
-- Added a ? button for quick tips to reappear
+- Added Discord RPC for playing ATLAS
 
 # Fixes
-- Backend saves not storing
+- Might have fixed auth issues for certain users
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

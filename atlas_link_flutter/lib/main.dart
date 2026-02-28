@@ -472,6 +472,17 @@ class _LaunchAuthCredentials {
   final String password;
 }
 
+class _LaunchSessionTokens {
+  const _LaunchSessionTokens({this.fltoken, this.caldera});
+
+  final String? fltoken;
+  final String? caldera;
+
+  bool get hasAny => fltoken != null || caldera != null;
+
+  bool get hasBoth => fltoken != null && caldera != null;
+}
+
 class LauncherScreen extends StatefulWidget {
   const LauncherScreen({super.key, required this.onDarkModeChanged});
 
@@ -502,11 +513,27 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _gameServerInjectionRetryDelayMs = 100;
   static const int _gameServerInjectionMaxRetryDelayMs = 800;
   static const int _gameServerInjectionMaxAttempts = 3;
+  static const String _legacyLaunchFltoken = '3db3ba5dcbd2e16703f3978d';
+  static const String _legacyLaunchCalderaToken =
+      'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
+  static const Duration _maxLaunchTokenAge = Duration(days: 30);
+  static const Duration _maxLaunchTokenClockSkew = Duration(minutes: 10);
   // Reduced post-login delay for faster injection start on low-end PCs
   static const int _postLoginInjectionDelayMs = 300;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
+  static const String _discordRpcDllName = 'discord-rpc.dll';
+  static const String _discordRpcOriginalDllName = 'discord-rpc-original.dll';
+  static const String _discordRpcBundledAssetPath =
+      'assets/dlls/discord-rpc.dll';
+  static const List<String> _discordRpcTargetRelativeDirectory = <String>[
+    'FortniteGame',
+    'Binaries',
+    'ThirdParty',
+    'Discord',
+    'Win64',
+  ];
   static const String _atlasLinkRepository =
       'https://github.com/cipherfps/ATLAS-Link';
   static const String _atlasLinkDiscordInvite = 'https://discord.gg/GqgakxU6bm';
@@ -569,8 +596,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       imageFit: BoxFit.cover,
     ),
   ];
-  static const String _calderaToken =
-      'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
   static const String _loginContinueMarker =
       '[UOnlineAccountCommon::ContinueLoggingIn]';
   static const String _loginCompleteStepMarker = 'Login: Completing Sign-in';
@@ -714,6 +739,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _gameServerPromptResolvedForLaunch = true;
 
   final Set<String> _afterMathCleanedRoots = <String>{};
+  final Map<String, String> _discordRpcReplacedBuildRootsByNormalized =
+      <String, String>{};
+  bool _discordRpcRestoreInFlight = false;
 
   HttpServer? _backendProxyServer;
   HttpClient? _backendProxyClient;
@@ -827,6 +855,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       _syncControllers();
       await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
+      await _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle();
       unawaited(_checkForBundledDllDefaultUpdates(silent: true));
       if (currentLauncherVersion.isNotEmpty &&
           _installState.lastSeenLauncherVersion != currentLauncherVersion) {
@@ -5570,6 +5599,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Stopped. Click Host to start again.',
         severity: _UiStatusSeverity.warning,
       );
+      unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
       return;
     }
 
@@ -5591,6 +5621,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     } else {
       _clearUiStatus(host: state.host);
     }
+
+    unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
   }
 
   Future<void> _stopSessionLinkedHostingIfNeeded() async {
@@ -5643,6 +5675,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _stopHostingWhenNoClientsRemain = false;
       _clearUiStatus(host: true);
       _log('gameserver', 'Session-linked hosting stopped (no clients remain).');
+      unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
     } finally {
       _stoppingSessionLinkedHosting = false;
     }
@@ -5789,6 +5822,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       final backendReady = await _ensureBackendReadyForSession(host: false);
       if (!backendReady) return;
+      _setUiStatus(
+        host: false,
+        message: 'Syncing Discord RPC override...',
+        severity: _UiStatusSeverity.info,
+      );
+      await _syncCustomDiscordRpcDllForBuild(version);
       _GameServerPromptAction? gameServerPrompt;
       if (shouldOfferPrompt) {
         if (mounted) {
@@ -5830,7 +5869,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           message: 'Starting game server...',
           severity: _UiStatusSeverity.info,
         );
-        linkedHosting = await _startImplicitGameServer(version);
+        linkedHosting = await _startImplicitGameServer(
+          version,
+          syncDiscordRpc: false,
+        );
         if (!mounted) return;
         setState(() => _gameServerLaunching = false);
         if (linkedHosting != null) {
@@ -5862,6 +5904,26 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         host: false,
       );
       if (launchAuth == null) return;
+      final playCustomArgs = _settings.playCustomLaunchArgs;
+      final playLaunchTokens = _resolveLaunchSessionTokens(
+        customArgs: playCustomArgs,
+      );
+      final playTokenValidationError = _validateLaunchSessionTokens(
+        playLaunchTokens,
+      );
+      if (playTokenValidationError != null) {
+        _log(
+          'game',
+          'Launch token validation failed: $playTokenValidationError',
+        );
+        _setUiStatus(
+          host: false,
+          message: playTokenValidationError,
+          severity: _UiStatusSeverity.error,
+        );
+        if (mounted) _toast(playTokenValidationError);
+        return;
+      }
       final launchClientName = _normalizeClientUsername(requestedClientName);
 
       await _deleteAftermathCrashDlls(version.location);
@@ -5882,7 +5944,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           _createRebootLaunchArgs(
               username: launchAuth.login,
               password: launchAuth.password,
-              customArgs: _settings.playCustomLaunchArgs,
+              launchTokens: playLaunchTokens,
+              customArgs: playCustomArgs,
             )
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
@@ -7143,8 +7206,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<_FortniteProcessState?> _startImplicitGameServer(
-    VersionEntry version,
-  ) async {
+    VersionEntry version, {
+    bool syncDiscordRpc = true,
+  }) async {
     final gameServerPath = _settings.gameServerFilePath.trim();
     if (gameServerPath.isEmpty) return null;
     if (_gameServerProcess != null) return _gameServerInstance;
@@ -7169,6 +7233,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         return null;
       }
       final exeDir = File(exe).parent.path;
+      if (syncDiscordRpc) {
+        await _syncCustomDiscordRpcDllForBuild(version);
+      }
 
       // Patch exe for headless mode if enabled
       if (_settings.hostHeadlessEnabled) {
@@ -7191,6 +7258,26 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         host: true,
       );
       if (launchAuth == null) return null;
+      final hostCustomArgs = _settings.hostCustomLaunchArgs;
+      final hostLaunchTokens = _resolveLaunchSessionTokens(
+        customArgs: hostCustomArgs,
+      );
+      final hostTokenValidationError = _validateLaunchSessionTokens(
+        hostLaunchTokens,
+      );
+      if (hostTokenValidationError != null) {
+        _log(
+          'gameserver',
+          'Launch token validation failed: $hostTokenValidationError',
+        );
+        _setUiStatus(
+          host: true,
+          message: hostTokenValidationError,
+          severity: _UiStatusSeverity.error,
+        );
+        if (mounted) _toast(hostTokenValidationError);
+        return null;
+      }
 
       await _deleteAftermathCrashDlls(version.location);
       final launcherPid = await _startPausedAuxiliaryProcess(
@@ -7210,11 +7297,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           _createRebootLaunchArgs(
               username: launchAuth.login,
               password: launchAuth.password,
+              launchTokens: hostLaunchTokens,
               host: true,
               headless: _settings.hostHeadlessEnabled,
               logging: false,
               hostPort: _effectiveGameServerPort(),
-              customArgs: _settings.hostCustomLaunchArgs,
+              customArgs: hostCustomArgs,
             )
             ..add('-BackendHost=$backendHost')
             ..add('-BackendPort=$backendPort');
@@ -7474,10 +7562,162 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
+  String? _normalizeOptionalLaunchToken(String? value) {
+    final trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  String? _extractLaunchArgValue(List<String> args, String argumentName) {
+    final prefix = '-${argumentName.toUpperCase()}=';
+    for (final arg in args) {
+      final trimmed = arg.trim();
+      if (trimmed.length <= prefix.length) continue;
+      if (trimmed.toUpperCase().startsWith(prefix)) {
+        final value = trimmed.substring(prefix.length).trim();
+        if (value.isNotEmpty) return value;
+      }
+    }
+    return null;
+  }
+
+  _LaunchSessionTokens _resolveLaunchSessionTokens({
+    required String customArgs,
+  }) {
+    final parsedArgs = _splitLaunchArguments(customArgs);
+    final argFltoken = _normalizeOptionalLaunchToken(
+      _extractLaunchArgValue(parsedArgs, 'fltoken'),
+    );
+    final argCaldera = _normalizeOptionalLaunchToken(
+      _extractLaunchArgValue(parsedArgs, 'caldera'),
+    );
+
+    final envFltoken = _normalizeOptionalLaunchToken(
+      Platform.environment['ATLAS_FLTOKEN'],
+    );
+    final envCaldera = _normalizeOptionalLaunchToken(
+      Platform.environment['ATLAS_CALDERA'],
+    );
+
+    final resolvedFltoken = argFltoken ?? envFltoken;
+    final resolvedCaldera = argCaldera ?? envCaldera;
+    if (resolvedFltoken == null && resolvedCaldera == null) {
+      return const _LaunchSessionTokens(
+        fltoken: _legacyLaunchFltoken,
+        caldera: _legacyLaunchCalderaToken,
+      );
+    }
+
+    return _LaunchSessionTokens(
+      fltoken: resolvedFltoken,
+      caldera: resolvedCaldera,
+    );
+  }
+
+  bool _isLegacyLaunchTokenPair(_LaunchSessionTokens tokens) {
+    return tokens.fltoken == _legacyLaunchFltoken &&
+        tokens.caldera == _legacyLaunchCalderaToken;
+  }
+
+  Map<String, dynamic>? _decodeJwtPayloadMap(String token) {
+    final segments = token.split('.');
+    if (segments.length != 3) return null;
+    final payloadSegment = segments[1].trim();
+    if (payloadSegment.isEmpty) return null;
+
+    try {
+      final normalized = base64Url.normalize(payloadSegment);
+      final decoded = utf8.decode(base64Url.decode(normalized));
+      final payload = jsonDecode(decoded);
+      if (payload is Map<String, dynamic>) return payload;
+      if (payload is Map) {
+        return payload.map((key, value) => MapEntry(key.toString(), value));
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+
+  String? _validateLaunchSessionTokens(_LaunchSessionTokens tokens) {
+    if (!tokens.hasAny) return null;
+    if (!tokens.hasBoth) {
+      return 'Launch tokens are incomplete. Provide both -fltoken and -caldera.';
+    }
+
+    final fltoken = tokens.fltoken!;
+    if (!RegExp(r'^[A-Za-z0-9._-]{8,256}$').hasMatch(fltoken)) {
+      return 'Launch token (-fltoken) format is invalid.';
+    }
+
+    final caldera = tokens.caldera!;
+    if (!RegExp(
+      r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$',
+    ).hasMatch(caldera)) {
+      return 'Launch token (-caldera) format is invalid.';
+    }
+
+    final payload = _decodeJwtPayloadMap(caldera);
+    if (payload == null) {
+      return 'Launch token (-caldera) payload could not be decoded.';
+    }
+
+    final accountId = payload['account_id']?.toString().trim() ?? '';
+    if (accountId.isEmpty) {
+      return 'Launch token (-caldera) is missing account_id.';
+    }
+
+    final generatedValue = payload['generated'];
+    int? generatedUnixSeconds;
+    if (generatedValue is int) {
+      generatedUnixSeconds = generatedValue;
+    } else if (generatedValue is num) {
+      generatedUnixSeconds = generatedValue.toInt();
+    } else if (generatedValue is String) {
+      generatedUnixSeconds = int.tryParse(generatedValue);
+    }
+    if (generatedUnixSeconds == null || generatedUnixSeconds <= 0) {
+      return 'Launch token (-caldera) is missing a valid generated timestamp.';
+    }
+
+    final generatedAt = DateTime.fromMillisecondsSinceEpoch(
+      generatedUnixSeconds * 1000,
+      isUtc: true,
+    );
+    final now = DateTime.now().toUtc();
+    if (generatedAt.isAfter(now.add(_maxLaunchTokenClockSkew))) {
+      return 'Launch token (-caldera) timestamp is in the future.';
+    }
+    if (!_isLegacyLaunchTokenPair(tokens) &&
+        now.difference(generatedAt) > _maxLaunchTokenAge) {
+      return 'Launch token (-caldera) is stale '
+          '(generated ${generatedAt.toIso8601String()} UTC).';
+    }
+
+    return null;
+  }
+
+  List<String> _removeLaunchTokenArgs(List<String> args) {
+    return args
+        .where((arg) {
+          final upper = arg.toUpperCase();
+          if (upper.startsWith('-FLTOKEN=')) return false;
+          if (upper.startsWith('-CALDERA=')) return false;
+          return true;
+        })
+        .toList(growable: false);
+  }
+
   List<String> _redactSensitiveLaunchArgs(List<String> args) {
     return args
         .map((arg) {
           final upper = arg.toUpperCase();
+          if (upper.startsWith('-FLTOKEN=')) {
+            return '-FLTOKEN=<redacted>';
+          }
+          if (upper.startsWith('-CALDERA=')) {
+            return '-CALDERA=<redacted>';
+          }
           if (upper.startsWith('-AUTH_LOGIN=')) {
             return '-AUTH_LOGIN=<redacted>';
           }
@@ -7492,6 +7732,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   List<String> _createRebootLaunchArgs({
     required String username,
     required String password,
+    required _LaunchSessionTokens launchTokens,
     bool host = false,
     bool headless = false,
     bool logging = false,
@@ -7507,12 +7748,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       '-skippatchcheck',
       '-nobe',
       '-fromfl=eac',
-      '-fltoken=3db3ba5dcbd2e16703f3978d',
-      '-caldera=$_calderaToken',
       '-AUTH_LOGIN=$username',
       '-AUTH_PASSWORD=$resolvedPassword',
       '-AUTH_TYPE=epic',
     ];
+    if (launchTokens.hasBoth) {
+      args.add('-fltoken=${launchTokens.fltoken!}');
+      args.add('-caldera=${launchTokens.caldera!}');
+    }
     if (logging) args.add('-log');
     if (host) {
       args.add('-nosplash');
@@ -7524,7 +7767,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         args.add('-nullrhi');
       }
     }
-    final extras = _splitLaunchArguments(customArgs);
+    final extras = _removeLaunchTokenArgs(_splitLaunchArguments(customArgs));
     if (extras.isNotEmpty) {
       args.addAll(extras);
     }
@@ -7866,6 +8109,278 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       } catch (_) {
         // Ignore locked files.
       }
+    }
+  }
+
+  Directory _discordRpcTargetDirectoryForBuildRoot(String buildRoot) {
+    return Directory(
+      _joinPath([buildRoot, ..._discordRpcTargetRelativeDirectory]),
+    );
+  }
+
+  Future<void> _syncCustomDiscordRpcDllForBuild(
+    VersionEntry launchVersion,
+  ) async {
+    final buildRoot = launchVersion.location.trim();
+    if (buildRoot.isEmpty || !_isBuildRootValid(buildRoot)) {
+      _log(
+        'discord',
+        'Skipping Discord RPC replacement. Invalid build root: $buildRoot',
+      );
+      return;
+    }
+
+    final sourcePath = await _ensureBundledDll(
+      bundledAssetPath: _discordRpcBundledAssetPath,
+      bundledFileName: _discordRpcDllName,
+      label: 'Discord RPC override',
+    );
+    final resolvedSourcePath = sourcePath?.trim() ?? '';
+    if (resolvedSourcePath.isEmpty || !File(resolvedSourcePath).existsSync()) {
+      _log(
+        'discord',
+        'Skipping Discord RPC replacement. Custom DLL not found at $_discordRpcBundledAssetPath.',
+      );
+      return;
+    }
+
+    final sourceFile = File(resolvedSourcePath);
+    final targetDirectory = _discordRpcTargetDirectoryForBuildRoot(buildRoot);
+    final targetPath = _joinPath([targetDirectory.path, _discordRpcDllName]);
+    final originalPath = _joinPath([
+      targetDirectory.path,
+      _discordRpcOriginalDllName,
+    ]);
+    final tempPath = '$targetPath.tmp';
+    final tempFile = File(tempPath);
+    final targetFile = File(targetPath);
+    final originalFile = File(originalPath);
+    final normalizedBuildRoot = _normalizePath(buildRoot);
+
+    try {
+      await targetDirectory.create(recursive: true);
+      if (!await originalFile.exists()) {
+        if (!await targetFile.exists()) {
+          _log(
+            'discord',
+            'Skipped $buildRoot: missing both $_discordRpcDllName and $_discordRpcOriginalDllName.',
+          );
+          return;
+        }
+
+        final targetAlreadyCustom = await _filesBinaryEqual(
+          sourceFile,
+          targetFile,
+        );
+        if (targetAlreadyCustom) {
+          // Already replaced earlier (for example a previous launch). Track so
+          // close-time restore can still recover the original DLL.
+          _discordRpcReplacedBuildRootsByNormalized[normalizedBuildRoot] =
+              buildRoot;
+          _log(
+            'discord',
+            'Using existing custom $_discordRpcDllName in $buildRoot.',
+          );
+          return;
+        }
+
+        await targetFile.rename(originalPath);
+        _log(
+          'discord',
+          'Backed up original $_discordRpcDllName as $_discordRpcOriginalDllName for $buildRoot.',
+        );
+      }
+
+      if (await tempFile.exists()) {
+        await tempFile.delete();
+      }
+      await sourceFile.copy(tempPath);
+      if (await targetFile.exists()) {
+        await targetFile.delete();
+      }
+      await tempFile.rename(targetPath);
+      _discordRpcReplacedBuildRootsByNormalized[normalizedBuildRoot] =
+          buildRoot;
+      _log('discord', 'Discord RPC replacement complete for $buildRoot.');
+    } catch (error) {
+      _log(
+        'discord',
+        'Failed to replace $_discordRpcDllName in $buildRoot: $error',
+      );
+      try {
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      } catch (_) {
+        // Ignore cleanup failures.
+      }
+    }
+  }
+
+  Future<List<String>> _discoverStaleDiscordRpcReplacementRoots(
+    File customSourceFile,
+  ) async {
+    final roots = <String>[];
+    final seen = <String>{};
+    for (final version in _settings.versions) {
+      final buildRoot = version.location.trim();
+      if (buildRoot.isEmpty || !_isBuildRootValid(buildRoot)) continue;
+      final normalized = _normalizePath(buildRoot);
+      if (!seen.add(normalized)) continue;
+
+      final targetDirectory = _discordRpcTargetDirectoryForBuildRoot(buildRoot);
+      final targetFile = File(
+        _joinPath([targetDirectory.path, _discordRpcDllName]),
+      );
+      final originalFile = File(
+        _joinPath([targetDirectory.path, _discordRpcOriginalDllName]),
+      );
+      if (!await targetFile.exists() || !await originalFile.exists()) continue;
+      if (await _filesBinaryEqual(customSourceFile, targetFile)) {
+        roots.add(buildRoot);
+      }
+    }
+    return roots;
+  }
+
+  Future<bool> _anyFortniteProcessRunningSystemWide() async {
+    if (!Platform.isWindows) return false;
+    try {
+      final result = await Process.run('tasklist', [
+        '/FI',
+        'IMAGENAME eq $_shippingExeName',
+      ], runInShell: true);
+      final output = '${result.stdout}\n${result.stderr}'.toLowerCase();
+      return output.contains(_shippingExeName.toLowerCase());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle() async {
+    if (_discordRpcRestoreInFlight) return;
+    if (_hasRunningGameClient) return;
+    if (_gameServerProcess != null) return;
+    if (await _anyFortniteProcessRunningSystemWide()) return;
+
+    final sourcePath = await _ensureBundledDll(
+      bundledAssetPath: _discordRpcBundledAssetPath,
+      bundledFileName: _discordRpcDllName,
+      label: 'Discord RPC override',
+    );
+    final resolvedSourcePath = sourcePath?.trim() ?? '';
+    final customSourceFile = resolvedSourcePath.isNotEmpty
+        ? File(resolvedSourcePath)
+        : null;
+
+    final candidateRequiresCustomMatchByNormalized = <String, bool>{};
+    for (final entry in _discordRpcReplacedBuildRootsByNormalized.entries) {
+      candidateRequiresCustomMatchByNormalized[entry.key] = false;
+    }
+    if (customSourceFile != null && await customSourceFile.exists()) {
+      final staleRoots = await _discoverStaleDiscordRpcReplacementRoots(
+        customSourceFile,
+      );
+      for (final root in staleRoots) {
+        final normalized = _normalizePath(root);
+        candidateRequiresCustomMatchByNormalized.putIfAbsent(
+          normalized,
+          () => true,
+        );
+      }
+    }
+
+    if (candidateRequiresCustomMatchByNormalized.isEmpty) return;
+
+    _discordRpcRestoreInFlight = true;
+    try {
+      var restored = 0;
+      var failed = 0;
+      var skipped = 0;
+
+      for (final entry in candidateRequiresCustomMatchByNormalized.entries) {
+        final normalized = entry.key;
+        final requireCustomMatch = entry.value;
+        var buildRoot =
+            _discordRpcReplacedBuildRootsByNormalized[normalized] ?? '';
+        if (buildRoot.trim().isEmpty) {
+          for (final version in _settings.versions) {
+            if (_normalizePath(version.location) != normalized) continue;
+            buildRoot = version.location;
+            break;
+          }
+        }
+        if (buildRoot.trim().isEmpty) {
+          skipped++;
+          _discordRpcReplacedBuildRootsByNormalized.remove(normalized);
+          continue;
+        }
+
+        final targetDirectory = _discordRpcTargetDirectoryForBuildRoot(
+          buildRoot,
+        );
+        final targetFile = File(
+          _joinPath([targetDirectory.path, _discordRpcDllName]),
+        );
+        final originalFile = File(
+          _joinPath([targetDirectory.path, _discordRpcOriginalDllName]),
+        );
+
+        try {
+          if (!await originalFile.exists()) {
+            skipped++;
+            _discordRpcReplacedBuildRootsByNormalized.remove(normalized);
+            continue;
+          }
+          if (requireCustomMatch) {
+            if (customSourceFile == null ||
+                !await customSourceFile.exists() ||
+                !await targetFile.exists() ||
+                !await _filesBinaryEqual(customSourceFile, targetFile)) {
+              skipped++;
+              continue;
+            }
+          }
+          if (await targetFile.exists()) {
+            await targetFile.delete();
+          }
+          await originalFile.copy(targetFile.path);
+          restored++;
+          _discordRpcReplacedBuildRootsByNormalized.remove(normalized);
+        } catch (error) {
+          failed++;
+          _log(
+            'discord',
+            'Failed to restore $_discordRpcDllName in $buildRoot: $error',
+          );
+        }
+      }
+
+      _log(
+        'discord',
+        'Discord RPC restore complete: $restored restored, $failed failed, $skipped skipped.',
+      );
+    } finally {
+      _discordRpcRestoreInFlight = false;
+    }
+  }
+
+  Future<bool> _filesBinaryEqual(File first, File second) async {
+    try {
+      if (!await first.exists() || !await second.exists()) return false;
+      final firstLength = await first.length();
+      final secondLength = await second.length();
+      if (firstLength != secondLength) return false;
+
+      final firstBytes = await first.readAsBytes();
+      final secondBytes = await second.readAsBytes();
+      if (firstBytes.length != secondBytes.length) return false;
+      for (var index = 0; index < firstBytes.length; index++) {
+        if (firstBytes[index] != secondBytes[index]) return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -10328,6 +10843,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _logs.clear();
     _logWriteBuffer.clear();
     _afterMathCleanedRoots.clear();
+    _discordRpcReplacedBuildRootsByNormalized.clear();
+    _discordRpcRestoreInFlight = false;
 
     final defaults = LauncherSettings.defaults();
     if (mounted) {
@@ -10367,6 +10884,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _atlasBackendInstallCleanupWatcherActive = false;
         _profileSetupDialogVisible = false;
         _profileSetupDialogQueued = false;
+        _discordRpcReplacedBuildRootsByNormalized.clear();
+        _discordRpcRestoreInFlight = false;
         _sortedVersionsSource = null;
         _sortedVersionsCache = const <VersionEntry>[];
         _versionSearchQuery = '';
@@ -10407,6 +10926,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _atlasBackendInstallCleanupWatcherActive = false;
       _profileSetupDialogVisible = false;
       _profileSetupDialogQueued = false;
+      _discordRpcReplacedBuildRootsByNormalized.clear();
+      _discordRpcRestoreInFlight = false;
       _sortedVersionsSource = null;
       _sortedVersionsCache = const <VersionEntry>[];
       _versionSearchQuery = '';

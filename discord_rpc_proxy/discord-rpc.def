@@ -1,0 +1,12 @@
+LIBRARY "discord-rpc.dll"
+
+EXPORTS
+  Discord_ClearPresence @1
+  Discord_Initialize @2
+  Discord_Register @3
+  Discord_RegisterSteamGame @4
+  Discord_Respond @5
+  Discord_RunCallbacks @6
+  Discord_Shutdown @7
+  Discord_UpdateHandlers @8
+  Discord_UpdatePresence @9
