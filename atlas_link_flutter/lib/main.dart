@@ -354,6 +354,7 @@ class _FortniteProcessState {
   bool killed = false;
   bool exited = false;
   bool postLoginInjected = false;
+  bool postLoginInferredFromFallback = false;
   bool largePakInjected = false;
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
@@ -494,8 +495,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.0.9';
-  static const String _launcherBuildLabel = 'Stable 1.0.9';
+  static const String _launcherVersion = '1.1.1';
+  static const String _launcherBuildLabel = 'Stable 1.1.1';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -5206,6 +5207,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!state.postLoginInjected && _isLoginCompleteSignal(line)) {
       state.launched = true;
       state.postLoginInjected = true;
+      state.postLoginInferredFromFallback = false;
       _log(
         state.host ? 'gameserver' : 'game',
         'Login complete detected. Scheduling post-login injections...',
@@ -5271,8 +5273,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.killed || state.exited) return;
 
     if (state.host) {
-      // For the host, inject memory patcher now (post-login), then inject
-      // the game server DLL immediately after login (Reboot-style).
+      final inferredFallbackLogin = state.postLoginInferredFromFallback;
+
+      // For the host, inject post-login patchers and then schedule the game
+      // server DLL injection. If login was only inferred via fallback (no real
+      // login marker), skip memory.dll to avoid early-load access violations.
+      if (inferredFallbackLogin) {
+        _log(
+          'gameserver',
+          'Using safe fallback host flow: skipping memory patcher until stable login markers.',
+        );
+      }
       _setUiStatus(
         host: true,
         message: 'Injecting post-login patchers...',
@@ -5286,7 +5297,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         state.pid,
         state.gameVersion,
         includeAuth: false,
-        includeMemory: true,
+        includeMemory: !inferredFallbackLogin,
         includeLargePak: false,
         includeUnreal: false,
         includeGameServer: false,
@@ -6421,6 +6432,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
     var headless = _settings.hostHeadlessEnabled;
     var autoRestart = _settings.hostAutoRestartEnabled;
+    var deleteAftermathOnLaunch = _settings.deleteAftermathOnLaunch;
     var allowMultipleClients = _settings.allowMultipleGameClients;
     var launchBackend = _settings.launchBackendOnSessionStart;
     var largePakPatcherEnabled = _settings.largePakPatcherEnabled;
@@ -6746,6 +6758,24 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       ),
                                       const SizedBox(height: 8),
                                       settingTile(
+                                        icon: Icons.warning_amber_rounded,
+                                        title:
+                                            'Delete GFSDK_Aftermath_Lib.dll',
+                                        subtitle:
+                                            'Removes the Aftermath DLL from the game directory when launching the game',
+                                        trailing: Switch(
+                                          value: deleteAftermathOnLaunch,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () =>
+                                                  deleteAftermathOnLaunch =
+                                                      value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
                                         icon: Icons.numbers_rounded,
                                         title: 'Port',
                                         subtitle:
@@ -6878,6 +6908,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           allowMultipleGameClients: allowMultipleClients,
           hostHeadlessEnabled: headless,
           hostAutoRestartEnabled: autoRestart,
+          deleteAftermathOnLaunch: deleteAftermathOnLaunch,
           hostPort: resolvedPort,
           launchBackendOnSessionStart: launchBackend,
           largePakPatcherEnabled: largePakPatcherEnabled,
@@ -7407,6 +7438,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     state.launched = true;
     state.postLoginInjected = true;
+    state.postLoginInferredFromFallback = true;
     _log(
       'gameserver',
       'Login marker not seen. Running fallback post-login injections...',
@@ -8093,6 +8125,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<void> _deleteAftermathCrashDlls(String buildRootPath) async {
+    if (!_settings.deleteAftermathOnLaunch) return;
+
     final normalizedRoot = _normalizePath(buildRootPath);
     if (_afterMathCleanedRoots.contains(normalizedRoot)) return;
     _afterMathCleanedRoots.add(normalizedRoot);
@@ -19029,6 +19063,7 @@ class LauncherSettings {
     required this.allowMultipleGameClients,
     required this.hostHeadlessEnabled,
     required this.hostAutoRestartEnabled,
+    required this.deleteAftermathOnLaunch,
     required this.hostPort,
     required this.unrealEnginePatcherPath,
     required this.authenticationPatcherPath,
@@ -19070,6 +19105,7 @@ class LauncherSettings {
   final bool allowMultipleGameClients;
   final bool hostHeadlessEnabled;
   final bool hostAutoRestartEnabled;
+  final bool deleteAftermathOnLaunch;
   final int hostPort;
   final String unrealEnginePatcherPath;
   final String authenticationPatcherPath;
@@ -19124,6 +19160,7 @@ class LauncherSettings {
     bool? allowMultipleGameClients,
     bool? hostHeadlessEnabled,
     bool? hostAutoRestartEnabled,
+    bool? deleteAftermathOnLaunch,
     int? hostPort,
     String? unrealEnginePatcherPath,
     String? authenticationPatcherPath,
@@ -19178,6 +19215,8 @@ class LauncherSettings {
       hostHeadlessEnabled: hostHeadlessEnabled ?? this.hostHeadlessEnabled,
       hostAutoRestartEnabled:
           hostAutoRestartEnabled ?? this.hostAutoRestartEnabled,
+      deleteAftermathOnLaunch:
+          deleteAftermathOnLaunch ?? this.deleteAftermathOnLaunch,
       hostPort: hostPort ?? this.hostPort,
       unrealEnginePatcherPath:
           unrealEnginePatcherPath ?? this.unrealEnginePatcherPath,
@@ -19226,6 +19265,7 @@ class LauncherSettings {
       allowMultipleGameClients: false,
       hostHeadlessEnabled: true,
       hostAutoRestartEnabled: false,
+      deleteAftermathOnLaunch: true,
       hostPort: 7777,
       unrealEnginePatcherPath: '',
       authenticationPatcherPath: '',
@@ -19450,6 +19490,12 @@ class LauncherSettings {
         json['hostAutoRestartEnabled'] ?? json['hostAutoRestart'],
         false,
       ),
+      deleteAftermathOnLaunch: asBool(
+        json['deleteAftermathOnLaunch'] ??
+            json['deleteGfeSdkOnHostLaunch'] ??
+            json['deleteGfeSdkOnLaunch'],
+        true,
+      ),
       hostPort: asInt(
         json['hostPort'] ?? json['gameServerPort'],
         7777,
@@ -19513,6 +19559,7 @@ class LauncherSettings {
       'allowMultipleGameClients': allowMultipleGameClients,
       'hostHeadlessEnabled': hostHeadlessEnabled,
       'hostAutoRestartEnabled': hostAutoRestartEnabled,
+      'deleteAftermathOnLaunch': deleteAftermathOnLaunch,
       'hostPort': hostPort,
       'unrealEnginePatcherPath': unrealEnginePatcherPath,
       'authenticationPatcherPath': authenticationPatcherPath,

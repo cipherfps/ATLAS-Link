@@ -13,14 +13,8 @@ Markdown Quick Key
 
 ---
 
-# New Launcher
-- Welcome to the new ATLAS Link Launcher!
-- Please note any issues or bugs on the GitHub or in our discord server!
-
 # Improvements
-- Added Discord RPC for playing ATLAS
-
-# Fixes
-- Might have fixed auth issues for certain users
+- Fixed GS crashing on certain versions
+- Added Aftermath.dll removal launch option toggle
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
