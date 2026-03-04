@@ -1,5 +1,5 @@
 #define MyAppName "ATLAS Link"
-#define MyAppPublisher "cipher"
+#define MyAppPublisher "cipherfps"
 #define MyAppURL "https://github.com/cipherfps/ATLAS-Link"
 
 #ifndef MyAppVersion

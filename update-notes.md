@@ -14,7 +14,9 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fixed GS crashing on certain versions
-- Added Aftermath.dll removal launch option toggle
+- Moved around parts of the UI in launch options
+
+# Fixes
+- Fixed DLL updater notice showing up everytime on launch
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

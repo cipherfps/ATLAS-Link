@@ -495,8 +495,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.1';
-  static const String _launcherBuildLabel = 'Stable 1.1.1';
+  static const String _launcherVersion = '1.1.2';
+  static const String _launcherBuildLabel = 'Stable 1.1.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -2603,7 +2603,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       final shouldAdoptBundledGameServer =
           configuredGameServer.isEmpty ||
-          _isManagedBundledDllPath(configuredGameServer, 'Magnesium.dll') ||
           (configuredGameServer.isNotEmpty && !gameServerExists) ||
           (looksBundledGameServer &&
               (!bundledFromCurrentInstall || forceResetBundledPaths));
@@ -2653,8 +2652,6 @@ class _LauncherScreenState extends State<LauncherScreen>
           );
       final shouldAdoptBundledLargePak =
           configuredLargePak.isEmpty ||
-          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatch.dll') ||
-          _isManagedBundledDllPath(configuredLargePak, 'LargePakPatcher.dll') ||
           (configuredLargePak.isNotEmpty && !largePakExists) ||
           (looksBundledLargePak &&
               (!bundledLargePakFromCurrentInstall || forceResetBundledPaths));
@@ -2691,7 +2688,6 @@ class _LauncherScreenState extends State<LauncherScreen>
           _isBundledAssetDllFromCurrentInstall(configuredMemory, 'memory.dll');
       final shouldAdoptBundledMemory =
           configuredMemory.isEmpty ||
-          _isManagedBundledDllPath(configuredMemory, 'memory.dll') ||
           (configuredMemory.isNotEmpty && !memoryExists) ||
           (looksBundledMemory &&
               (!bundledMemoryFromCurrentInstall || forceResetBundledPaths));
@@ -2728,7 +2724,6 @@ class _LauncherScreenState extends State<LauncherScreen>
           _isBundledAssetDllFromCurrentInstall(configuredAuth, 'Tellurium.dll');
       final shouldAdoptBundledAuth =
           configuredAuth.isEmpty ||
-          _isManagedBundledDllPath(configuredAuth, 'Tellurium.dll') ||
           (configuredAuth.isNotEmpty && !authExists) ||
           (looksBundledAuth &&
               (!bundledAuthFromCurrentInstall || forceResetBundledPaths));
@@ -2765,7 +2760,6 @@ class _LauncherScreenState extends State<LauncherScreen>
           _isBundledAssetDllFromCurrentInstall(configuredUnreal, 'console.dll');
       final shouldAdoptBundledUnreal =
           configuredUnreal.isEmpty ||
-          _isManagedBundledDllPath(configuredUnreal, 'console.dll') ||
           (configuredUnreal.isNotEmpty && !unrealExists) ||
           (looksBundledUnreal &&
               (!bundledUnrealFromCurrentInstall || forceResetBundledPaths));
@@ -6681,6 +6675,39 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       ),
                                       const SizedBox(height: 8),
                                       settingTile(
+                                        icon: Icons.numbers_rounded,
+                                        title: 'Port',
+                                        subtitle:
+                                            'The port the launcher expects the game server on',
+                                        trailing: SizedBox(
+                                          width: 220,
+                                          child: TextField(
+                                            controller: portController,
+                                            focusNode: portFocusNode,
+                                            keyboardType: TextInputType.number,
+                                            inputFormatters: [
+                                              FilteringTextInputFormatter
+                                                  .digitsOnly,
+                                            ],
+                                            decoration: InputDecoration(
+                                              isDense: true,
+                                              hintText: _defaultGameServerPort
+                                                  .toString(),
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
                                         icon: Icons.web_asset_off_rounded,
                                         title: 'Headless',
                                         subtitle:
@@ -6727,6 +6754,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       ),
                                       const SizedBox(height: 8),
                                       settingTile(
+                                        icon: Icons.restart_alt_rounded,
+                                        title: 'Automatic Restart',
+                                        subtitle:
+                                            'Automatically restarts the game server when it exits',
+                                        trailing: Switch(
+                                          value: autoRestart,
+                                          onChanged: (value) {
+                                            setDialogState(
+                                              () => autoRestart = value,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      settingTile(
                                         icon: Icons.folder_zip_rounded,
                                         title: 'Large Pak Patcher',
                                         subtitle:
@@ -6737,21 +6779,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                             setDialogState(
                                               () => largePakPatcherEnabled =
                                                   value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.restart_alt_rounded,
-                                        title: 'Automatic Restart',
-                                        subtitle:
-                                            'Automatically restarts the game server when it exits',
-                                        trailing: Switch(
-                                          value: autoRestart,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => autoRestart = value,
                                             );
                                           },
                                         ),
@@ -6772,39 +6799,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                                       value,
                                             );
                                           },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.numbers_rounded,
-                                        title: 'Port',
-                                        subtitle:
-                                            'The port the launcher expects the game server on',
-                                        trailing: SizedBox(
-                                          width: 120,
-                                          child: TextField(
-                                            controller: portController,
-                                            focusNode: portFocusNode,
-                                            keyboardType: TextInputType.number,
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter
-                                                  .digitsOnly,
-                                            ],
-                                            decoration: InputDecoration(
-                                              isDense: true,
-                                              hintText: _defaultGameServerPort
-                                                  .toString(),
-                                              contentPadding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
-                                                  ),
-                                              border: OutlineInputBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
-                                              ),
-                                            ),
-                                          ),
                                         ),
                                       ),
                                     ],
@@ -16537,22 +16531,6 @@ foreach ($app in $appPaths) {
                                 style: nameStyle,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 5,
-                                ),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(999),
-                                  color: Theme.of(context).colorScheme.onSurface
-                                      .withValues(alpha: 0.18),
-                                ),
-                                child: const Text('Member'),
                               ),
                             ),
                           ],
