@@ -14,9 +14,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Moved around parts of the UI in launch options
-
-# Fixes
-- Fixed DLL updater notice showing up every time on launch
+- Added Separated Launcher/Game Discord RPC
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

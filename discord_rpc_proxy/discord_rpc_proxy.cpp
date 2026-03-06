@@ -1,6 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#ifndef ATLAS_LAUNCHER_VERSION
+#define ATLAS_LAUNCHER_VERSION "unknown"
+#endif
+
 #include <atomic>
 #include <algorithm>
 #include <cctype>
@@ -67,7 +71,8 @@ constexpr char kOverrideApplicationId[] = "1465348345122914335";
 constexpr char kMainDetailsLine[] = "Playing Fortnite";
 constexpr char kAtlasLargeImageKey[] = "atlas-icon";
 constexpr char kAtlasSmallImageKey[] = "fortnite-logo";
-constexpr char kLargeImageHoverText[] = "ATLAS Link";
+constexpr char kLargeImageHoverText[] =
+    "@cipherfps (v" ATLAS_LAUNCHER_VERSION ")";
 constexpr char kBuildHoverPrefix[] = "Build ";
 constexpr char kDiscordButtonLabel[] = "ATLAS Discord";
 constexpr char kDiscordButtonUrl[] = "https://discord.gg/GqgakxU6bm";

@@ -17,6 +17,8 @@ import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:win32/win32.dart';
 
+import 'launcher_discord_rpc.dart';
+
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
 const _fallbackAcrylicColorLight = Color(0x36F2F6FF);
 
@@ -495,8 +497,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.2';
-  static const String _launcherBuildLabel = 'Stable 1.1.2';
+  static const String _launcherVersion = '1.1.3';
+  static const String _launcherBuildLabel = 'Stable 1.1.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -537,7 +539,15 @@ class _LauncherScreenState extends State<LauncherScreen>
   ];
   static const String _atlasLinkRepository =
       'https://github.com/cipherfps/ATLAS-Link';
+  static const String _atlasLinkReleasesPage =
+      'https://github.com/cipherfps/ATLAS-Link/releases';
   static const String _atlasLinkDiscordInvite = 'https://discord.gg/GqgakxU6bm';
+  static const String _launcherDiscordApplicationId = '1465348345122914335';
+  static const String _launcherDiscordLargeImageKey = 'atlas-icon';
+  static const String _launcherDiscordLargeImageText =
+      '@cipherfps (v$_launcherVersion)';
+  static const String _launcherDiscordButtonLabel = 'Discord';
+  static const String _launcherDownloadButtonLabel = 'Download';
   static const String _atlasLinkBundledDllContentsApi =
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
@@ -743,6 +753,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   final Map<String, String> _discordRpcReplacedBuildRootsByNormalized =
       <String, String>{};
   bool _discordRpcRestoreInFlight = false;
+  late final LauncherDiscordRpcClient _launcherDiscordRpc =
+      LauncherDiscordRpcClient(applicationId: _launcherDiscordApplicationId);
+  String? _launcherDiscordPresenceSignature;
+  bool _launcherDiscordPresenceCleared = true;
 
   HttpServer? _backendProxyServer;
   HttpClient? _backendProxyClient;
@@ -822,6 +836,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _largePakPatcherController.dispose();
     _atlasBackendInstallProgress.dispose();
     unawaited(_stopBackendProxy());
+    _launcherDiscordRpc.dispose();
     super.dispose();
   }
 
@@ -895,6 +910,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         _shellEntranceController.value = 1.0;
         _startRuntimeRefreshLoopIfNeeded();
       }
+      _syncLauncherDiscordPresence();
     }
   }
 
@@ -1160,6 +1176,12 @@ class _LauncherScreenState extends State<LauncherScreen>
     return DateTime.now().difference(startedAt) < const Duration(seconds: 14);
   }
 
+  bool get _showOnboardingDiscordPresence {
+    return _startupConfigResolved &&
+        !_showStartup &&
+        !_settings.profileSetupComplete;
+  }
+
   void _queueFirstRunProfileSetup() {
     if (_settings.profileSetupComplete) return;
     if (_profileSetupDialogQueued) return;
@@ -1216,6 +1238,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (_showStartup) return;
 
     _profileSetupDialogVisible = true;
+    _syncLauncherDiscordPresence();
     try {
       final result = await _promptFirstRunProfileSetup();
       if (result == null) return;
@@ -1250,11 +1273,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       } catch (error) {
         _log('settings', 'Failed to persist install state: $error');
       }
+      _syncLauncherDiscordPresence();
       _queueLauncherAutoUpdateCheckOnLaunch();
     } catch (error) {
       _log('settings', 'First-run profile setup failed: $error');
     } finally {
       _profileSetupDialogVisible = false;
+      if (mounted) _syncLauncherDiscordPresence();
     }
   }
 
@@ -5593,6 +5618,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Stopped. Restarting...',
         severity: _UiStatusSeverity.info,
       );
+      _syncLauncherDiscordPresence();
       unawaited(_autoRestartHosting(state.versionId));
       return;
     }
@@ -5604,6 +5630,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         message: 'Stopped. Click Host to start again.',
         severity: _UiStatusSeverity.warning,
       );
+      _syncLauncherDiscordPresence();
       unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
       return;
     }
@@ -5627,6 +5654,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _clearUiStatus(host: state.host);
     }
 
+    _syncLauncherDiscordPresence();
     unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
   }
 
@@ -5680,6 +5708,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _stopHostingWhenNoClientsRemain = false;
       _clearUiStatus(host: true);
       _log('gameserver', 'Session-linked hosting stopped (no clients remain).');
+      _syncLauncherDiscordPresence();
       unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
     } finally {
       _stoppingSessionLinkedHosting = false;
@@ -5798,6 +5827,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _FortniteProcessState? linkedHosting;
     _clearStaleHostStoppedWarningOnNewSession();
     setState(() => _gameAction = _GameActionState.launching);
+    _syncLauncherDiscordPresence();
     try {
       final shouldOfferPrompt =
           !launchingAdditionalClient && _shouldOfferGameServerPrompt();
@@ -6064,6 +6094,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _gameServerPromptResolvedForLaunch = true;
       }
       if (mounted) setState(() => _gameAction = _GameActionState.idle);
+      _syncLauncherDiscordPresence();
     }
   }
 
@@ -6366,6 +6397,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     } else {
       _gameServerLaunching = true;
     }
+    _syncLauncherDiscordPresence();
 
     _clearStaleHostStoppedWarningOnNewSession();
 
@@ -6398,6 +6430,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       } else {
         _gameServerLaunching = false;
       }
+      _syncLauncherDiscordPresence();
     }
   }
 
@@ -6786,17 +6819,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       const SizedBox(height: 8),
                                       settingTile(
                                         icon: Icons.warning_amber_rounded,
-                                        title:
-                                            'Delete GFSDK_Aftermath_Lib.dll',
+                                        title: 'Delete GFSDK_Aftermath_Lib.dll',
                                         subtitle:
                                             'Removes the Aftermath DLL from the game directory when launching the game',
                                         trailing: Switch(
                                           value: deleteAftermathOnLaunch,
                                           onChanged: (value) {
                                             setDialogState(
-                                              () =>
-                                                  deleteAftermathOnLaunch =
-                                                      value,
+                                              () => deleteAftermathOnLaunch =
+                                                  value,
                                             );
                                           },
                                         ),
@@ -9033,6 +9064,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     } finally {
       _clearUiStatus(host: false);
       if (mounted) setState(() => _gameAction = _GameActionState.idle);
+      _syncLauncherDiscordPresence();
     }
   }
 
@@ -9084,6 +9116,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _clearUiStatus(host: true);
     _log('gameserver', 'Close hosting command executed.');
     if (mounted) _toast('Game server closed');
+    _syncLauncherDiscordPresence();
   }
 
   Future<void> _importVersion() async {
@@ -10989,6 +11022,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _startRuntimeRefreshLoopIfNeeded();
     }
 
+    _syncLauncherDiscordPresence();
     if (mounted) _toast('Launcher reset');
     _log('settings', 'Launcher reset completed.');
   }
@@ -12671,6 +12705,79 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return child;
   }
 
+  bool get _gameDiscordPresenceHasPriority {
+    return _gameAction != _GameActionState.idle ||
+        _gameServerLaunching ||
+        _gameProcess != null ||
+        _gameServerProcess != null ||
+        _gameInstance != null ||
+        _gameServerInstance != null ||
+        _extraGameInstances.isNotEmpty;
+  }
+
+  String _launcherDiscordDetailsLine() {
+    if (_showOnboardingDiscordPresence) {
+      return 'Welcome to ATLAS!';
+    }
+    return switch (_tab) {
+      LauncherTab.home => 'Browsing Homepage',
+      LauncherTab.library => 'Browsing Library',
+      LauncherTab.backend => 'Configuring Backend',
+      LauncherTab.general => 'Editing Settings',
+    };
+  }
+
+  String _launcherDiscordStateLine() {
+    if (_showOnboardingDiscordPresence) {
+      return 'Currently setting up their user profile.';
+    }
+    final username = _settings.username.trim().isEmpty
+        ? 'Player'
+        : _settings.username.trim();
+    return 'Logged in as: $username';
+  }
+
+  void _syncLauncherDiscordPresence() {
+    if (!Platform.isWindows) return;
+
+    if (_gameDiscordPresenceHasPriority) {
+      if (_launcherDiscordPresenceCleared) return;
+      _launcherDiscordRpc.clearActivity();
+      _launcherDiscordPresenceSignature = null;
+      _launcherDiscordPresenceCleared = true;
+      return;
+    }
+
+    final activity = LauncherDiscordActivity(
+      details: _launcherDiscordDetailsLine(),
+      state: _launcherDiscordStateLine(),
+      startTimestampSeconds: _launcherDiscordRpc.sessionStartTimestampSeconds,
+      largeImageKey: _launcherDiscordLargeImageKey,
+      largeImageText: _launcherDiscordLargeImageText,
+      buttons: <LauncherDiscordButton>[
+        const LauncherDiscordButton(
+          label: _launcherDiscordButtonLabel,
+          url: _atlasLinkDiscordInvite,
+        ),
+        const LauncherDiscordButton(
+          label: _launcherDownloadButtonLabel,
+          url: _atlasLinkReleasesPage,
+        ),
+      ],
+    );
+    final signature = activity.signature;
+    if (!_launcherDiscordPresenceCleared &&
+        _launcherDiscordPresenceSignature == signature) {
+      return;
+    }
+
+    final updated = _launcherDiscordRpc.setActivity(activity);
+    if (!updated) return;
+
+    _launcherDiscordPresenceSignature = signature;
+    _launcherDiscordPresenceCleared = false;
+  }
+
   Future<void> _switchMenu(
     LauncherTab tab, {
     SettingsSection? settingsSection,
@@ -12694,6 +12801,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
     }
     _syncLibraryActionsNudgePulse();
+    _syncLauncherDiscordPresence();
   }
 
   Widget _homeTab() {
@@ -17330,6 +17438,7 @@ foreach ($app in $appPaths) {
           onTap: () {
             setState(() => _settingsSection = section);
             _syncLibraryActionsNudgePulse();
+            _syncLauncherDiscordPresence();
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
