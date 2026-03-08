@@ -497,7 +497,7 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.3';
+  static const String _launcherVersion = '1.1.4';
   static const String _launcherBuildLabel = 'Stable 1.1.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
@@ -1261,13 +1261,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         _profileAuthEmailController.text = result.authEmail.trim();
         _profileAuthPasswordController.text = result.authPassword;
       });
-      final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
       await _saveSettings(toast: false);
-      if (forcedRemote && mounted) {
-        _toast(
-          'Email/password auth enabled. Backend Type was switched to Remote.',
-        );
-      }
       try {
         await _saveInstallState();
       } catch (error) {
@@ -2908,13 +2902,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       } else {
         _settings = LauncherSettings.defaults();
       }
-      final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
-      if (forcedRemote) {
-        _log(
-          'settings',
-          'Email/password auth was enabled with local backend. Switched backend type to remote.',
-        );
-      }
       await _migrateAppearanceSettingsFileIfNeeded();
     } catch (error) {
       _settings = LauncherSettings.defaults();
@@ -3054,13 +3041,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       _profileAuthValidationAttempted = false;
     }
 
-    final forcedRemote = _forceRemoteBackendForEmailPasswordAuth();
     await _saveSettings(applyControllers: false);
-    if (forcedRemote && mounted) {
-      _toast(
-        'Email/password auth requires Remote backend. Switched to Remote.',
-      );
-    }
   }
 
   Future<void> _saveSettings({
@@ -3068,7 +3049,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     bool applyControllers = true,
   }) async {
     if (applyControllers) _applyControllers();
-    _forceRemoteBackendForEmailPasswordAuth();
     _syncSavedBackendsForActiveProfile();
     final pretty = const JsonEncoder.withIndent(
       '  ',
@@ -3256,11 +3236,6 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _setBackendConnectionType(BackendConnectionType type) async {
     if (_settings.backendConnectionType == type) return;
-    if (type == BackendConnectionType.local &&
-        _settings.profileUseEmailPasswordAuth) {
-      if (mounted) _toast(_emailAuthRemoteBackendRequiredMessage);
-      return;
-    }
     setState(() {
       _settings = _settings.copyWith(
         backendConnectionType: type,
@@ -7512,33 +7487,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return local.trim();
   }
 
-  static const String _emailAuthRemoteBackendRequiredMessage =
-      'Email/password authentication requires Backend Type set to Remote.';
   static const String _emailAuthRemoteHostRequiredMessage =
-      'Email/password authentication requires a non-local Remote backend host.';
+      'Remote backend host is required when Backend Type is set to Remote.';
 
   String? _emailPasswordBackendValidationError() {
     if (!_settings.profileUseEmailPasswordAuth) return null;
     if (_settings.backendConnectionType != BackendConnectionType.remote) {
-      return _emailAuthRemoteBackendRequiredMessage;
+      return null;
     }
     if (_effectiveBackendHost().trim().isEmpty) {
       return _emailAuthRemoteHostRequiredMessage;
     }
     return null;
-  }
-
-  bool _forceRemoteBackendForEmailPasswordAuth() {
-    if (!_settings.profileUseEmailPasswordAuth) return false;
-    if (_settings.backendConnectionType == BackendConnectionType.remote) {
-      return false;
-    }
-    _settings = _settings.copyWith(
-      backendConnectionType: BackendConnectionType.remote,
-      backendHost: '',
-    );
-    _backendHostController.text = _effectiveBackendHost();
-    return true;
   }
 
   bool _isLikelyEmail(String value) {
@@ -13846,20 +13806,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               _backendSettingTile(
                 icon: Icons.settings_ethernet_rounded,
                 title: 'Type',
-                subtitle: _settings.profileUseEmailPasswordAuth
-                    ? 'Remote is required while email/password login is enabled'
-                    : 'The type of backend to use when logging into Fortnite',
+                subtitle:
+                    'Choose Local for a local backend or Remote for another host',
                 trailing: _tipPulseGlowIf(
                   DropdownButtonFormField<BackendConnectionType>(
                     initialValue: _settings.backendConnectionType,
                     decoration: _backendFieldDecoration(),
                     items: BackendConnectionType.values.map((type) {
-                      final localBlocked =
-                          _settings.profileUseEmailPasswordAuth &&
-                          type == BackendConnectionType.local;
                       return DropdownMenuItem<BackendConnectionType>(
                         value: type,
-                        enabled: !localBlocked,
                         child: Text(type.label),
                       );
                     }).toList(),
@@ -15296,13 +15251,10 @@ foreach ($app in $appPaths) {
   }
 
   Future<void> _resetBackendPreferences() async {
-    final requireRemote = _settings.profileUseEmailPasswordAuth;
     setState(() {
       _settings = _settings.copyWith(
-        backendConnectionType: requireRemote
-            ? BackendConnectionType.remote
-            : BackendConnectionType.local,
-        backendHost: requireRemote ? '' : '127.0.0.1',
+        backendConnectionType: BackendConnectionType.local,
+        backendHost: '127.0.0.1',
         backendPort: 3551,
       );
       _backendHostController.text = _effectiveBackendHost();
@@ -15311,11 +15263,7 @@ foreach ($app in $appPaths) {
     await _saveSettings(toast: false);
     await _refreshRuntime();
     if (mounted) {
-      _toast(
-        requireRemote
-            ? 'Backend settings reset. Remote remains required for email/password auth.'
-            : 'Backend settings reset',
-      );
+      _toast('Backend settings reset');
     }
   }
 
@@ -16586,7 +16534,6 @@ foreach ($app in $appPaths) {
                                 height: 40,
                               ),
                               onPressed: () {
-                                var forcedRemote = false;
                                 final shouldCompleteQuickTip =
                                     _showProfileAuthQuickTip;
                                 setState(() {
@@ -16595,20 +16542,11 @@ foreach ($app in $appPaths) {
                                   _settings = _settings.copyWith(
                                     profileUseEmailPasswordAuth: nextAuthMode,
                                   );
-                                  if (nextAuthMode) {
-                                    forcedRemote =
-                                        _forceRemoteBackendForEmailPasswordAuth();
-                                  }
                                   if (!nextAuthMode) {
                                     _showProfileAuthPassword = false;
                                   }
                                   _profileAuthValidationAttempted = false;
                                 });
-                                if (forcedRemote && mounted) {
-                                  _toast(
-                                    'Email/password auth requires Remote backend. Switched to Remote.',
-                                  );
-                                }
                                 if (shouldCompleteQuickTip) {
                                   _completeProfileAuthQuickTip();
                                 }

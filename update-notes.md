@@ -1,3 +1,4 @@
+<!-- version: 1.1.4 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -13,7 +14,7 @@ Markdown Quick Key
 
 ---
 
-# Improvements
-- Added Separated Launcher/Game Discord RPC
+# Fixes
+- Fixed Email/Password not allowing a local connection on the backend tab
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
