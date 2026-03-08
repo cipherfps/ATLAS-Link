@@ -498,7 +498,7 @@ class LauncherScreen extends StatefulWidget {
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
   static const String _launcherVersion = '1.1.4';
-  static const String _launcherBuildLabel = 'Stable 1.1.3';
+  static const String _launcherBuildLabel = 'Stable 1.1.4';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
