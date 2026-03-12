@@ -17,6 +17,7 @@ import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:win32/win32.dart';
 
+import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
@@ -396,6 +397,13 @@ class _FortniteProcessState {
 
 enum _UiStatusSeverity { info, success, warning, error }
 
+enum _LauncherContentRefreshOutcome {
+  updated,
+  unchanged,
+  cacheFallback,
+  defaultsFallback,
+}
+
 class _UiStatus {
   const _UiStatus(this.message, this.severity);
 
@@ -497,8 +505,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.4';
-  static const String _launcherBuildLabel = 'Stable 1.1.4';
+  static const String _launcherVersion = '1.1.5';
+  static const String _launcherBuildLabel = 'Stable 1.1.5';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -542,6 +550,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const String _atlasLinkReleasesPage =
       'https://github.com/cipherfps/ATLAS-Link/releases';
   static const String _atlasLinkDiscordInvite = 'https://discord.gg/GqgakxU6bm';
+  static const String _launcherContentConfigUrl =
+      'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/launcher-content.json';
+  static const String _launcherContentAssetBaseUrl =
+      'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/';
   static const String _launcherDiscordApplicationId = '1465348345122914335';
   static const String _launcherDiscordLargeImageKey = 'atlas-icon';
   static const String _launcherDiscordLargeImageText =
@@ -585,28 +597,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://github.com/cipherfps/ATLAS-Backend/releases/latest';
   static const String _launcherDataDirName = 'ATLAS Link';
   static const String _legacyLauncherDataDirName = 'atlas-link-launcher';
-  static const Duration _homeHeroRotateInterval = Duration(seconds: 7);
-  static const List<_EventCardData> _homeFeaturedCards = <_EventCardData>[
-    _EventCardData(
-      image: 'assets/images/hero_banner.png',
-      category: 'LAUNCHER',
-      title: 'ATLAS Link',
-      description:
-          'ATLAS has released a new launcher focused on clean visuals, ease of use, and overall backend compatability!',
-      buttonLabel: 'Open ATLAS Link GitHub',
-      buttonUrl: _atlasLinkRepository,
-    ),
-    _EventCardData(
-      image: 'assets/images/discord.webp',
-      category: 'COMMUNITY',
-      title: 'ATLAS Discord',
-      description:
-          'Join the ATLAS discord for more resources, news and updates!',
-      buttonLabel: 'Join ATLAS Discord',
-      buttonUrl: _atlasLinkDiscordInvite,
-      imageFit: BoxFit.cover,
-    ),
-  ];
   static const String _loginContinueMarker =
       '[UOnlineAccountCommon::ContinueLoggingIn]';
   static const String _loginCompleteStepMarker = 'Login: Completing Sign-in';
@@ -664,8 +654,14 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   LauncherTab _tab = LauncherTab.home;
   LauncherTab _settingsReturnTab = LauncherTab.home;
+  String? _selectedContentTabId;
+  String? _settingsReturnContentTabId;
   SettingsSection _settingsSection = SettingsSection.profile;
   LauncherSettings _settings = LauncherSettings.defaults();
+  LauncherContentConfig _launcherContent = LauncherContentConfig.defaults(
+    repositoryUrl: _atlasLinkRepository,
+    discordInviteUrl: _atlasLinkDiscordInvite,
+  );
   int _homeHeroIndex = 0;
 
   List<VersionEntry>? _sortedVersionsSource;
@@ -737,6 +733,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _runtimePollingStarted = false;
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
+  Future<_LauncherContentRefreshOutcome>? _launcherContentRefreshInFlight;
 
   _UiStatus? _gameUiStatus;
   _UiStatus? _gameServerUiStatus;
@@ -773,6 +770,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   late Directory _dataDir;
   late File _settingsFile;
   late File _installStateFile;
+  late File _launcherContentCacheFile;
   late File _logFile;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
@@ -840,12 +838,23 @@ class _LauncherScreenState extends State<LauncherScreen>
     super.dispose();
   }
 
+  LauncherContentPage get _activeLauncherContentPage {
+    return _launcherContent.pageById(_selectedContentTabId) ??
+        _launcherContent.homeTab;
+  }
+
+  bool get _showHomeGreeting =>
+      _tab == LauncherTab.home &&
+      (_selectedContentTabId == null || _selectedContentTabId!.isEmpty) &&
+      _launcherContent.homeTab.greetingEnabled;
+
   Future<void> _bootstrap() async {
     try {
       await _initStorage();
       unawaited(_cleanupLauncherUpdateInstallerCacheOnLaunch());
       await _loadInstallState();
       await _loadSettings();
+      await _loadLauncherContent();
       await _reconcileInstallState();
       final priorLauncherVersion = _installState.lastSeenLauncherVersion.trim();
       final currentLauncherVersion = _launcherVersion.trim();
@@ -1971,18 +1980,26 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   void _startHomeHeroAutoRotate() {
     _homeHeroTimer?.cancel();
-    _homeHeroTimer = Timer.periodic(_homeHeroRotateInterval, (_) {
-      if (!mounted || _tab != LauncherTab.home) return;
-      final count = _homeFeaturedCards.length;
-      if (count <= 1) return;
-      setState(() {
-        _homeHeroIndex = (_homeHeroIndex + 1) % count;
-      });
-    });
+    if (_tab != LauncherTab.home) return;
+    final page = _activeLauncherContentPage;
+    final count = page.slides.length;
+    if (count <= 1 || page.heroRotationSeconds <= 0) return;
+    _homeHeroTimer = Timer.periodic(
+      Duration(seconds: page.heroRotationSeconds),
+      (_) {
+        if (!mounted || _tab != LauncherTab.home) return;
+        final activePage = _activeLauncherContentPage;
+        final activeCount = activePage.slides.length;
+        if (activeCount <= 1) return;
+        setState(() {
+          _homeHeroIndex = (_homeHeroIndex + 1) % activeCount;
+        });
+      },
+    );
   }
 
   void _setHomeHeroIndex(int index) {
-    final count = _homeFeaturedCards.length;
+    final count = _activeLauncherContentPage.slides.length;
     if (count == 0) return;
     if (!mounted) {
       _homeHeroIndex = index % count;
@@ -2009,6 +2026,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     await _dataDir.create(recursive: true);
     _settingsFile = File(_joinPath([_dataDir.path, 'settings.json']));
     _installStateFile = File(_joinPath([_dataDir.path, 'install_state.json']));
+    _launcherContentCacheFile = File(
+      _joinPath([_dataDir.path, 'launcher_content_cache.json']),
+    );
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
     // Reset launcher logs on every app start so each run has a clean log.
     // If truncation fails (locked, permissions), keep going.
@@ -2997,6 +3017,190 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  Future<void> _loadLauncherContent({
+    bool forceRefresh = false,
+    bool silent = true,
+  }) async {
+    if (forceRefresh) {
+      await _refreshLauncherContentFromGitHub(silent: silent);
+      return;
+    }
+
+    final cachedContent = await _readCachedLauncherContent();
+    _applyLauncherContent(cachedContent ?? _defaultLauncherContent());
+
+    if (!silent && mounted) {
+      _toast(
+        cachedContent != null
+            ? 'Using cached launcher content'
+            : 'Using built-in launcher content',
+      );
+    }
+
+    unawaited(_refreshLauncherContentFromGitHub(silent: true));
+  }
+
+  LauncherContentConfig _defaultLauncherContent() {
+    return LauncherContentConfig.defaults(
+      repositoryUrl: _atlasLinkRepository,
+      discordInviteUrl: _atlasLinkDiscordInvite,
+    );
+  }
+
+  Map<String, dynamic>? _launcherContentJsonMap(Object? decoded) {
+    if (decoded is Map<String, dynamic>) return decoded;
+    if (decoded is Map) return decoded.cast<String, dynamic>();
+    return null;
+  }
+
+  LauncherContentConfig _launcherContentFromMap(Map<String, dynamic> map) {
+    return LauncherContentConfig.fromJson(
+      map,
+      repositoryUrl: _atlasLinkRepository,
+      discordInviteUrl: _atlasLinkDiscordInvite,
+    );
+  }
+
+  Future<LauncherContentConfig?> _readCachedLauncherContent() async {
+    if (!await _launcherContentCacheFile.exists()) return null;
+    try {
+      final cachedRaw = await _launcherContentCacheFile.readAsString();
+      final decoded = jsonDecode(cachedRaw);
+      final map = _launcherContentJsonMap(decoded);
+      if (map == null) return null;
+      return _launcherContentFromMap(map);
+    } catch (error) {
+      _log(
+        'content',
+        'Invalid cached launcher content config. Falling back to defaults. $error',
+      );
+      return null;
+    }
+  }
+
+  void _applyLauncherContent(LauncherContentConfig nextContent) {
+    void applyContent() {
+      _launcherContent = nextContent;
+      if (_selectedContentTabId != null &&
+          !_launcherContent.hasPage(_selectedContentTabId)) {
+        _selectedContentTabId = null;
+      }
+      if (_settingsReturnContentTabId != null &&
+          !_launcherContent.hasPage(_settingsReturnContentTabId)) {
+        _settingsReturnContentTabId = null;
+      }
+      final slideCount = _activeLauncherContentPage.slides.length;
+      if (slideCount <= 0) {
+        _homeHeroIndex = 0;
+      } else {
+        _homeHeroIndex = _homeHeroIndex % slideCount;
+      }
+    }
+
+    if (mounted) {
+      setState(applyContent);
+    } else {
+      applyContent();
+    }
+    _startHomeHeroAutoRotate();
+    _syncLauncherDiscordPresence();
+  }
+
+  Future<_LauncherContentRefreshOutcome> _refreshLauncherContentFromGitHub({
+    bool silent = true,
+  }) async {
+    final inFlight = _launcherContentRefreshInFlight;
+    if (inFlight != null) {
+      final outcome = await inFlight;
+      if (!silent && mounted) {
+        _toast(_launcherContentRefreshMessage(outcome));
+      }
+      return outcome;
+    }
+
+    final future = () async {
+      try {
+        final previousCacheRaw = await _launcherContentCacheFile.exists()
+            ? await _launcherContentCacheFile.readAsString()
+            : null;
+        final raw = await _downloadText(_launcherContentConfigUrl);
+        final decoded = jsonDecode(raw);
+        final map = _launcherContentJsonMap(decoded);
+        if (map == null) {
+          throw const FormatException(
+            'Launcher content config must be a JSON object.',
+          );
+        }
+        final nextContent = _launcherContentFromMap(map);
+        final pretty = const JsonEncoder.withIndent('  ').convert(map);
+        await _launcherContentCacheFile.writeAsString(pretty, flush: true);
+        _applyLauncherContent(nextContent);
+
+        final outcome = previousCacheRaw?.trim() == pretty.trim()
+            ? _LauncherContentRefreshOutcome.unchanged
+            : _LauncherContentRefreshOutcome.updated;
+        if (!silent && mounted) {
+          _toast(_launcherContentRefreshMessage(outcome));
+        }
+        return outcome;
+      } catch (error) {
+        _log(
+          'content',
+          'Failed to refresh launcher content from GitHub. $error',
+        );
+        final fallback = await _launcherContentCacheFile.exists()
+            ? _LauncherContentRefreshOutcome.cacheFallback
+            : _LauncherContentRefreshOutcome.defaultsFallback;
+        if (!silent && mounted) {
+          _toast(_launcherContentRefreshMessage(fallback));
+        }
+        return fallback;
+      }
+    }();
+
+    _launcherContentRefreshInFlight = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_launcherContentRefreshInFlight, future)) {
+        _launcherContentRefreshInFlight = null;
+      }
+    }
+  }
+
+  String _launcherContentRefreshMessage(
+    _LauncherContentRefreshOutcome outcome,
+  ) {
+    switch (outcome) {
+      case _LauncherContentRefreshOutcome.updated:
+        return 'Launcher content updated';
+      case _LauncherContentRefreshOutcome.unchanged:
+        return 'Launcher content is up to date';
+      case _LauncherContentRefreshOutcome.cacheFallback:
+        return 'Using cached launcher content';
+      case _LauncherContentRefreshOutcome.defaultsFallback:
+        return 'Using built-in launcher content';
+    }
+  }
+
+  Future<String> _downloadText(String url) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(Uri.parse(url));
+      request.followRedirects = true;
+      request.maxRedirects = 8;
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw 'HTTP ${response.statusCode}';
+      }
+      return response.transform(utf8.decoder).join();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<void> _saveProfileSettings() async {
     final useEmailPasswordAuth = _settings.profileUseEmailPasswordAuth;
     final trimmedEmail = _profileAuthEmailController.text.trim();
@@ -3611,8 +3815,96 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _handleRefreshPressed() async {
     await _refreshRuntime();
+    await _loadLauncherContent(forceRefresh: true, silent: false);
     await _checkForLauncherUpdates(silent: false);
     await _checkForBundledDllDefaultUpdates(silent: false);
+  }
+
+  String _resolveLauncherContentImagePath(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '';
+    final normalized = trimmed.replaceAll('\\', '/');
+    final lower = normalized.toLowerCase();
+    if (normalized.startsWith('assets/')) return normalized;
+    if (lower.startsWith('http://') || lower.startsWith('https://')) {
+      return normalized;
+    }
+    final isAbsoluteWindowsPath = RegExp(r'^[a-zA-Z]:/').hasMatch(normalized);
+    if (isAbsoluteWindowsPath ||
+        normalized.startsWith('/') ||
+        normalized.startsWith('//')) {
+      return trimmed;
+    }
+    final relative = normalized.replaceFirst(RegExp(r'^/+'), '');
+    final strippedImagesPrefix = relative.startsWith('images/')
+        ? relative.substring('images/'.length)
+        : relative;
+    return '$_launcherContentAssetBaseUrl$strippedImagesPrefix';
+  }
+
+  ImageProvider<Object> _launcherContentImageProvider(
+    String source, {
+    required String fallbackAsset,
+  }) {
+    final resolved = _resolveLauncherContentImagePath(source);
+    if (resolved.isEmpty) return AssetImage(fallbackAsset);
+    final lower = resolved.toLowerCase();
+    if (lower.startsWith('http://') || lower.startsWith('https://')) {
+      return NetworkImage(resolved);
+    }
+    if (resolved.startsWith('assets/')) {
+      return AssetImage(resolved);
+    }
+    final file = File(resolved);
+    if (file.existsSync()) {
+      return FileImage(file);
+    }
+    return AssetImage(fallbackAsset);
+  }
+
+  IconData _launcherContentIcon(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'home':
+      case 'home_outlined':
+        return Icons.home_outlined;
+      case 'folder':
+      case 'folder_open_outlined':
+      case 'library':
+        return Icons.folder_open_outlined;
+      case 'cloud':
+      case 'cloud_outlined':
+      case 'backend':
+        return Icons.cloud_outlined;
+      case 'campaign':
+      case 'campaign_outlined':
+        return Icons.campaign_outlined;
+      case 'public':
+      case 'public_rounded':
+        return Icons.public_rounded;
+      case 'bolt':
+      case 'bolt_rounded':
+        return Icons.bolt_rounded;
+      case 'forum':
+      case 'forum_outlined':
+        return Icons.forum_outlined;
+      case 'image':
+      case 'image_outlined':
+        return Icons.image_outlined;
+      case 'sports_esports':
+      case 'sports_esports_rounded':
+        return Icons.sports_esports_rounded;
+      case 'newspaper':
+      case 'newspaper_rounded':
+        return Icons.newspaper_rounded;
+      case 'storefront':
+      case 'storefront_rounded':
+        return Icons.storefront_rounded;
+      case 'web':
+      case 'web_rounded':
+        return Icons.web_rounded;
+      default:
+        return Icons.layers_outlined;
+    }
   }
 
   Future<void> _checkForLauncherUpdates({required bool silent}) async {
@@ -10874,6 +11166,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _installState = LauncherInstallState.defaults();
         _tab = LauncherTab.home;
         _settingsReturnTab = LauncherTab.home;
+        _selectedContentTabId = null;
+        _settingsReturnContentTabId = null;
+        _launcherContent = LauncherContentConfig.defaults(
+          repositoryUrl: _atlasLinkRepository,
+          discordInviteUrl: _atlasLinkDiscordInvite,
+        );
         _settingsSection = SettingsSection.profile;
         _homeHeroIndex = 0;
         _showStartup = defaults.startupAnimationEnabled;
@@ -10916,6 +11214,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _installState = LauncherInstallState.defaults();
       _tab = LauncherTab.home;
       _settingsReturnTab = LauncherTab.home;
+      _selectedContentTabId = null;
+      _settingsReturnContentTabId = null;
+      _launcherContent = LauncherContentConfig.defaults(
+        repositoryUrl: _atlasLinkRepository,
+        discordInviteUrl: _atlasLinkDiscordInvite,
+      );
       _settingsSection = SettingsSection.profile;
       _homeHeroIndex = 0;
       _showStartup = defaults.startupAnimationEnabled;
@@ -11664,22 +11968,32 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ? 'Player'
         : _settings.username.trim();
     final left = switch (_tab) {
-      LauncherTab.home => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(width: 22),
-          CircleAvatar(radius: 24, backgroundImage: _profileImage()),
-          const SizedBox(width: 12),
-          Text(
-            '${_timeGreeting()}, $username!',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w700,
-              color: _onSurface(context, 0.95),
-            ),
-          ),
-        ],
-      ),
+      LauncherTab.home =>
+        _showHomeGreeting
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(width: 22),
+                  CircleAvatar(radius: 24, backgroundImage: _profileImage()),
+                  const SizedBox(width: 12),
+                  Text(
+                    '${_timeGreeting()}, $username!',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                      color: _onSurface(context, 0.95),
+                    ),
+                  ),
+                ],
+              )
+            : Text(
+                _activeLauncherContentPage.title,
+                style: TextStyle(
+                  fontSize: 52,
+                  fontWeight: FontWeight.w700,
+                  color: _onSurface(context, 0.95),
+                ),
+              ),
       LauncherTab.library => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -12451,75 +12765,122 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ? Colors.white.withValues(alpha: 0.14)
         : secondary.withValues(alpha: 0.18);
 
-    const navTabs = <LauncherTab>[
-      LauncherTab.home,
-      LauncherTab.library,
-      LauncherTab.backend,
-    ];
     const navTabGap = 4.0;
-    const navTabWidth = 74.0;
     const navTabRadius = 14.0;
-    final selectedTabIndex = navTabs.indexOf(_tab);
-
-    Widget navTabButton(LauncherTab tab) {
-      final selected = _tab == tab;
-      final label = switch (tab) {
-        LauncherTab.home => 'Home',
-        LauncherTab.library => 'Library',
-        LauncherTab.backend => 'Backend',
-        LauncherTab.general => 'Settings',
-      };
-      final icon = switch (tab) {
-        LauncherTab.home => Icons.home_outlined,
-        LauncherTab.library => Icons.folder_open_outlined,
-        LauncherTab.backend => Icons.cloud_outlined,
-        LauncherTab.general => Icons.bar_chart_rounded,
-      };
-      return _HoverScale(
-        scale: 1.04,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(navTabRadius),
-          overlayColor: transparentOverlay,
-          splashFactory: NoSplash.splashFactory,
-          splashColor: Colors.transparent,
-          highlightColor: Colors.transparent,
-          hoverColor: Colors.transparent,
-          focusColor: Colors.transparent,
-          onTap: () => unawaited(_switchMenu(tab)),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-            constraints: const BoxConstraints.tightFor(width: navTabWidth),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(navTabRadius),
-              color: selected ? selectedBackground : Colors.transparent,
-              gradient: selected
-                  ? LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [selectedGradientTop, selectedGradientBottom],
-                    )
-                  : null,
+    final navItems =
+        <
+          ({
+            String key,
+            String label,
+            IconData icon,
+            bool selected,
+            VoidCallback onTap,
+          })
+        >[
+          (
+            key: 'home',
+            label: _launcherContent.homeTab.label,
+            icon: _launcherContentIcon(_launcherContent.homeTab.icon),
+            selected:
+                _tab == LauncherTab.home &&
+                (_selectedContentTabId == null ||
+                    _selectedContentTabId!.isEmpty),
+            onTap: () => unawaited(_switchMenu(LauncherTab.home)),
+          ),
+          for (final contentTab in _launcherContent.tabs)
+            (
+              key: 'content-${contentTab.id}',
+              label: contentTab.label,
+              icon: _launcherContentIcon(contentTab.icon),
+              selected:
+                  _tab == LauncherTab.home &&
+                  _selectedContentTabId == contentTab.id,
+              onTap: () => unawaited(
+                _switchMenu(LauncherTab.home, contentTabId: contentTab.id),
+              ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  size: 19,
-                  color: _onSurface(context, selected ? 1 : 0.70),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    color: _onSurface(context, selected ? 1 : 0.75),
+          (
+            key: 'library',
+            label: 'Library',
+            icon: Icons.folder_open_outlined,
+            selected: _tab == LauncherTab.library,
+            onTap: () => unawaited(_switchMenu(LauncherTab.library)),
+          ),
+          (
+            key: 'backend',
+            label: 'Backend',
+            icon: Icons.cloud_outlined,
+            selected: _tab == LauncherTab.backend,
+            onTap: () => unawaited(_switchMenu(LauncherTab.backend)),
+          ),
+        ];
+    final selectedTabIndex = navItems.indexWhere((item) => item.selected);
+    final computedTabWidth =
+        (620.0 - ((navItems.length - 1) * navTabGap)) / max(navItems.length, 1);
+    final navTabWidth = computedTabWidth.clamp(58.0, 74.0).toDouble();
+
+    Widget navTabButton(
+      ({
+        String key,
+        String label,
+        IconData icon,
+        bool selected,
+        VoidCallback onTap,
+      })
+      item,
+    ) {
+      return Tooltip(
+        message: item.label,
+        child: _HoverScale(
+          scale: 1.04,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(navTabRadius),
+            overlayColor: transparentOverlay,
+            splashFactory: NoSplash.splashFactory,
+            splashColor: Colors.transparent,
+            highlightColor: Colors.transparent,
+            hoverColor: Colors.transparent,
+            focusColor: Colors.transparent,
+            onTap: item.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              constraints: BoxConstraints.tightFor(width: navTabWidth),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(navTabRadius),
+                color: item.selected ? selectedBackground : Colors.transparent,
+                gradient: item.selected
+                    ? LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [selectedGradientTop, selectedGradientBottom],
+                      )
+                    : null,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    item.icon,
+                    size: 19,
+                    color: _onSurface(context, item.selected ? 1 : 0.70),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 2),
+                  Text(
+                    item.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: item.selected
+                          ? FontWeight.w700
+                          : FontWeight.w500,
+                      color: _onSurface(context, item.selected ? 1 : 0.75),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -12556,11 +12917,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            navTabButton(navTabs[0]),
-            const SizedBox(width: navTabGap),
-            navTabButton(navTabs[1]),
-            const SizedBox(width: navTabGap),
-            navTabButton(navTabs[2]),
+            for (var i = 0; i < navItems.length; i++) ...[
+              if (i > 0) const SizedBox(width: navTabGap),
+              navTabButton(navItems[i]),
+            ],
           ],
         ),
       ],
@@ -12679,6 +13039,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (_showOnboardingDiscordPresence) {
       return 'Welcome to ATLAS!';
     }
+    if (_tab == LauncherTab.home &&
+        _selectedContentTabId != null &&
+        _selectedContentTabId!.isNotEmpty) {
+      return 'Browsing ${_activeLauncherContentPage.label}';
+    }
     return switch (_tab) {
       LauncherTab.home => 'Browsing Homepage',
       LauncherTab.library => 'Browsing Library',
@@ -12741,20 +13106,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _switchMenu(
     LauncherTab tab, {
     SettingsSection? settingsSection,
+    String? contentTabId,
   }) async {
     if (!mounted) return;
     if (_tab == tab &&
+        (tab != LauncherTab.home || _selectedContentTabId == contentTabId) &&
         (settingsSection == null || _settingsSection == settingsSection)) {
       return;
     }
     final previousTab = _tab;
+    final previousContentTabId = _selectedContentTabId;
+    final normalizedContentTabId = (contentTabId ?? '').trim();
     setState(() {
       if (tab == LauncherTab.general && previousTab != LauncherTab.general) {
         _settingsReturnTab = previousTab;
+        _settingsReturnContentTabId = previousContentTabId;
       }
       _tab = tab;
+      if (tab == LauncherTab.home) {
+        _selectedContentTabId = normalizedContentTabId.isEmpty
+            ? null
+            : normalizedContentTabId;
+      }
       if (settingsSection != null) _settingsSection = settingsSection;
     });
+    if (tab == LauncherTab.home || previousTab == LauncherTab.home) {
+      _startHomeHeroAutoRotate();
+    }
     if (tab == LauncherTab.general) {
       unawaited(
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
@@ -12765,134 +13143,300 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Widget _homeTab() {
-    final featured = _homeFeaturedCards;
-    final hero = featured[_homeHeroIndex % featured.length];
+    final page = _activeLauncherContentPage;
+    final featured = page.slides;
+    final hasHero = featured.isNotEmpty;
+    final heroIndex = hasHero ? _homeHeroIndex % featured.length : 0;
+    final hero = hasHero ? featured[heroIndex] : null;
+    final menuKey = 'content-${page.id}';
 
     return ListView(
       children: [
         _menuItemEntrance(
-          menuKey: LauncherTab.home,
+          menuKey: menuKey,
           index: 0,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: Stack(
-              children: [
-                AspectRatio(
-                  aspectRatio: 2.35,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 360),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    child: Container(
-                      key: ValueKey<String>(hero.image),
-                      color: Colors.black,
-                      child: Image.asset(
-                        hero.image,
-                        fit: hero.imageFit,
-                        width: double.infinity,
-                        height: double.infinity,
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                        colors: [
-                          Colors.black.withValues(alpha: 0.56),
-                          Colors.black.withValues(alpha: 0.18),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 30,
-                  right: 30,
-                  bottom: 28,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        hero.title,
-                        style: const TextStyle(
-                          fontSize: 49,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white,
+          child: hasHero && hero != null
+              ? _homeHeroBanner(
+                  page: page,
+                  hero: hero,
+                  heroIndex: heroIndex,
+                  heroCount: featured.length,
+                )
+              : _glass(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _launcherContentIcon(page.icon),
+                          size: 28,
+                          color: _onSurface(context, 0.86),
                         ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        hero.category,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.86),
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.6,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        hero.description,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.88),
-                          fontSize: 15,
-                          height: 1.35,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      FilledButton.icon(
-                        onPressed: () => _openUrl(hero.buttonUrl),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Theme.of(
-                            context,
-                          ).colorScheme.secondary.withValues(alpha: 0.92),
-                          foregroundColor: Colors.white,
-                          shape: const StadiumBorder(),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 13,
-                          ),
-                        ),
-                        icon: const Icon(Icons.play_arrow_rounded),
-                        label: Text(hero.buttonLabel),
-                      ),
-                    ],
-                  ),
-                ),
-                Positioned(
-                  bottom: 18,
-                  left: 0,
-                  right: 0,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(featured.length, (index) {
-                      final active = index == _homeHeroIndex;
-                      return GestureDetector(
-                        onTap: () => _setHomeHeroIndex(index),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 160),
-                          margin: const EdgeInsets.symmetric(horizontal: 4),
-                          width: active ? 36 : 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(99),
-                            color: Colors.white.withValues(
-                              alpha: active ? 0.95 : 0.45,
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            'No content is configured for this tab yet.',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: _onSurface(context, 0.88),
                             ),
                           ),
                         ),
-                      );
-                    }),
+                      ],
+                    ),
                   ),
                 ),
+        ),
+        if (page.cards.isNotEmpty) ...[
+          const SizedBox(height: 24),
+          _menuItemEntrance(
+            menuKey: menuKey,
+            index: 1,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const spacing = 18.0;
+                final compact = constraints.maxWidth < 920;
+                final cardWidth = compact
+                    ? constraints.maxWidth
+                    : ((constraints.maxWidth - spacing) / 2).clamp(
+                        280.0,
+                        constraints.maxWidth,
+                      );
+                return Wrap(
+                  spacing: spacing,
+                  runSpacing: spacing,
+                  children: [
+                    for (final card in page.cards)
+                      SizedBox(
+                        width: cardWidth,
+                        child: _launcherContentCard(card),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _homeHeroBanner({
+    required LauncherContentPage page,
+    required LauncherContentSlide hero,
+    required int heroIndex,
+    required int heroCount,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Stack(
+        children: [
+          AspectRatio(
+            aspectRatio: 2.35,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 360),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: Container(
+                key: ValueKey<String>('${page.id}:${hero.image}'),
+                color: Colors.black,
+                child: Image(
+                  image: _launcherContentImageProvider(
+                    hero.image,
+                    fallbackAsset: 'assets/images/hero_banner.png',
+                  ),
+                  fit: hero.imageFit,
+                  width: double.infinity,
+                  height: double.infinity,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Image.asset(
+                      'assets/images/hero_banner.png',
+                      fit: hero.imageFit,
+                      width: double.infinity,
+                      height: double.infinity,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.56),
+                    Colors.black.withValues(alpha: 0.18),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 30,
+            right: 30,
+            bottom: 28,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  hero.title,
+                  style: const TextStyle(
+                    fontSize: 49,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
+                if (hero.category.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    hero.category,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.86),
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ],
+                if (hero.description.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    hero.description,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.88),
+                      fontSize: 15,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+                if (hero.hasButton) ...[
+                  const SizedBox(height: 14),
+                  FilledButton.icon(
+                    onPressed: () => _openUrl(hero.buttonUrl),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Theme.of(
+                        context,
+                      ).colorScheme.secondary.withValues(alpha: 0.92),
+                      foregroundColor: Colors.white,
+                      shape: const StadiumBorder(),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 13,
+                      ),
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: Text(hero.buttonLabel),
+                  ),
+                ],
               ],
             ),
           ),
+          if (heroCount > 1)
+            Positioned(
+              bottom: 18,
+              left: 0,
+              right: 0,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(heroCount, (index) {
+                  final active = index == heroIndex;
+                  return GestureDetector(
+                    onTap: () => _setHomeHeroIndex(index),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                      width: active ? 36 : 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(99),
+                        color: Colors.white.withValues(
+                          alpha: active ? 0.95 : 0.45,
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _launcherContentCard(LauncherContentCard card) {
+    return _glass(
+      radius: 24,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (card.hasImage) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Image(
+                    image: _launcherContentImageProvider(
+                      card.image,
+                      fallbackAsset: 'assets/images/hero_banner.png',
+                    ),
+                    fit: card.imageFit,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Image.asset(
+                        'assets/images/hero_banner.png',
+                        fit: card.imageFit,
+                      );
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            if (card.category.isNotEmpty) ...[
+              Text(
+                card.category,
+                style: TextStyle(
+                  color: _onSurface(context, 0.66),
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              card.title,
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+                color: _onSurface(context, 0.96),
+              ),
+            ),
+            if (card.description.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                card.description,
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.4,
+                  color: _onSurface(context, 0.78),
+                ),
+              ),
+            ],
+            if (card.hasButton) ...[
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () => _openUrl(card.buttonUrl),
+                icon: const Icon(Icons.open_in_new_rounded),
+                label: Text(card.buttonLabel),
+              ),
+            ],
+          ],
         ),
-      ],
+      ),
     );
   }
 
@@ -17441,7 +17985,14 @@ foreach ($app in $appPaths) {
             const SizedBox(height: 12),
             if (!compact)
               OutlinedButton.icon(
-                onPressed: () => unawaited(_switchMenu(_settingsReturnTab)),
+                onPressed: () => unawaited(
+                  _switchMenu(
+                    _settingsReturnTab,
+                    contentTabId: _settingsReturnTab == LauncherTab.home
+                        ? _settingsReturnContentTabId
+                        : null,
+                  ),
+                ),
                 icon: const Icon(Icons.logout_rounded),
                 label: const Text('Back'),
               ),
@@ -18619,26 +19170,6 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       ),
     );
   }
-}
-
-class _EventCardData {
-  const _EventCardData({
-    required this.image,
-    required this.category,
-    required this.title,
-    required this.description,
-    required this.buttonLabel,
-    required this.buttonUrl,
-    this.imageFit = BoxFit.contain,
-  });
-
-  final String image;
-  final String category;
-  final String title;
-  final String description;
-  final String buttonLabel;
-  final String buttonUrl;
-  final BoxFit imageFit;
 }
 
 class _BuildImportRequest {

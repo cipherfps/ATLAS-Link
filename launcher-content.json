@@ -1,0 +1,31 @@
+{
+  "homeTab": {
+    "label": "Home",
+    "icon": "home_outlined",
+    "title": "Home",
+    "greetingEnabled": true,
+    "heroRotationSeconds": 5,
+    "slides": [
+      {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/hero_banner.png",
+        "imageFit": "contain",
+        "category": "SPOTLIGHT SUBMISSION",
+        "title": "ATLAS Tutorial",
+        "description": "Watch this YouTube tutorial to learn how to use ATLAS, made by Nova (@someth9ng)!",
+        "buttonLabel": "Watch Video",
+        "buttonUrl": "https://www.youtube.com/watch?v=uPYFMgo6RJw"
+      },
+      {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",
+        "imageFit": "cover",
+        "category": "COMMUNITY",
+        "title": "ATLAS Discord",
+        "description": "Join the ATLAS discord for more resources, news and updates!",
+        "buttonLabel": "Join ATLAS Discord",
+        "buttonUrl": "https://discord.gg/GqgakxU6bm"
+      }
+    ],
+    "cards": []
+  },
+  "tabs": []
+}
