@@ -1,4 +1,4 @@
-<!-- version: 1.1.5 -->
+<!-- version: 1.1.4 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -14,7 +14,9 @@ Markdown Quick Key
 
 ---
 
+# Improvements
+- Added Spotlight Submissions. Submit your clips in the [ATLAS Discord](https://discord.gg/GqgakxU6bm) to be featured!
 # Fixes
-- Fixed Email/Password not allowing a local connection on the backend tab
+- Fixed bugs related to spotlights
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

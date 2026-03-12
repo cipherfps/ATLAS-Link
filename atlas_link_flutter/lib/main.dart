@@ -505,8 +505,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.5';
-  static const String _launcherBuildLabel = 'Stable 1.1.5';
+  static const String _launcherVersion = '1.1.6';
+  static const String _launcherBuildLabel = 'Stable 1.1.6';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -734,6 +734,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
   Future<_LauncherContentRefreshOutcome>? _launcherContentRefreshInFlight;
+  Future<void>? _launcherContentWarmupInFlight;
+  String? _launcherContentWarmupSignature;
 
   _UiStatus? _gameUiStatus;
   _UiStatus? _gameServerUiStatus;
@@ -3104,6 +3106,66 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
     _startHomeHeroAutoRotate();
     _syncLauncherDiscordPresence();
+    _queueLauncherContentImageWarmup();
+  }
+
+  void _queueLauncherContentImageWarmup() {
+    if (!mounted) return;
+
+    final sources = <String>{};
+
+    void collectPage(LauncherContentPage page) {
+      for (final slide in page.slides) {
+        final resolved = _resolveLauncherContentImagePath(slide.image);
+        if (resolved.isNotEmpty) sources.add(resolved);
+      }
+      for (final card in page.cards) {
+        final resolved = _resolveLauncherContentImagePath(card.image);
+        if (resolved.isNotEmpty) sources.add(resolved);
+      }
+    }
+
+    collectPage(_launcherContent.homeTab);
+    for (final page in _launcherContent.tabs) {
+      collectPage(page);
+    }
+
+    final signature = sources.join('|');
+    if (signature.isEmpty) return;
+    if (_launcherContentWarmupSignature == signature) {
+      if (_launcherContentWarmupInFlight != null) return;
+      return;
+    }
+
+    _launcherContentWarmupSignature = signature;
+    final future = () async {
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      if (!mounted) return;
+      for (final source in sources.take(10)) {
+        if (!mounted) return;
+        try {
+          await precacheImage(
+            _launcherContentImageProvider(
+              source,
+              fallbackAsset: 'assets/images/hero_banner.png',
+            ),
+            context,
+          );
+        } catch (_) {
+          // Ignore bad launcher content images.
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 8));
+      }
+    }();
+
+    _launcherContentWarmupInFlight = future;
+    unawaited(
+      future.whenComplete(() {
+        if (identical(_launcherContentWarmupInFlight, future)) {
+          _launcherContentWarmupInFlight = null;
+        }
+      }),
+    );
   }
 
   Future<_LauncherContentRefreshOutcome> _refreshLauncherContentFromGitHub({
@@ -3195,7 +3257,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw 'HTTP ${response.statusCode}';
       }
-      return response.transform(utf8.decoder).join();
+      final body = await response.transform(utf8.decoder).join();
+      return body;
     } finally {
       client.close(force: true);
     }
@@ -13228,6 +13291,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     required int heroIndex,
     required int heroCount,
   }) {
+    final heroImage = _launcherContentImageProvider(
+      hero.image,
+      fallbackAsset: 'assets/images/hero_banner.png',
+    );
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: Stack(
@@ -13241,22 +13309,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               child: Container(
                 key: ValueKey<String>('${page.id}:${hero.image}'),
                 color: Colors.black,
-                child: Image(
-                  image: _launcherContentImageProvider(
-                    hero.image,
-                    fallbackAsset: 'assets/images/hero_banner.png',
-                  ),
-                  fit: hero.imageFit,
-                  width: double.infinity,
-                  height: double.infinity,
-                  errorBuilder: (context, error, stackTrace) {
-                    return Image.asset(
-                      'assets/images/hero_banner.png',
-                      fit: hero.imageFit,
-                      width: double.infinity,
-                      height: double.infinity,
-                    );
-                  },
+                child: _launcherContentHeroImage(
+                  imageProvider: heroImage,
+                  fallbackAsset: 'assets/images/hero_banner.png',
                 ),
               ),
             ),
@@ -13366,6 +13421,71 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
+  Widget _launcherContentHeroImage({
+    required ImageProvider<Object> imageProvider,
+    required String fallbackAsset,
+  }) {
+    return _launcherContentImage(
+      imageProvider: imageProvider,
+      fallbackAsset: fallbackAsset,
+    );
+  }
+
+  Widget _launcherContentImage({
+    required ImageProvider<Object> imageProvider,
+    required String fallbackAsset,
+  }) {
+    Widget fallback() {
+      return Image.asset(
+        fallbackAsset,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+      );
+    }
+
+    Widget placeholder() {
+      final scheme = Theme.of(context).colorScheme;
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              scheme.surfaceContainerHighest.withValues(alpha: 0.92),
+              scheme.primary.withValues(alpha: 0.26),
+              scheme.secondary.withValues(alpha: 0.18),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        placeholder(),
+        Image(
+          image: imageProvider,
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          gaplessPlayback: true,
+          frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+            final visible = wasSynchronouslyLoaded || frame != null;
+            return AnimatedOpacity(
+              opacity: visible ? 1 : 0,
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeOutCubic,
+              child: child,
+            );
+          },
+          errorBuilder: (context, error, stackTrace) => fallback(),
+        ),
+      ],
+    );
+  }
+
   Widget _launcherContentCard(LauncherContentCard card) {
     return _glass(
       radius: 24,
@@ -13379,18 +13499,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 borderRadius: BorderRadius.circular(18),
                 child: AspectRatio(
                   aspectRatio: 16 / 9,
-                  child: Image(
-                    image: _launcherContentImageProvider(
-                      card.image,
-                      fallbackAsset: 'assets/images/hero_banner.png',
+                  child: _launcherContentImage(
+                    imageProvider: ResizeImage(
+                      _launcherContentImageProvider(
+                        card.image,
+                        fallbackAsset: 'assets/images/hero_banner.png',
+                      ),
+                      width: 1200,
                     ),
-                    fit: card.imageFit,
-                    errorBuilder: (context, error, stackTrace) {
-                      return Image.asset(
-                        'assets/images/hero_banner.png',
-                        fit: card.imageFit,
-                      );
-                    },
+                    fallbackAsset: 'assets/images/hero_banner.png',
                   ),
                 ),
               ),
