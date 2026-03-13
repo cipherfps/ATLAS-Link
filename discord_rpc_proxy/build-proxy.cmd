@@ -22,7 +22,7 @@ if errorlevel 1 (
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%"
 
-cl /nologo /std:c++17 /O2 /MT /EHsc /LD /D"ATLAS_LAUNCHER_VERSION=\"%LAUNCHER_VERSION%\"" "%SOURCE_FILE%" /link /DEF:"%DEF_FILE%" /OUT:"%OUTPUT_DLL%"
+cl /nologo /std:c++17 /O2 /MT /EHsc /LD /D"ATLAS_LAUNCHER_VERSION=\"%LAUNCHER_VERSION%\"" "%SOURCE_FILE%" /link /DEF:"%DEF_FILE%" /OUT:"%OUTPUT_DLL%" /MACHINE:X64
 if errorlevel 1 (
   popd
   exit /b 1

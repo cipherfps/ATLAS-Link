@@ -505,8 +505,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.6';
-  static const String _launcherBuildLabel = 'Stable 1.1.6';
+  static const String _launcherVersion = '1.1.7';
+  static const String _launcherBuildLabel = 'Stable 1.1.7';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -936,77 +936,8 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _log(
       'settings',
-      'Launcher updated ($fromVersion -> $toVersion). Performing full reinstall reset (preserving library + profile + appearance + saved backend settings).',
+      'Launcher updated ($fromVersion -> $toVersion). Preserving settings, DLL paths, and library state.',
     );
-
-    final preservedVersions = List<VersionEntry>.from(_settings.versions);
-    var preservedSelectedVersionId = _settings.selectedVersionId;
-    if (preservedSelectedVersionId.trim().isNotEmpty &&
-        !preservedVersions.any(
-          (entry) => entry.id == preservedSelectedVersionId,
-        )) {
-      preservedSelectedVersionId = preservedVersions.isNotEmpty
-          ? preservedVersions.first.id
-          : '';
-    }
-    if (preservedSelectedVersionId.trim().isEmpty &&
-        preservedVersions.isNotEmpty) {
-      preservedSelectedVersionId = preservedVersions.first.id;
-    }
-
-    var preservedUsername = _settings.username.trim();
-    if (preservedUsername.isEmpty) preservedUsername = 'Player';
-    final preservedProfileUseEmailPasswordAuth =
-        _settings.profileUseEmailPasswordAuth;
-    final preservedProfileAuthEmail = _settings.profileAuthEmail.trim();
-    final preservedProfileAuthPassword = _settings.profileAuthPassword;
-    final preservedProfileAuthQuickTipComplete =
-        _settings.profileAuthQuickTipComplete;
-
-    var preservedAvatarPath = _settings.profileAvatarPath.trim();
-    if (preservedAvatarPath.isNotEmpty) {
-      try {
-        if (!File(preservedAvatarPath).existsSync()) {
-          preservedAvatarPath = '';
-        }
-      } catch (_) {
-        preservedAvatarPath = '';
-      }
-    }
-
-    final preservedSavedBackendsByProfile = <String, List<SavedBackend>>{};
-    for (final entry in _settings.savedBackendsByProfile.entries) {
-      final normalizedKey = LauncherSettings.profileBackendsKey(entry.key);
-      preservedSavedBackendsByProfile[normalizedKey] = List<SavedBackend>.from(
-        entry.value,
-      );
-    }
-    final preservedProfileSavedBackendsKey =
-        LauncherSettings.profileBackendsKey(preservedUsername);
-    final preservedSavedBackends = List<SavedBackend>.from(
-      preservedSavedBackendsByProfile[preservedProfileSavedBackendsKey] ??
-          _settings.savedBackends,
-    );
-    preservedSavedBackendsByProfile[preservedProfileSavedBackendsKey] =
-        List<SavedBackend>.from(preservedSavedBackends);
-
-    final preservedDarkModeEnabled = _settings.darkModeEnabled;
-    final preservedPopupBackgroundBlurEnabled =
-        _settings.popupBackgroundBlurEnabled;
-    final preservedBackgroundImagePath = _settings.backgroundImagePath.trim();
-    final preservedBackgroundBlur = _settings.backgroundBlur;
-    final preservedBackgroundParticlesOpacity =
-        _settings.backgroundParticlesOpacity;
-    final preservedStartupAnimationEnabled = _settings.startupAnimationEnabled;
-    final preservedLibraryActionsNudgeComplete =
-        _settings.libraryActionsNudgeComplete ||
-        _installState.libraryActionsNudgeComplete;
-    final preservedBackendConnectionTipComplete =
-        _settings.backendConnectionTipComplete ||
-        _installState.backendConnectionTipComplete;
-
-    final preservedProfileSetupComplete =
-        _settings.profileSetupComplete || _installState.profileSetupComplete;
 
     Future<void> deleteDir(Directory dir) async {
       try {
@@ -1016,81 +947,33 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
-    // Stop background log flushes before truncating/clearing the log file.
-    _logFlushTimer?.cancel();
-    _logFlushTimer = null;
-    _flushLogBuffer();
-    try {
-      await _logWriteChain;
-    } catch (_) {
-      // Ignore pending log write failures.
-    }
-
+    // Keep launcher settings and DLL state intact across version bumps. Only
+    // clear stale installer cache folders that are safe to recreate.
     await deleteDir(Directory(_joinPath([_dataDir.path, 'backend-installer'])));
     await deleteDir(
       Directory(_joinPath([_dataDir.path, 'launcher-installer'])),
     );
-    await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
 
-    // Clear logs on update-reinstall. Keep the file itself so logging stays ready.
-    try {
-      if (await _logFile.exists()) {
-        await _logFile.writeAsString('', flush: true);
-      }
-    } catch (_) {
-      // Ignore log truncation failures.
-    }
-    _logs.clear();
-    _logWriteBuffer.clear();
-
-    final defaults = LauncherSettings.defaults();
-    final nextSettings = defaults.copyWith(
-      username: preservedUsername,
-      profileUseEmailPasswordAuth: preservedProfileUseEmailPasswordAuth,
-      profileAuthEmail: preservedProfileAuthEmail,
-      profileAuthPassword: preservedProfileAuthPassword,
-      profileAuthQuickTipComplete: preservedProfileAuthQuickTipComplete,
-      profileAvatarPath: preservedAvatarPath,
-      profileSetupComplete: preservedProfileSetupComplete,
-      libraryActionsNudgeComplete: preservedLibraryActionsNudgeComplete,
-      darkModeEnabled: preservedDarkModeEnabled,
-      popupBackgroundBlurEnabled: preservedPopupBackgroundBlurEnabled,
-      backgroundImagePath: preservedBackgroundImagePath,
-      backgroundBlur: preservedBackgroundBlur,
-      backgroundParticlesOpacity: preservedBackgroundParticlesOpacity,
-      startupAnimationEnabled: preservedStartupAnimationEnabled,
-      backendConnectionTipComplete: preservedBackendConnectionTipComplete,
-      savedBackends: preservedSavedBackends,
-      savedBackendsByProfile: preservedSavedBackendsByProfile,
-      versions: preservedVersions,
-      selectedVersionId: preservedSelectedVersionId,
-    );
-    final nextInstallState = LauncherInstallState.defaults().copyWith(
-      profileSetupComplete: preservedProfileSetupComplete,
-      libraryActionsNudgeComplete: preservedLibraryActionsNudgeComplete,
-      backendConnectionTipComplete: preservedBackendConnectionTipComplete,
-      lastSeenLauncherVersion: toVersion,
-    );
-
-    _settings = nextSettings;
-    _installState = nextInstallState;
-    _syncControllers();
+    _installState = _installState.copyWith(lastSeenLauncherVersion: toVersion);
 
     try {
       await _saveSettings(toast: false, applyControllers: false);
     } catch (error) {
-      _log('settings', 'Failed to save post-update settings: $error');
+      _log('settings', 'Failed to persist settings during update migration: $error');
     }
 
     try {
       await _saveInstallState();
     } catch (error) {
-      _log('settings', 'Failed to save post-update install state: $error');
+      _log(
+        'settings',
+        'Failed to persist install state during update migration: $error',
+      );
     }
 
     _log(
       'settings',
-      'Post-update reinstall reset completed (library + profile + appearance + saved backend settings preserved).',
+      'Post-update migration completed (settings + DLL state preserved).',
     );
   }
 
@@ -8486,6 +8369,35 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
+  String? _windowsDllLoadValidationError(String path) {
+    final normalizedPath = path.trim();
+    if (normalizedPath.isEmpty) {
+      return 'Path is empty.';
+    }
+    final file = File(normalizedPath);
+    if (!file.existsSync()) {
+      return 'File does not exist.';
+    }
+    if (!Platform.isWindows) return null;
+
+    final nativePath = normalizedPath.toNativeUtf16();
+    try {
+      final moduleHandle = LoadLibraryEx(
+        nativePath,
+        0,
+        DONT_RESOLVE_DLL_REFERENCES,
+      );
+      if (moduleHandle == 0) {
+        final error = GetLastError();
+        return 'LoadLibraryEx failed with Windows error $error.';
+      }
+      FreeLibrary(moduleHandle);
+      return null;
+    } finally {
+      calloc.free(nativePath);
+    }
+  }
+
   Directory _discordRpcTargetDirectoryForBuildRoot(String buildRoot) {
     return Directory(
       _joinPath([buildRoot, ..._discordRpcTargetRelativeDirectory]),
@@ -8519,6 +8431,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     final sourceFile = File(resolvedSourcePath);
+    final sourceValidationError = _windowsDllLoadValidationError(
+      resolvedSourcePath,
+    );
+    if (sourceValidationError != null) {
+      _log(
+        'discord',
+        'Skipping Discord RPC replacement. Bundled override is invalid: $sourceValidationError Path: $resolvedSourcePath',
+      );
+      return;
+    }
     final targetDirectory = _discordRpcTargetDirectoryForBuildRoot(buildRoot);
     final targetPath = _joinPath([targetDirectory.path, _discordRpcDllName]);
     final originalPath = _joinPath([
