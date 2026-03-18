@@ -16,15 +16,6 @@
         "buttonUrl": "https://www.youtube.com/watch?v=uPYFMgo6RJw"
       },
       {
-        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/ChillRiley.jpg",
-        "imageFit": "cover",
-        "category": "SPOTLIGHT SUBMISSION",
-        "title": "Featured Video",
-        "description": "help urself (Submitted by @chillriley)",
-        "buttonLabel": "Watch Video",
-        "buttonUrl": "https://www.youtube.com/watch?v=dZh7h0wCcxU"
-      },
-      {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",
         "imageFit": "cover",
         "category": "COMMUNITY",
