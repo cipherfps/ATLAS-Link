@@ -314,7 +314,7 @@ class _SmoothScrollPhysics extends ScrollPhysics {
   }
 }
 
-enum LauncherTab { home, library, backend, general }
+enum LauncherTab { home, library, stats, backend, general }
 
 enum SettingsSection { profile, appearance, dataManagement, support }
 
@@ -362,6 +362,20 @@ class _FortniteProcessState {
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
   bool gameServerInjectionScheduled = false;
+  bool sawContinueLoggingIn = false;
+  bool sawAnyCompletedLoginLine = false;
+  bool sawEnglishCompletedLoginLine = false;
+  bool sawLoginUiStateTransition = false;
+  bool sawUpdateSuccess = false;
+  bool sawUpdateSuccessNoChange = false;
+  bool sawUpdateResult1 = false;
+  bool sawUpdateResult2 = false;
+  bool sawLoginToSubgameSelect = false;
+  bool sawSubgameSelectToFrontEnd = false;
+  bool sawClientLoadingMarker = false;
+  bool sawPotentialLocalizedLoginCompletion = false;
+  bool sawPotentialGarbledLoginCompletion = false;
+  bool loggedPotentialLoginMarkerMismatch = false;
 
   void killAuxiliary() {
     final launcher = launcherPid;
@@ -505,8 +519,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.7';
-  static const String _launcherBuildLabel = 'Stable 1.1.7';
+  static const String _launcherVersion = '1.1.8';
+  static const String _launcherBuildLabel = 'Stable 1.1.8';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -529,6 +543,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
   static const Duration _maxLaunchTokenAge = Duration(days: 30);
   static const Duration _maxLaunchTokenClockSkew = Duration(minutes: 10);
+  static const Duration _playtimeCheckpointInterval = Duration(seconds: 15);
   // Reduced post-login delay for faster injection start on low-end PCs
   static const int _postLoginInjectionDelayMs = 300;
   // Reduced UI status delay for snappier feedback
@@ -644,6 +659,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _backendHostController = TextEditingController();
   final _backendPortController = TextEditingController();
   final _librarySearchController = TextEditingController();
+  final _statsSearchController = TextEditingController();
   final _savedBackendSearchController = TextEditingController();
   final ScrollController _libraryScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
@@ -708,6 +724,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   BackendConnectionType? _backendQuickTipOriginalType;
   String? _backendQuickTipOriginalHost;
   String _versionSearchQuery = '';
+  String _statsSearchQuery = '';
   String _savedBackendSearchQuery = '';
 
   Process? _gameProcess;
@@ -727,9 +744,12 @@ class _LauncherScreenState extends State<LauncherScreen>
   final List<_FortniteProcessState> _extraGameInstances =
       <_FortniteProcessState>[];
   _FortniteProcessState? _gameServerInstance;
+  DateTime? _atlasPlaySessionStartedAt;
+  final Map<String, DateTime> _activeVersionPlaySessions = <String, DateTime>{};
   Timer? _homeHeroTimer;
   Timer? _pollTimer;
   Timer? _gameServerCrashStatusClearTimer;
+  Timer? _playtimeCheckpointTimer;
   bool _runtimePollingStarted = false;
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
@@ -774,6 +794,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _installStateFile;
   late File _launcherContentCacheFile;
   late File _logFile;
+  bool _storageReady = false;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
 
@@ -810,6 +831,9 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   @override
   void dispose() {
+    _checkpointActivePlaytime(syncSave: true);
+    _playtimeCheckpointTimer?.cancel();
+    _playtimeCheckpointTimer = null;
     _homeHeroTimer?.cancel();
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
@@ -827,6 +851,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _backendHostController.dispose();
     _backendPortController.dispose();
     _librarySearchController.dispose();
+    _statsSearchController.dispose();
     _savedBackendSearchController.dispose();
     _libraryScrollController.dispose();
     _unrealEnginePatcherController.dispose();
@@ -902,6 +927,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         setState(() {});
       }
       _log('launcher', 'ATLAS Link initialized.');
+      _log(
+        'launcher',
+        'Environment: os=${Platform.operatingSystem}, locale=${Platform.localeName}.',
+      );
 
       unawaited(_cleanupAtlasBackendInstallerIfBackendDetected());
       if (!_showStartup) {
@@ -959,7 +988,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     try {
       await _saveSettings(toast: false, applyControllers: false);
     } catch (error) {
-      _log('settings', 'Failed to persist settings during update migration: $error');
+      _log(
+        'settings',
+        'Failed to persist settings during update migration: $error',
+      );
     }
 
     try {
@@ -1795,8 +1827,14 @@ class _LauncherScreenState extends State<LauncherScreen>
                                     onPressed: submitted
                                         ? null
                                         : () => submitDialog(setDialogState),
-                                    icon: const Icon(Icons.check_rounded),
-                                    label: const Text('Continue'),
+                                    icon: const Icon(
+                                      Icons.check_rounded,
+                                      color: Colors.white,
+                                    ),
+                                    label: const Text(
+                                      'Continue',
+                                      style: TextStyle(color: Colors.white),
+                                    ),
                                     style: FilledButton.styleFrom(
                                       padding: const EdgeInsets.symmetric(
                                         horizontal: 18,
@@ -1929,6 +1967,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
     _logFileReady = true;
+    _storageReady = true;
   }
 
   Future<void> _migrateLegacyDataDirIfNeeded({
@@ -2807,6 +2846,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       } else {
         _settings = LauncherSettings.defaults();
       }
+      _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
       await _migrateAppearanceSettingsFileIfNeeded();
     } catch (error) {
       _settings = LauncherSettings.defaults();
@@ -3199,15 +3239,33 @@ class _LauncherScreenState extends State<LauncherScreen>
     bool applyControllers = true,
   }) async {
     if (applyControllers) _applyControllers();
-    _syncSavedBackendsForActiveProfile();
-    final pretty = const JsonEncoder.withIndent(
-      '  ',
-    ).convert(_settings.toJson());
-    await _settingsFile.writeAsString(pretty, flush: true);
+    await _saveSettingsSnapshot();
     _log('settings', 'Settings saved.');
     if (!mounted) return;
     setState(() {});
     if (toast) _toast('Settings saved');
+  }
+
+  String _buildSettingsSnapshotJson() {
+    _syncSavedBackendsForActiveProfile();
+    _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
+    return const JsonEncoder.withIndent('  ').convert(_settings.toJson());
+  }
+
+  Future<void> _saveSettingsSnapshot() async {
+    if (!_storageReady) return;
+    final pretty = _buildSettingsSnapshotJson();
+    await _settingsFile.writeAsString(pretty, flush: true);
+  }
+
+  void _saveSettingsSnapshotSync() {
+    if (!_storageReady) return;
+    final pretty = _buildSettingsSnapshotJson();
+    try {
+      _settingsFile.writeAsStringSync(pretty, flush: true);
+    } catch (_) {
+      // Ignore shutdown save failures.
+    }
   }
 
   Map<String, List<SavedBackend>> _cloneSavedBackendsByProfile({
@@ -3368,6 +3426,252 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   bool get _hasRunningGameClient => _runningGameClients().isNotEmpty;
+
+  List<VersionEntry> _activeTrackedVersions() {
+    final seenVersionIds = <String>{};
+    final activeVersions = <VersionEntry>[];
+    for (final client in _runningGameClients()) {
+      if (!seenVersionIds.add(client.versionId)) continue;
+      final version = _findVersionById(client.versionId);
+      if (version != null) activeVersions.add(version);
+    }
+    return activeVersions;
+  }
+
+  bool _hasRunningClientForVersion(String versionId) {
+    for (final client in _runningGameClients()) {
+      if (client.versionId == versionId) return true;
+    }
+    return false;
+  }
+
+  void _recordGameplaySessionStart(String versionId) {
+    final now = DateTime.now();
+    _atlasPlaySessionStartedAt ??= now;
+    _activeVersionPlaySessions.putIfAbsent(versionId, () => now);
+    _syncPlaytimeCheckpointTimer();
+  }
+
+  LauncherSettings _withRecordedVersionPlaytime(
+    LauncherSettings settings,
+    String versionId, {
+    required int additionalSeconds,
+    required int lastPlayedAtEpochMs,
+  }) {
+    var updated = false;
+    final versions = settings.versions.map((version) {
+      if (version.id != versionId) return version;
+      updated = true;
+      return version.copyWith(
+        playTimeSeconds: max(0, version.playTimeSeconds + additionalSeconds),
+        lastPlayedAtEpochMs: lastPlayedAtEpochMs,
+      );
+    }).toList();
+
+    return updated ? settings.copyWith(versions: versions) : settings;
+  }
+
+  int _persistedTrackedVersionPlaySeconds([LauncherSettings? settings]) {
+    final source = settings ?? _settings;
+    var total = 0;
+    for (final version in source.versions) {
+      total += max(0, version.playTimeSeconds);
+    }
+    return total;
+  }
+
+  LauncherSettings _settingsWithSynchronizedOverallPlaytime(
+    LauncherSettings settings,
+  ) {
+    final combinedVersionSeconds = _persistedTrackedVersionPlaySeconds(
+      settings,
+    );
+    if (settings.totalAtlasPlaySeconds == combinedVersionSeconds) {
+      return settings;
+    }
+    return settings.copyWith(totalAtlasPlaySeconds: combinedVersionSeconds);
+  }
+
+  void _recordGameplaySessionEnd(String versionId) {
+    final endedAt = DateTime.now();
+    var nextSettings = _settings;
+
+    final versionSessionStartedAt = _activeVersionPlaySessions[versionId];
+    if (versionSessionStartedAt != null &&
+        !_hasRunningClientForVersion(versionId)) {
+      _activeVersionPlaySessions.remove(versionId);
+      nextSettings = _withRecordedVersionPlaytime(
+        nextSettings,
+        versionId,
+        additionalSeconds: max(
+          0,
+          endedAt.difference(versionSessionStartedAt).inSeconds,
+        ),
+        lastPlayedAtEpochMs: endedAt.millisecondsSinceEpoch,
+      );
+    }
+
+    if (_atlasPlaySessionStartedAt != null && !_hasRunningGameClient) {
+      _atlasPlaySessionStartedAt = null;
+    }
+    nextSettings = _settingsWithSynchronizedOverallPlaytime(nextSettings);
+
+    if (identical(nextSettings, _settings)) {
+      _syncPlaytimeCheckpointTimer();
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _settings = nextSettings);
+    } else {
+      _settings = nextSettings;
+    }
+    _syncPlaytimeCheckpointTimer();
+    unawaited(_saveSettings(toast: false, applyControllers: false));
+  }
+
+  void _syncPlaytimeCheckpointTimer() {
+    final shouldRun = _activeVersionPlaySessions.isNotEmpty;
+    if (!shouldRun) {
+      _playtimeCheckpointTimer?.cancel();
+      _playtimeCheckpointTimer = null;
+      return;
+    }
+
+    _playtimeCheckpointTimer ??= Timer.periodic(
+      _playtimeCheckpointInterval,
+      (_) => _checkpointActivePlaytime(),
+    );
+  }
+
+  void _checkpointActivePlaytime({bool syncSave = false}) {
+    if (!_storageReady) return;
+
+    final now = DateTime.now();
+    var nextSettings = _settings;
+    var changed = false;
+
+    final activeVersionIds = _activeVersionPlaySessions.keys.toList();
+    for (final versionId in activeVersionIds) {
+      final startedAt = _activeVersionPlaySessions[versionId];
+      if (startedAt == null) continue;
+      if (!_hasRunningClientForVersion(versionId)) continue;
+
+      final elapsedSeconds = max(0, now.difference(startedAt).inSeconds);
+      if (elapsedSeconds == 0) continue;
+
+      nextSettings = _withRecordedVersionPlaytime(
+        nextSettings,
+        versionId,
+        additionalSeconds: elapsedSeconds,
+        lastPlayedAtEpochMs: now.millisecondsSinceEpoch,
+      );
+      _activeVersionPlaySessions[versionId] = now;
+      changed = true;
+    }
+
+    final synchronizedSettings = _settingsWithSynchronizedOverallPlaytime(
+      nextSettings,
+    );
+    if (synchronizedSettings.totalAtlasPlaySeconds !=
+        nextSettings.totalAtlasPlaySeconds) {
+      nextSettings = synchronizedSettings;
+      changed = true;
+    }
+
+    if (changed) {
+      _settings = nextSettings;
+      if (syncSave) {
+        _saveSettingsSnapshotSync();
+      } else {
+        unawaited(_saveSettingsSnapshot());
+      }
+    }
+
+    _syncPlaytimeCheckpointTimer();
+  }
+
+  int _effectiveTotalAtlasPlaySeconds() {
+    var total = 0;
+    for (final version in _settings.versions) {
+      total += _effectiveVersionPlaySeconds(version);
+    }
+    return total;
+  }
+
+  int _effectiveVersionPlaySeconds(VersionEntry version) {
+    final startedAt = _activeVersionPlaySessions[version.id];
+    if (startedAt == null) return version.playTimeSeconds;
+    return version.playTimeSeconds +
+        max(0, DateTime.now().difference(startedAt).inSeconds);
+  }
+
+  bool _hasTrackedPlaytime(VersionEntry version) {
+    return version.playTimeSeconds > 0 ||
+        version.lastPlayedAtEpochMs > 0 ||
+        _activeVersionPlaySessions.containsKey(version.id);
+  }
+
+  String _formatTrackedPlaytime(int totalSeconds) {
+    final seconds = max(0, totalSeconds);
+    final days = seconds ~/ 86400;
+    final hours = (seconds % 86400) ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    final remainingSeconds = seconds % 60;
+
+    if (days > 0) {
+      return hours > 0 ? '${days}d ${hours}h' : '${days}d';
+    }
+    if (hours > 0) {
+      return minutes > 0 ? '${hours}h ${minutes}m' : '${hours}h';
+    }
+    if (minutes > 0) {
+      return remainingSeconds > 0
+          ? '${minutes}m ${remainingSeconds}s'
+          : '${minutes}m';
+    }
+    return '${remainingSeconds}s';
+  }
+
+  String _monthAbbreviation(int month) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    if (month < 1 || month > 12) return 'Unknown';
+    return months[month - 1];
+  }
+
+  String _formatVersionLastPlayed(VersionEntry version) {
+    if (_activeVersionPlaySessions.containsKey(version.id)) {
+      return 'Tracking live session';
+    }
+    if (version.lastPlayedAtEpochMs <= 0) return 'Not played yet';
+
+    final playedAt = DateTime.fromMillisecondsSinceEpoch(
+      version.lastPlayedAtEpochMs,
+    );
+    final now = DateTime.now();
+    final playedDate = DateTime(playedAt.year, playedAt.month, playedAt.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final difference = today.difference(playedDate).inDays;
+
+    if (difference <= 0) return 'Last played today';
+    if (difference == 1) return 'Last played yesterday';
+    if (difference < 7) return 'Last played $difference days ago';
+    return 'Last played ${_monthAbbreviation(playedAt.month)} '
+        '${playedAt.day}, ${playedAt.year}';
+  }
 
   Set<String> _activeGameClientNames() {
     final names = <String>{};
@@ -5392,22 +5696,139 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  bool _isLoginCompleteSignal(String line) {
+  String? _loginCompleteSignalReason(String line) {
     final lower = line.toLowerCase();
 
     // Most reliable marker across builds.
     if (lower.contains(_loginContinueMarker.toLowerCase()) &&
         lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
         lower.contains(_loginCompletedMarker.toLowerCase())) {
-      return true;
+      return 'continue_logging_in_completed_en';
     }
 
     // Fallback marker some builds emit immediately after finishing login.
     if (lower.contains(_loginUiStateTransitionMarker.toLowerCase())) {
-      return true;
+      return 'ui_state_transition';
     }
 
-    return false;
+    return null;
+  }
+
+  void _recordReadinessDiagnostics(_FortniteProcessState state, String line) {
+    final lower = line.toLowerCase();
+    final continueLoggingInSeen = lower.contains(
+      _loginContinueMarker.toLowerCase(),
+    );
+    final completedSuffixSeen = lower.contains(
+      _loginCompletedMarker.toLowerCase(),
+    );
+    final englishCompletedLoginSeen =
+        continueLoggingInSeen &&
+        lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
+        completedSuffixSeen;
+    final loginUiStateTransitionSeen = lower.contains(
+      _loginUiStateTransitionMarker.toLowerCase(),
+    );
+
+    if (continueLoggingInSeen) state.sawContinueLoggingIn = true;
+    if (continueLoggingInSeen && completedSuffixSeen) {
+      state.sawAnyCompletedLoginLine = true;
+    }
+    if (englishCompletedLoginSeen) {
+      state.sawEnglishCompletedLoginLine = true;
+    }
+    if (loginUiStateTransitionSeen) {
+      state.sawLoginUiStateTransition = true;
+    }
+
+    if (continueLoggingInSeen &&
+        completedSuffixSeen &&
+        !englishCompletedLoginSeen) {
+      state.sawPotentialLocalizedLoginCompletion = true;
+      if (RegExp(r'\?{3,}').hasMatch(line)) {
+        state.sawPotentialGarbledLoginCompletion = true;
+      }
+      if (!state.loggedPotentialLoginMarkerMismatch) {
+        state.loggedPotentialLoginMarkerMismatch = true;
+        _log(
+          state.host ? 'gameserver' : 'game',
+          'Observed a login completion line ending with "(Completed)" that did not match the expected English marker. This machine may be hitting a localized or garbled readiness signal.',
+        );
+      }
+    }
+
+    if (line.contains('CheckComplete UpdateSuccess_NoChange')) {
+      state.sawUpdateSuccessNoChange = true;
+    } else if (line.contains('CheckComplete UpdateSuccess')) {
+      state.sawUpdateSuccess = true;
+    }
+
+    if (line.contains(
+      'AFortGameModeFrontEnd::OnUpdateCheckComplete called. Result=2',
+    )) {
+      state.sawUpdateResult2 = true;
+    } else if (line.contains(
+      'AFortGameModeFrontEnd::OnUpdateCheckComplete called. Result=1',
+    )) {
+      state.sawUpdateResult1 = true;
+    }
+
+    if (lower.contains('states from: login to subgameselect')) {
+      state.sawLoginToSubgameSelect = true;
+    }
+    if (lower.contains('states from: subgameselect to frontend')) {
+      state.sawSubgameSelectToFrontEnd = true;
+    }
+    if (_clientLoadingCompleteMarkers.any(
+      (marker) => lower.contains(marker.toLowerCase()),
+    )) {
+      state.sawClientLoadingMarker = true;
+    }
+  }
+
+  String _buildClientReadinessFailureCode(_FortniteProcessState state) {
+    final codes = <String>[];
+
+    if (!state.postLoginInjected) {
+      if (state.sawPotentialGarbledLoginCompletion) {
+        codes.add('R8-encoding-sensitive-login-marker');
+      } else if (state.sawPotentialLocalizedLoginCompletion) {
+        codes.add('R6-localized-login-marker');
+      }
+      if (state.sawUpdateSuccessNoChange || state.sawUpdateResult2) {
+        codes.add('R6-alternate-update-complete');
+      }
+      if (state.sawAnyCompletedLoginLine ||
+          state.sawLoginUiStateTransition ||
+          state.sawLoginToSubgameSelect ||
+          state.sawSubgameSelectToFrontEnd) {
+        codes.add('R3-ready-signal-missed');
+      } else {
+        codes.add('R3-login-complete-never-seen');
+      }
+      if (state.killed) {
+        codes.add('R7-client-closed-before-ready');
+      }
+    }
+
+    if (codes.isEmpty) return 'R0-no-client-readiness-failure';
+    return codes.join(', ');
+  }
+
+  String _buildClientReadinessSummary(_FortniteProcessState state) {
+    return 'continueLoggingInSeen=${state.sawContinueLoggingIn}, '
+        'completedLoginSeen=${state.sawAnyCompletedLoginLine}, '
+        'englishCompletedLoginSeen=${state.sawEnglishCompletedLoginLine}, '
+        'loginUiTransitionSeen=${state.sawLoginUiStateTransition}, '
+        'updateSuccess=${state.sawUpdateSuccess}, '
+        'updateSuccessNoChange=${state.sawUpdateSuccessNoChange}, '
+        'result1=${state.sawUpdateResult1}, '
+        'result2=${state.sawUpdateResult2}, '
+        'loginToSubgameSelect=${state.sawLoginToSubgameSelect}, '
+        'subgameSelectToFrontEnd=${state.sawSubgameSelectToFrontEnd}, '
+        'clientLoadingMarkerSeen=${state.sawClientLoadingMarker}, '
+        'localizedLoginCompletion=${state.sawPotentialLocalizedLoginCompletion}, '
+        'garbledLoginCompletion=${state.sawPotentialGarbledLoginCompletion}';
   }
 
   /// Markers that indicate the client loading screen has completed.
@@ -5426,6 +5847,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed || state.exited) return;
+    _recordReadinessDiagnostics(state, line);
 
     if (!state.launched) {
       if (_cannotConnectErrors.any(line.contains)) {
@@ -5436,13 +5858,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     }
 
-    if (!state.postLoginInjected && _isLoginCompleteSignal(line)) {
+    final loginCompleteSignalReason = state.postLoginInjected
+        ? null
+        : _loginCompleteSignalReason(line);
+    if (!state.postLoginInjected && loginCompleteSignalReason != null) {
       state.launched = true;
       state.postLoginInjected = true;
       state.postLoginInferredFromFallback = false;
       _log(
         state.host ? 'gameserver' : 'game',
-        'Login complete detected. Scheduling post-login injections...',
+        'Login complete detected via $loginCompleteSignalReason. Scheduling post-login injections...',
       );
       _setUiStatus(
         host: state.host,
@@ -5807,6 +6232,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ? _extraGameInstances.removeAt(0)
             : null;
       }
+      _recordGameplaySessionEnd(state.versionId);
     }
 
     final tag = state.host ? 'gameserver' : 'game';
@@ -5818,6 +6244,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       'hostPostLoginPatchersInjected=${state.hostPostLoginPatchersInjected}, '
       'gameServerInjected=${state.gameServerInjected}).',
     );
+    if (!state.host && !state.postLoginInjected) {
+      _log(
+        tag,
+        'Client readiness diagnostics: failure=${_buildClientReadinessFailureCode(state)}; ${_buildClientReadinessSummary(state)}.',
+      );
+    }
 
     if (!state.host) {
       // If hosting was started for this session, stop it only once every client
@@ -6245,6 +6677,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       } else {
         _extraGameInstances.add(instance);
       }
+      _recordGameplaySessionStart(version.id);
       _attachProcessLogs(
         child,
         source: 'game',
@@ -6508,7 +6941,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           vertical: 12,
                                         ),
                                       ),
-                                      child: const Text('Launch client'),
+                                      child: const Text(
+                                        'Launch Client',
+                                        style: TextStyle(color: Colors.white),
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -10887,6 +11323,155 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (mounted) _toast('All builds cleared');
   }
 
+  Future<void> _clearAllTrackedTime() async {
+    final hasTrackedTime =
+        _settings.totalAtlasPlaySeconds > 0 ||
+        _settings.versions.any(
+          (version) =>
+              version.playTimeSeconds > 0 || version.lastPlayedAtEpochMs > 0,
+        ) ||
+        _activeVersionPlaySessions.isNotEmpty;
+    if (!hasTrackedTime) return;
+
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Clear all tracked time?',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w700,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'This will reset the total ATLAS time and every per-version tracked time back to zero.',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.84),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFB3261E),
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Clear time'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final now = DateTime.now();
+    setState(() {
+      _settings = _settings.copyWith(
+        totalAtlasPlaySeconds: 0,
+        versions: _settings.versions
+            .map(
+              (version) =>
+                  version.copyWith(playTimeSeconds: 0, lastPlayedAtEpochMs: 0),
+            )
+            .toList(),
+      );
+      if (_activeVersionPlaySessions.isEmpty) {
+        _atlasPlaySessionStartedAt = null;
+      } else {
+        _atlasPlaySessionStartedAt = now;
+        final activeVersionIds = _activeVersionPlaySessions.keys.toList();
+        for (final versionId in activeVersionIds) {
+          _activeVersionPlaySessions[versionId] = now;
+        }
+      }
+    });
+    _syncPlaytimeCheckpointTimer();
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Tracked time cleared');
+  }
+
   Future<void> _pickAvatar() async {
     final picked = await FilePicker.platform.pickFiles(
       type: FileType.image,
@@ -10984,27 +11569,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           'This will restore ATLAS Link to a default state and make it feel like a fresh install.',
                           style: TextStyle(
                             color: _onSurface(dialogContext, 0.86),
-                            height: 1.35,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'It will:',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.9),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          '- Clear imported builds\n'
-                          '- Reset profile (name + PFP) and show first-run setup again\n'
-                          '- Reset launch options, backend settings, visuals, and DLL paths\n'
-                          '- Clear saved backends\n'
-                          '- Clear internal caches (installer + bundled DLL copies)\n'
-                          '- Clear launcher logs',
-                          style: TextStyle(
-                            color: _onSurface(dialogContext, 0.82),
                             height: 1.35,
                           ),
                         ),
@@ -11257,6 +11821,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _applyBundledDllDefaults();
     await _saveSettings(toast: false);
     unawaited(_checkForBundledDllDefaultUpdates(silent: true));
+
+    final cachedLauncherContent = await _readCachedLauncherContent();
+    if (cachedLauncherContent != null) {
+      _applyLauncherContent(cachedLauncherContent);
+    }
+    await _refreshLauncherContentFromGitHub(silent: true);
 
     _installState = _installState.copyWith(
       lastSeenLauncherVersion: _launcherVersion,
@@ -11686,16 +12256,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           final compact = constraints.maxWidth < 1080;
                           return Column(
                             children: [
-                              Text(
-                                _launcherBuildLabel,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  color: _onSurface(context, 0.86),
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              _shellHeader(
+                                compact,
+                                suppressLibraryQuickTipOverlayTargets:
+                                    _showLibraryQuickTipBackdrop &&
+                                    !_libraryImportTipFadingOut,
                               ),
-                              const SizedBox(height: 10),
-                              _topBar(compact),
                               const SizedBox(height: 18),
                               Expanded(child: _tabContent()),
                             ],
@@ -11704,6 +12270,47 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                     ),
                   ),
+                ),
+              ),
+            ),
+          if (_startupConfigResolved &&
+              !_showStartup &&
+              _showLibraryQuickTipBackdrop)
+            Positioned.fill(
+              child: AnimatedOpacity(
+                opacity: _libraryImportTipFadingOut ? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {},
+                      child: IgnorePointer(
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 2.4, sigmaY: 2.4),
+                          child: Container(
+                            color: _dialogBarrierColor(context, 1.0),
+                          ),
+                        ),
+                      ),
+                    ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 8, 22, 18),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final compact = constraints.maxWidth < 1080;
+                            return Align(
+                              alignment: Alignment.topCenter,
+                              child: _libraryQuickTipOverlayHeader(compact),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -11948,7 +12555,107 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  Widget _topBar(bool compact) {
+  Widget _shellHeader(
+    bool compact, {
+    bool suppressLibraryQuickTipOverlayTargets = false,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          _launcherBuildLabel,
+          style: TextStyle(
+            fontSize: 15,
+            color: _onSurface(context, 0.86),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _topBar(
+          compact,
+          suppressLibraryQuickTipOverlayTargets:
+              suppressLibraryQuickTipOverlayTargets,
+        ),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipOverlayHeader(bool compact) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Opacity(
+          opacity: 0,
+          child: Text(
+            _launcherBuildLabel,
+            style: TextStyle(
+              fontSize: 15,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _topBar(compact, libraryQuickTipOverlayOnly: true),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipActionButtons() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _libraryPulseGlow(
+          _titleActionButton(Icons.add_rounded, () {
+            unawaited(
+              _dismissLibraryImportTip(onDismissedAction: _importVersion),
+            );
+          }),
+        ),
+        const SizedBox(width: 8),
+        _libraryPulseGlow(
+          _titleActionButton(Icons.download_rounded, () {
+            unawaited(
+              _dismissLibraryImportTip(
+                onDismissedAction: () =>
+                    _openUrl('https://builds.fortforge.dev/builds'),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipActionButtonPlaceholders() {
+    return IgnorePointer(
+      child: Opacity(
+        opacity: 0,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed: () {},
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: () {},
+              icon: const Icon(Icons.help_outline_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(onPressed: () {}, icon: _settingsActionIcon()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _topBar(
+    bool compact, {
+    bool suppressLibraryQuickTipOverlayTargets = false,
+    bool libraryQuickTipOverlayOnly = false,
+  }) {
     final username = _settings.username.trim().isEmpty
         ? 'Player'
         : _settings.username.trim();
@@ -11992,6 +12699,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         ],
       ),
+      LauncherTab.stats => Text(
+        'Stats',
+        style: TextStyle(
+          fontSize: 52,
+          fontWeight: FontWeight.w700,
+          color: _onSurface(context, 0.95),
+        ),
+      ),
       LauncherTab.backend => Text(
         'Backend',
         style: TextStyle(
@@ -12017,55 +12732,50 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
 
     const showRightControls = true;
+    final showLibraryQuickTipTargets =
+        _tab == LauncherTab.library &&
+        (!suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly);
+    final showOtherRightControls = !libraryQuickTipOverlayOnly;
+    final showLeft = !libraryQuickTipOverlayOnly;
+    final showNav =
+        !suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly;
     final right = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (showRightControls) ...[
-          if (_tab == LauncherTab.library) ...[
-            _libraryPulseGlow(
-              _titleActionButton(Icons.add_rounded, () {
-                unawaited(
-                  _dismissLibraryImportTip(onDismissedAction: _importVersion),
-                );
-              }),
+          if (showLibraryQuickTipTargets) ...[
+            _libraryQuickTipActionButtons(),
+            if (showOtherRightControls || libraryQuickTipOverlayOnly)
+              const SizedBox(width: 10),
+            if (libraryQuickTipOverlayOnly)
+              _libraryQuickTipActionButtonPlaceholders(),
+          ],
+          if (showOtherRightControls) ...[
+            IconButton(
+              onPressed: _handleRefreshPressed,
+              tooltip: 'Refresh / check updates',
+              icon: const Icon(Icons.refresh_rounded),
             ),
             const SizedBox(width: 8),
-            _libraryPulseGlow(
-              _titleActionButton(Icons.download_rounded, () {
+            IconButton(
+              onPressed: _showQuickTipForCurrentTab,
+              tooltip: 'Show quick tips',
+              icon: const Icon(Icons.help_outline_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: () {
                 unawaited(
-                  _dismissLibraryImportTip(
-                    onDismissedAction: () =>
-                        _openUrl('https://builds.fortforge.dev/builds'),
+                  _switchMenu(
+                    LauncherTab.general,
+                    settingsSection: SettingsSection.dataManagement,
                   ),
                 );
-              }),
+              },
+              tooltip: _dataManagementButtonTooltip,
+              icon: _settingsActionIcon(),
             ),
-            const SizedBox(width: 10),
           ],
-          IconButton(
-            onPressed: _handleRefreshPressed,
-            tooltip: 'Refresh / check updates',
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: _showQuickTipForCurrentTab,
-            tooltip: 'Show quick tips',
-            icon: const Icon(Icons.help_outline_rounded),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: () {
-              unawaited(
-                _switchMenu(
-                  LauncherTab.general,
-                  settingsSection: SettingsSection.dataManagement,
-                ),
-              );
-            },
-            tooltip: _dataManagementButtonTooltip,
-            icon: _settingsActionIcon(),
-          ),
         ],
       ],
     );
@@ -12075,10 +12785,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          leftAnimated,
-          const SizedBox(height: 12),
-          Align(alignment: Alignment.center, child: nav),
-          if (showRightControls) ...[
+          if (showLeft) leftAnimated,
+          if (showLeft && (showNav || right.children.isNotEmpty))
+            const SizedBox(height: 12),
+          if (showNav) Align(alignment: Alignment.center, child: nav),
+          if (right.children.isNotEmpty) ...[
             const SizedBox(height: 10),
             Align(alignment: Alignment.centerRight, child: right),
           ],
@@ -12090,9 +12801,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Align(alignment: Alignment.centerLeft, child: leftAnimated),
-          Align(alignment: Alignment.center, child: nav),
-          if (showRightControls)
+          if (showLeft)
+            Align(alignment: Alignment.centerLeft, child: leftAnimated),
+          if (showNav) Align(alignment: Alignment.center, child: nav),
+          if (right.children.isNotEmpty)
             Align(alignment: Alignment.centerRight, child: right),
         ],
       ),
@@ -12265,6 +12977,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       (_libraryQuickTipManualVisible ||
           !_settings.libraryActionsNudgeComplete ||
           _libraryImportTipFadingOut);
+
+  bool get _showLibraryQuickTipBackdrop =>
+      _tab == LauncherTab.library &&
+      !_libraryQuickTipManualVisible &&
+      (!_settings.libraryActionsNudgeComplete || _libraryImportTipFadingOut);
 
   bool get _showBackendConnectionTip =>
       _backendQuickTipManualVisible ||
@@ -12798,6 +13515,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             selected: _tab == LauncherTab.backend,
             onTap: () => unawaited(_switchMenu(LauncherTab.backend)),
           ),
+          (
+            key: 'stats',
+            label: 'Stats',
+            icon: Icons.bar_chart_rounded,
+            selected: _tab == LauncherTab.stats,
+            onTap: () => unawaited(_switchMenu(LauncherTab.stats)),
+          ),
         ];
     final selectedTabIndex = navItems.indexWhere((item) => item.selected);
     final computedTabWidth =
@@ -13003,6 +13727,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final child = switch (_tab) {
       LauncherTab.home => _homeTab(),
       LauncherTab.library => _libraryTab(),
+      LauncherTab.stats => _statsTab(),
       LauncherTab.backend => _backendTab(),
       LauncherTab.general => _generalTab(),
     };
@@ -13032,6 +13757,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return switch (_tab) {
       LauncherTab.home => 'Browsing Homepage',
       LauncherTab.library => 'Browsing Library',
+      LauncherTab.stats => 'Reviewing Stats',
       LauncherTab.backend => 'Configuring Backend',
       LauncherTab.general => 'Editing Settings',
     };
@@ -13936,12 +14662,67 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 const SliverToBoxAdapter(child: SizedBox(height: 12)),
                 if (filteredVersions.isEmpty)
                   SliverToBoxAdapter(
-                    child: Text(
-                      'No installed versions match "$_versionSearchQuery".',
-                      style: TextStyle(
-                        color: Theme.of(
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        color: _adaptiveScrimColor(
                           context,
-                        ).colorScheme.onSurface.withValues(alpha: 0.82),
+                          darkAlpha: 0.08,
+                          lightAlpha: 0.16,
+                        ),
+                        border: Border.all(color: _onSurface(context, 0.08)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              color: _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.1,
+                                lightAlpha: 0.18,
+                              ),
+                              border: Border.all(
+                                color: _onSurface(context, 0.1),
+                              ),
+                            ),
+                            child: Icon(
+                              Icons.search_off_rounded,
+                              color: _onSurface(context, 0.9),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'No installed versions match "$_versionSearchQuery".',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: _onSurface(context, 0.94),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Try a different build name or clear the search to see every imported version again.',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    height: 1.25,
+                                    fontWeight: FontWeight.w600,
+                                    color: _onSurface(context, 0.72),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   )
@@ -13988,6 +14769,1079 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           const SliverToBoxAdapter(child: SizedBox(height: 14)),
         ],
       ],
+    );
+  }
+
+  Widget _statsSummaryCard({
+    required IconData icon,
+    required String label,
+    required String value,
+    required String subtitle,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: Theme.of(context).colorScheme.secondary.withValues(
+                alpha: _isDarkTheme(context) ? 0.16 : 0.12,
+              ),
+            ),
+            child: Icon(
+              icon,
+              size: 19,
+              color: Theme.of(context).colorScheme.secondary,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: _onSurface(context, 0.68),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.96),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.3,
+              fontWeight: FontWeight.w600,
+              color: _onSurface(context, 0.7),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsMetaChip({
+    IconData? icon,
+    Widget? leading,
+    required String label,
+    Color? iconColor,
+  }) {
+    assert(icon != null || leading != null);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          leading ??
+              Icon(
+                icon,
+                size: 14,
+                color: iconColor ?? _onSurface(context, 0.74),
+              ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: _onSurface(context, 0.78),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsStatusDot({required Color color, double size = 10}) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    );
+  }
+
+  Widget _liveTrackingSplashStack(
+    List<VersionEntry> versions, {
+    double splashSize = 68,
+    double overlap = 24,
+  }) {
+    final visibleVersions = versions.take(3).toList();
+    final width = splashSize + (max(visibleVersions.length - 1, 0) * overlap);
+    final signature = visibleVersions.map((version) => version.id).join('|');
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(-0.12, 0),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          ),
+        );
+      },
+      child: SizedBox(
+        key: ValueKey<String>(signature),
+        width: width,
+        height: splashSize,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            for (var index = visibleVersions.length - 1; index >= 0; index--)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                left: (visibleVersions.length - 1 - index) * overlap,
+                top: 0,
+                child: Container(
+                  width: splashSize,
+                  height: splashSize,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: _onSurface(context, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _glassShadowColor(context),
+                        blurRadius: 18,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: Image(
+                      image: ResizeImage(
+                        _libraryCoverImage(visibleVersions[index]),
+                        width: 240,
+                      ),
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Image.asset(
+                          'assets/images/library_cover.png',
+                          fit: BoxFit.cover,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTrackedShare(int trackedSeconds, int totalTrackedSeconds) {
+    if (trackedSeconds <= 0 || totalTrackedSeconds <= 0) return '0%';
+    final share = (trackedSeconds / totalTrackedSeconds).clamp(0.0, 1.0);
+    final percent = share * 100;
+    if (percent >= 10) return '${percent.toStringAsFixed(0)}%';
+    return '${percent.toStringAsFixed(1)}%';
+  }
+
+  Widget _statsVersionInsightPanel({
+    required VersionEntry entry,
+    required int trackedSeconds,
+    required int totalTrackedSeconds,
+    required bool active,
+  }) {
+    final share = totalTrackedSeconds <= 0
+        ? 0.0
+        : (trackedSeconds / totalTrackedSeconds).clamp(0.0, 1.0);
+    final accent = active
+        ? const Color(0xFF3DDC97)
+        : Theme.of(context).colorScheme.secondary.withValues(alpha: 0.9);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.06, lightAlpha: 0.12),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            'Percentage Of Total Time',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.66),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _formatTrackedShare(trackedSeconds, totalTrackedSeconds),
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.96),
+            ),
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: share,
+              minHeight: 8,
+              backgroundColor: _onSurface(context, 0.08),
+              valueColor: AlwaysStoppedAnimation<Color>(accent),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _statsMetaChip(
+                icon: Icons.tag_rounded,
+                label: entry.gameVersion == 'Unknown'
+                    ? 'Unknown version'
+                    : 'v${entry.gameVersion}',
+              ),
+              _statsMetaChip(
+                icon: active ? null : Icons.history_rounded,
+                leading: active
+                    ? _statsStatusDot(color: accent, size: 8)
+                    : null,
+                label: _formatVersionLastPlayed(entry),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsVersionCard(
+    VersionEntry entry, {
+    required int totalTrackedSeconds,
+  }) {
+    final active = _activeVersionPlaySessions.containsKey(entry.id);
+    final trackedSeconds = _effectiveVersionPlaySeconds(entry);
+    final imageProvider = ResizeImage(_libraryCoverImage(entry), width: 320);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 620;
+          final showInsightPanel = constraints.maxWidth >= 900;
+          const cardContentPadding = 16.0;
+          const sectionSpacing = 18.0;
+          const summarySpacing = 12.0;
+          final mediaSize = compact ? min(136.0, constraints.maxWidth) : 128.0;
+          final titleStyle = TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w800,
+            color: _onSurface(context, 0.96),
+          );
+          final timeStyle = TextStyle(
+            fontSize: showInsightPanel ? 42 : 34,
+            fontWeight: FontWeight.w800,
+            color: _onSurface(context, 0.98),
+          );
+
+          double measureTextWidth(String text, TextStyle style) {
+            final painter = TextPainter(
+              text: TextSpan(text: text, style: style),
+              textDirection: Directionality.of(context),
+              textScaler: MediaQuery.textScalerOf(context),
+              maxLines: 1,
+            )..layout();
+            return painter.width;
+          }
+
+          const minInsightPanelWidth = 320.0;
+          final summaryEquivalentWidth =
+              constraints.maxWidth + (cardContentPadding * 2);
+          final summaryColumns = summaryEquivalentWidth >= 1120
+              ? 3
+              : summaryEquivalentWidth >= 720
+              ? 2
+              : 1;
+          final summaryCardWidth = summaryColumns == 1
+              ? summaryEquivalentWidth
+              : (summaryEquivalentWidth -
+                        ((summaryColumns - 1) * summarySpacing)) /
+                    summaryColumns;
+          final alignedInsightPanelStart = summaryColumns == 1
+              ? null
+              : summaryCardWidth + summarySpacing - cardContentPadding;
+          final alignedDetailsWidth = alignedInsightPanelStart == null
+              ? null
+              : alignedInsightPanelStart - mediaSize - (sectionSpacing * 2);
+          final measuredTimeWidth = measureTextWidth(
+            _formatTrackedPlaytime(trackedSeconds),
+            timeStyle,
+          );
+          final minDetailsWidth = max(196.0, measuredTimeWidth + 12);
+          final maxDetailsWidth = showInsightPanel
+              ? constraints.maxWidth -
+                    mediaSize -
+                    (sectionSpacing * 2) -
+                    minInsightPanelWidth
+              : null;
+          final detailsColumnWidth = showInsightPanel
+              ? max(
+                  alignedDetailsWidth ?? minDetailsWidth,
+                  minDetailsWidth,
+                ).clamp(196.0, maxDetailsWidth!).toDouble()
+              : null;
+
+          final media = Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: _onSurface(context, 0.08)),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Image(
+                image: imageProvider,
+                width: mediaSize,
+                height: mediaSize,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Image.asset(
+                    'assets/images/library_cover.png',
+                    width: mediaSize,
+                    height: mediaSize,
+                    fit: BoxFit.cover,
+                  );
+                },
+              ),
+            ),
+          );
+
+          final details = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      entry.name,
+                      maxLines: compact ? 2 : 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: titleStyle,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(_formatTrackedPlaytime(trackedSeconds), style: timeStyle),
+            ],
+          );
+
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [media, const SizedBox(height: 16), details],
+            );
+          }
+
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              media,
+              const SizedBox(width: sectionSpacing),
+              Expanded(
+                child: showInsightPanel
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(width: detailsColumnWidth, child: details),
+                          const SizedBox(width: sectionSpacing),
+                          Expanded(
+                            child: _statsVersionInsightPanel(
+                              entry: entry,
+                              trackedSeconds: trackedSeconds,
+                              totalTrackedSeconds: totalTrackedSeconds,
+                              active: active,
+                            ),
+                          ),
+                        ],
+                      )
+                    : details,
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statsTab() {
+    final activeTrackedVersions = _activeTrackedVersions();
+    final liveTrackingActive = activeTrackedVersions.isNotEmpty;
+    final liveTicker = liveTrackingActive
+        ? Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick)
+        : null;
+
+    return StreamBuilder<int>(
+      stream: liveTicker,
+      initialData: 0,
+      builder: (context, _) {
+        final importedVersions = List<VersionEntry>.from(_settings.versions)
+          ..sort((a, b) {
+            final byPlay = _effectiveVersionPlaySeconds(
+              b,
+            ).compareTo(_effectiveVersionPlaySeconds(a));
+            if (byPlay != 0) return byPlay;
+            final byVersion = _compareVersionStrings(
+              b.gameVersion,
+              a.gameVersion,
+            );
+            if (byVersion != 0) return byVersion;
+            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          });
+        final totalTrackedSeconds = _effectiveTotalAtlasPlaySeconds();
+        final trackedVersions = importedVersions
+            .where(_hasTrackedPlaytime)
+            .toList();
+        final statsSearchQuery = _statsSearchQuery.trim().toLowerCase();
+        final filteredTrackedVersions = statsSearchQuery.isEmpty
+            ? trackedVersions
+            : trackedVersions
+                  .where(
+                    (entry) =>
+                        entry.name.toLowerCase().contains(statsSearchQuery),
+                  )
+                  .toList();
+
+        VersionEntry? mostPlayedVersion;
+        for (final version in importedVersions) {
+          if (_effectiveVersionPlaySeconds(version) > 0 ||
+              _activeVersionPlaySessions.containsKey(version.id)) {
+            mostPlayedVersion = version;
+            break;
+          }
+        }
+
+        final topPanel = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 0,
+          child: _glass(
+            radius: 28,
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact = constraints.maxWidth < 860;
+                  const summaryStripSpacing = 12.0;
+                  final visibleSplashCount = min(
+                    activeTrackedVersions.length,
+                    3,
+                  );
+                  final inlineSplashSize = constraints.maxWidth >= 1180
+                      ? 126.0
+                      : 112.0;
+                  final inlineSplashOverlap = inlineSplashSize * 0.34;
+                  final inlineSplashWidth = liveTrackingActive
+                      ? inlineSplashSize +
+                            (max(visibleSplashCount - 1, 0) *
+                                inlineSplashOverlap)
+                      : 0.0;
+                  final summaryEquivalentWidth = constraints.maxWidth + 12;
+                  final summaryColumns = summaryEquivalentWidth >= 1120
+                      ? 3
+                      : summaryEquivalentWidth >= 720
+                      ? 2
+                      : 1;
+                  final summaryCardWidth = summaryColumns == 1
+                      ? summaryEquivalentWidth
+                      : (summaryEquivalentWidth -
+                                ((summaryColumns - 1) * summaryStripSpacing)) /
+                            summaryColumns;
+                  final alignedLivePanelCardWidth = summaryColumns == 3
+                      ? summaryCardWidth - 6
+                      : null;
+                  final livePanelCardWidth =
+                      alignedLivePanelCardWidth ??
+                      min(420.0, max(304.0, (constraints.maxWidth - 12) / 3));
+                  final desktopLivePanelWidth =
+                      livePanelCardWidth +
+                      (liveTrackingActive ? 14 + inlineSplashWidth : 0);
+                  final statusLabel = liveTrackingActive
+                      ? 'Tracking your current session live.'
+                      : trackedVersions.isEmpty
+                      ? 'Playtime starts tracking the next time you launch an imported build.'
+                      : 'Total tracked time across every imported ATLAS build.';
+
+                  final summary = Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'TOTAL TIME ON ATLAS',
+                        style: TextStyle(
+                          fontSize: 13,
+                          letterSpacing: 1.1,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(context, 0.68),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        _formatTrackedPlaytime(totalTrackedSeconds),
+                        style: TextStyle(
+                          fontSize: compact ? 46 : 60,
+                          height: 0.98,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(context, 0.98),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        statusLabel,
+                        style: TextStyle(
+                          fontSize: 14,
+                          height: 1.35,
+                          fontWeight: FontWeight.w600,
+                          color: _onSurface(context, 0.7),
+                        ),
+                      ),
+                    ],
+                  );
+
+                  final livePanelCard = Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(22),
+                      color: _adaptiveScrimColor(
+                        context,
+                        darkAlpha: 0.08,
+                        lightAlpha: 0.16,
+                      ),
+                      border: Border.all(color: _onSurface(context, 0.08)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Live Tracking',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(context, 0.68),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        RichText(
+                          text: TextSpan(
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                              color: _onSurface(context, 0.96),
+                            ),
+                            children: [
+                              TextSpan(
+                                text: liveTrackingActive ? 'Active' : 'Idle',
+                              ),
+                              WidgetSpan(
+                                alignment: PlaceholderAlignment.middle,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 10),
+                                  child: _statsStatusDot(
+                                    color: liveTrackingActive
+                                        ? const Color(0xFF3DDC97)
+                                        : const Color(0xFFFFA94D),
+                                    size: 10,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          activeTrackedVersions.isEmpty
+                              ? 'No imported builds are running right now.'
+                              : '${activeTrackedVersions.length} imported '
+                                    'build${activeTrackedVersions.length == 1 ? '' : 's'} '
+                                    'currently being tracked.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.3,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(context, 0.7),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+
+                  final livePanel = LayoutBuilder(
+                    builder: (context, constraints) {
+                      final showSplashInline =
+                          liveTrackingActive && constraints.maxWidth >= 290;
+                      if (!showSplashInline) return livePanelCard;
+
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: compact ? null : livePanelCardWidth,
+                            child: livePanelCard,
+                          ),
+                          const SizedBox(width: 14),
+                          _liveTrackingSplashStack(
+                            activeTrackedVersions,
+                            splashSize: inlineSplashSize,
+                            overlap: inlineSplashOverlap,
+                          ),
+                        ],
+                      );
+                    },
+                  );
+
+                  if (compact) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        summary,
+                        const SizedBox(height: 16),
+                        livePanel,
+                      ],
+                    );
+                  }
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: summary),
+                      const SizedBox(width: 16),
+                      SizedBox(width: desktopLivePanelWidth, child: livePanel),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        final summaryStrip = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 1,
+          child: _glass(
+            radius: 24,
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final columns = constraints.maxWidth >= 1120
+                      ? 3
+                      : constraints.maxWidth >= 720
+                      ? 2
+                      : 1;
+                  const spacing = 12.0;
+                  final cardWidth = columns == 1
+                      ? constraints.maxWidth
+                      : (constraints.maxWidth - ((columns - 1) * spacing)) /
+                            columns;
+
+                  final cards = <Widget>[
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.inventory_2_rounded,
+                        label: 'Imported Builds',
+                        value: '${importedVersions.length}',
+                        subtitle: importedVersions.isEmpty
+                            ? 'Nothing imported yet.'
+                            : 'Builds currently listed in your library.',
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.schedule_rounded,
+                        label: 'Tracked Builds',
+                        value: '${trackedVersions.length}',
+                        subtitle: trackedVersions.isEmpty
+                            ? 'No completed sessions yet.'
+                            : 'Builds with tracked ATLAS time.',
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.emoji_events_rounded,
+                        label: 'Most Played',
+                        value: mostPlayedVersion?.name ?? 'None yet',
+                        subtitle: mostPlayedVersion == null
+                            ? 'Launch a build to start tracking.'
+                            : _formatTrackedPlaytime(
+                                _effectiveVersionPlaySeconds(mostPlayedVersion),
+                              ),
+                      ),
+                    ),
+                  ];
+
+                  return Wrap(
+                    spacing: spacing,
+                    runSpacing: spacing,
+                    children: cards.reversed.toList(growable: false),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        final versionsPanel = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 2,
+          child: _glass(
+            radius: 24,
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final searchInput = TextField(
+                    controller: _statsSearchController,
+                    onChanged: (value) =>
+                        setState(() => _statsSearchQuery = value),
+                    decoration:
+                        _backendFieldDecoration(
+                          hintText: 'Search by name',
+                        ).copyWith(
+                          prefixIcon: Icon(
+                            Icons.search_rounded,
+                            size: 18,
+                            color: _onSurface(context, 0.75),
+                          ),
+                          suffixIconConstraints: const BoxConstraints.tightFor(
+                            width: 40,
+                            height: 40,
+                          ),
+                          suffixIcon: _statsSearchQuery.trim().isEmpty
+                              ? null
+                              : SizedBox(
+                                  width: 40,
+                                  height: 40,
+                                  child: IconButton(
+                                    tooltip: 'Clear search',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 40,
+                                      height: 40,
+                                    ),
+                                    onPressed: () {
+                                      _statsSearchController.clear();
+                                      setState(() => _statsSearchQuery = '');
+                                    },
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      size: 18,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                  );
+                  final clearTimeButton = _versionCardAction(
+                    icon: Icons.delete_sweep_rounded,
+                    tooltip: 'Clear all tracked time',
+                    onTap: () => unawaited(_clearAllTrackedTime()),
+                  );
+                  final compactHeader = constraints.maxWidth < 880;
+                  final searchClusterWidth = compactHeader
+                      ? min(420.0, constraints.maxWidth)
+                      : min(380.0, max(320.0, constraints.maxWidth * 0.28));
+                  final searchCluster = SizedBox(
+                    width: searchClusterWidth,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(child: searchInput),
+                        const SizedBox(width: 8),
+                        clearTimeButton,
+                      ],
+                    ),
+                  );
+                  final header = compactHeader
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Per-Version Time',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                                color: _onSurface(context, 0.96),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              trackedVersions.isEmpty
+                                  ? 'Only builds with tracked time show up here.'
+                                  : 'Only builds with tracked time appear here, with live time shown while they are running.',
+                              style: TextStyle(
+                                fontSize: 14,
+                                height: 1.35,
+                                fontWeight: FontWeight.w600,
+                                color: _onSurface(context, 0.7),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: searchCluster,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Per-Version Time',
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      color: _onSurface(context, 0.96),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    trackedVersions.isEmpty
+                                        ? 'Only builds with tracked time show up here.'
+                                        : 'Only builds with tracked time appear here, with live time shown while they are running.',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      height: 1.35,
+                                      fontWeight: FontWeight.w600,
+                                      color: _onSurface(context, 0.7),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 18),
+                            searchCluster,
+                          ],
+                        );
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      header,
+                      const SizedBox(height: 14),
+                      if (trackedVersions.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.bar_chart_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      importedVersions.isEmpty
+                                          ? 'No Imported Versions Yet'
+                                          : 'No Tracked Time Yet',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      importedVersions.isEmpty
+                                          ? 'Import an existing build in Library, then launch it from Link to start tracking stats here.'
+                                          : 'Launch an imported build and its tracked playtime will start showing up here.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (filteredTrackedVersions.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.search_off_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'No tracked builds match "$_statsSearchQuery".',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Try a different build name or clear the search to see every tracked version again.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else
+                        for (
+                          var i = 0;
+                          i < filteredTrackedVersions.length;
+                          i++
+                        ) ...[
+                          if (i > 0) const SizedBox(height: 12),
+                          _statsVersionCard(
+                            filteredTrackedVersions[i],
+                            totalTrackedSeconds: totalTrackedSeconds,
+                          ),
+                        ],
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        return ListView(
+          children: [
+            topPanel,
+            const SizedBox(height: 14),
+            summaryStrip,
+            const SizedBox(height: 14),
+            versionsPanel,
+          ],
+        );
+      },
     );
   }
 
@@ -14328,300 +16182,291 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       });
     }
 
-    return _menuItemEntrance(
-      menuKey: LauncherTab.backend,
-      index: 0,
-      child: _glass(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: onSurface.withValues(alpha: 0.06),
-                  border: Border.all(color: onSurface.withValues(alpha: 0.12)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: _backendOnline
-                            ? const Color(0xFF16C47F)
-                            : const Color(0xFFDC3545),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      _backendOnline
-                          ? 'Backend reachable'
-                          : 'Backend not detected',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: onSurface.withValues(alpha: 0.92),
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      statusLabel,
-                      style: TextStyle(
-                        color: onSurface.withValues(alpha: 0.74),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+    final shouldShrinkBackendPanel =
+        _settings.backendConnectionType == BackendConnectionType.local;
+    final backendPanel = _glass(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: shouldShrinkBackendPanel
+              ? MainAxisSize.min
+              : MainAxisSize.max,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: onSurface.withValues(alpha: 0.06),
+                border: Border.all(color: onSurface.withValues(alpha: 0.12)),
               ),
-              if (_showBackendConnectionTip) ...[
-                const SizedBox(height: 12),
-                _backendConnectionTipCard(),
-              ],
-              const SizedBox(height: 14),
-              _backendSettingTile(
-                icon: Icons.settings_ethernet_rounded,
-                title: 'Type',
-                subtitle:
-                    'Choose Local for a local backend or Remote for another host',
-                trailing: _tipPulseGlowIf(
-                  DropdownButtonFormField<BackendConnectionType>(
-                    initialValue: _settings.backendConnectionType,
-                    decoration: _backendFieldDecoration(),
-                    items: BackendConnectionType.values.map((type) {
-                      return DropdownMenuItem<BackendConnectionType>(
-                        value: type,
-                        child: Text(type.label),
-                      );
-                    }).toList(),
-                    onChanged: (type) {
-                      if (type == null) return;
-                      unawaited(_setBackendConnectionType(type));
-                    },
+              child: Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _backendOnline
+                          ? const Color(0xFF16C47F)
+                          : const Color(0xFFDC3545),
+                    ),
                   ),
-                  enabled:
-                      _showBackendConnectionTip && _backendQuickTipStep < 2,
-                ),
+                  const SizedBox(width: 10),
+                  Text(
+                    _backendOnline
+                        ? 'Backend reachable'
+                        : 'Backend not detected',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: onSurface.withValues(alpha: 0.92),
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    statusLabel,
+                    style: TextStyle(
+                      color: onSurface.withValues(alpha: 0.74),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote)
-                const SizedBox(height: 8),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote)
-                _backendSettingTile(
-                  icon: Icons.language_rounded,
-                  title: 'Host',
-                  subtitle: 'The hostname of the backend',
-                  trailing: TextField(
-                    controller: _backendHostController,
-                    keyboardType: TextInputType.url,
-                    decoration:
-                        _backendFieldDecoration(
-                          hintText: 'Enter IP Here',
-                        ).copyWith(
-                          suffixIconConstraints: const BoxConstraints.tightFor(
+            ),
+            if (_showBackendConnectionTip) ...[
+              const SizedBox(height: 12),
+              _backendConnectionTipCard(),
+            ],
+            const SizedBox(height: 14),
+            _backendSettingTile(
+              icon: Icons.settings_ethernet_rounded,
+              title: 'Type',
+              subtitle:
+                  'Choose Local for a local backend or Remote for another host',
+              trailing: _tipPulseGlowIf(
+                DropdownButtonFormField<BackendConnectionType>(
+                  initialValue: _settings.backendConnectionType,
+                  decoration: _backendFieldDecoration(),
+                  items: BackendConnectionType.values.map((type) {
+                    return DropdownMenuItem<BackendConnectionType>(
+                      value: type,
+                      child: Text(type.label),
+                    );
+                  }).toList(),
+                  onChanged: (type) {
+                    if (type == null) return;
+                    unawaited(_setBackendConnectionType(type));
+                  },
+                ),
+                enabled: _showBackendConnectionTip && _backendQuickTipStep < 2,
+              ),
+            ),
+            if (_settings.backendConnectionType == BackendConnectionType.remote)
+              const SizedBox(height: 8),
+            if (_settings.backendConnectionType == BackendConnectionType.remote)
+              _backendSettingTile(
+                icon: Icons.language_rounded,
+                title: 'Host',
+                subtitle: 'The hostname of the backend',
+                trailing: TextField(
+                  controller: _backendHostController,
+                  keyboardType: TextInputType.url,
+                  decoration: _backendFieldDecoration(hintText: 'Enter IP Here')
+                      .copyWith(
+                        suffixIconConstraints: const BoxConstraints.tightFor(
+                          width: 40,
+                          height: 40,
+                        ),
+                        suffixIcon: _tipPulseGlowIf(
+                          SizedBox(
                             width: 40,
                             height: 40,
-                          ),
-                          suffixIcon: _tipPulseGlowIf(
-                            SizedBox(
-                              width: 40,
-                              height: 40,
-                              child: IconButton(
-                                tooltip: 'Save backend',
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints.tightFor(
-                                  width: 40,
-                                  height: 40,
-                                ),
-                                onPressed: () =>
-                                    unawaited(_saveCurrentRemoteBackend()),
-                                icon: const Icon(
-                                  Icons.bookmark_add_rounded,
-                                  size: 18,
-                                ),
+                            child: IconButton(
+                              tooltip: 'Save backend',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 40,
+                                height: 40,
+                              ),
+                              onPressed: () =>
+                                  unawaited(_saveCurrentRemoteBackend()),
+                              icon: const Icon(
+                                Icons.bookmark_add_rounded,
+                                size: 18,
                               ),
                             ),
-                            enabled:
-                                _showBackendConnectionTip &&
-                                _backendQuickTipStep == 2,
                           ),
+                          enabled:
+                              _showBackendConnectionTip &&
+                              _backendQuickTipStep == 2,
                         ),
-                    onChanged: (value) {
-                      final trimmed = value.trim();
-                      if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
-                        setState(() {
-                          _settings = _settings.copyWith(backendHost: '');
-                        });
-                        if (_backendHostController.text.isNotEmpty) {
-                          _backendHostController.value = const TextEditingValue(
-                            text: '',
-                          );
-                        }
-                        unawaited(_saveSettings(toast: false));
-                        unawaited(_refreshRuntime());
-                        if (mounted) {
-                          _toast(
-                            'Remote backend host cannot be localhost. Use an external host or IP',
-                          );
-                        }
-                        return;
-                      }
+                      ),
+                  onChanged: (value) {
+                    final trimmed = value.trim();
+                    if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
                       setState(() {
-                        _settings = _settings.copyWith(backendHost: trimmed);
+                        _settings = _settings.copyWith(backendHost: '');
                       });
+                      if (_backendHostController.text.isNotEmpty) {
+                        _backendHostController.value = const TextEditingValue(
+                          text: '',
+                        );
+                      }
                       unawaited(_saveSettings(toast: false));
                       unawaited(_refreshRuntime());
-                    },
-                  ),
-                ),
-              const SizedBox(height: 8),
-              _backendSettingTile(
-                icon: Icons.numbers_rounded,
-                title: 'Port',
-                subtitle: 'The port of the backend',
-                trailing: TextField(
-                  controller: _backendPortController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: _backendFieldDecoration(hintText: '3551'),
-                  onChanged: (value) {
-                    final parsed = int.tryParse(value);
-                    if (parsed == null || parsed <= 0) return;
+                      if (mounted) {
+                        _toast(
+                          'Remote backend host cannot be localhost. Use an external host or IP',
+                        );
+                      }
+                      return;
+                    }
                     setState(() {
-                      _settings = _settings.copyWith(backendPort: parsed);
+                      _settings = _settings.copyWith(backendHost: trimmed);
                     });
                     unawaited(_saveSettings(toast: false));
                     unawaited(_refreshRuntime());
                   },
                 ),
               ),
-              const SizedBox(height: 12),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final compactActions = constraints.maxWidth < 980;
-                  final backendLaunchEnabled =
-                      _settings.backendConnectionType ==
-                          BackendConnectionType.local &&
-                      !_atlasBackendActionBusy &&
-                      _atlasBackendProcess == null &&
-                      !_backendOnline;
-                  const buttonTextStyle = TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                  );
-
-                  final launchButton = FilledButton.icon(
-                    onPressed: backendLaunchEnabled
-                        ? _launchManagedAtlasBackend
-                        : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: secondary.withValues(alpha: 0.92),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: onSurface.withValues(
-                        alpha: 0.15,
-                      ),
-                      disabledForegroundColor: onSurface.withValues(
-                        alpha: 0.58,
-                      ),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                      elevation: 0,
-                    ),
-                    icon: Icon(
-                      _atlasBackendProcess != null
-                          ? Icons.check_circle_rounded
-                          : Icons.play_arrow_rounded,
-                    ),
-                    label: Text(backendLaunchLabel),
-                  );
-
-                  final checkButton = FilledButton.tonalIcon(
-                    onPressed: _checkBackendNow,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: secondary.withValues(alpha: 0.92),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: onSurface.withValues(
-                        alpha: 0.15,
-                      ),
-                      disabledForegroundColor: onSurface.withValues(
-                        alpha: 0.58,
-                      ),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                      elevation: 0,
-                    ),
-                    icon: const Icon(Icons.network_check_rounded, size: 18),
-                    label: const Text('Check backend'),
-                  );
-
-                  final resetButton = OutlinedButton.icon(
-                    onPressed: _resetBackendPreferences,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: onSurface.withValues(alpha: 0.9),
-                      side: BorderSide(
-                        color: onSurface.withValues(alpha: 0.22),
-                      ),
-                      backgroundColor: onSurface.withValues(alpha: 0.03),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                    ),
-                    icon: const Icon(Icons.restart_alt_rounded, size: 18),
-                    label: const Text('Reset'),
-                  );
-
-                  if (compactActions) {
-                    return Column(
-                      children: [
-                        launchButton,
-                        const SizedBox(height: 10),
-                        Row(
-                          children: [
-                            Expanded(child: checkButton),
-                            const SizedBox(width: 10),
-                            Expanded(child: resetButton),
-                          ],
-                        ),
-                      ],
-                    );
-                  }
-
-                  return Row(
-                    children: [
-                      Expanded(flex: 2, child: launchButton),
-                      const SizedBox(width: 10),
-                      Expanded(child: checkButton),
-                      const SizedBox(width: 10),
-                      Expanded(child: resetButton),
-                    ],
-                  );
+            const SizedBox(height: 8),
+            _backendSettingTile(
+              icon: Icons.numbers_rounded,
+              title: 'Port',
+              subtitle: 'The port of the backend',
+              trailing: TextField(
+                controller: _backendPortController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: _backendFieldDecoration(hintText: '3551'),
+                onChanged: (value) {
+                  final parsed = int.tryParse(value);
+                  if (parsed == null || parsed <= 0) return;
+                  setState(() {
+                    _settings = _settings.copyWith(backendPort: parsed);
+                  });
+                  unawaited(_saveSettings(toast: false));
+                  unawaited(_refreshRuntime());
                 },
               ),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote) ...[
-                const SizedBox(height: 14),
-                if (_settings.savedBackends.isEmpty)
-                  _savedBackendsPanel()
-                else
-                  Expanded(child: _savedBackendsPanel()),
-              ],
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compactActions = constraints.maxWidth < 980;
+                final backendLaunchEnabled =
+                    _settings.backendConnectionType ==
+                        BackendConnectionType.local &&
+                    !_atlasBackendActionBusy &&
+                    _atlasBackendProcess == null &&
+                    !_backendOnline;
+                const buttonTextStyle = TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                );
+
+                final launchButton = FilledButton.icon(
+                  onPressed: backendLaunchEnabled
+                      ? _launchManagedAtlasBackend
+                      : null,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: secondary.withValues(alpha: 0.92),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: onSurface.withValues(alpha: 0.15),
+                    disabledForegroundColor: onSurface.withValues(alpha: 0.58),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                    elevation: 0,
+                  ),
+                  icon: Icon(
+                    _atlasBackendProcess != null
+                        ? Icons.check_circle_rounded
+                        : Icons.play_arrow_rounded,
+                  ),
+                  label: Text(backendLaunchLabel),
+                );
+
+                final checkButton = FilledButton.tonalIcon(
+                  onPressed: _checkBackendNow,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: secondary.withValues(alpha: 0.92),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: onSurface.withValues(alpha: 0.15),
+                    disabledForegroundColor: onSurface.withValues(alpha: 0.58),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.network_check_rounded, size: 18),
+                  label: const Text('Check backend'),
+                );
+
+                final resetButton = OutlinedButton.icon(
+                  onPressed: _resetBackendPreferences,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: onSurface.withValues(alpha: 0.9),
+                    side: BorderSide(color: onSurface.withValues(alpha: 0.22)),
+                    backgroundColor: onSurface.withValues(alpha: 0.03),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                  ),
+                  icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                  label: const Text('Reset'),
+                );
+
+                if (compactActions) {
+                  return Column(
+                    children: [
+                      launchButton,
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(child: checkButton),
+                          const SizedBox(width: 10),
+                          Expanded(child: resetButton),
+                        ],
+                      ),
+                    ],
+                  );
+                }
+
+                return Row(
+                  children: [
+                    Expanded(flex: 2, child: launchButton),
+                    const SizedBox(width: 10),
+                    Expanded(child: checkButton),
+                    const SizedBox(width: 10),
+                    Expanded(child: resetButton),
+                  ],
+                );
+              },
+            ),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.remote) ...[
+              const SizedBox(height: 14),
+              if (_settings.savedBackends.isEmpty)
+                _savedBackendsPanel()
+              else
+                Expanded(child: _savedBackendsPanel()),
             ],
-          ),
+          ],
         ),
       ),
+    );
+
+    return _menuItemEntrance(
+      menuKey: LauncherTab.backend,
+      index: 0,
+      child: shouldShrinkBackendPanel
+          ? Align(alignment: Alignment.topCenter, child: backendPanel)
+          : backendPanel,
     );
   }
 
@@ -19668,6 +21513,7 @@ class LauncherSettings {
     required this.largePakPatcherFilePath,
     required this.savedBackends,
     required this.savedBackendsByProfile,
+    required this.totalAtlasPlaySeconds,
     required this.versions,
     required this.selectedVersionId,
   });
@@ -19710,6 +21556,7 @@ class LauncherSettings {
   final String largePakPatcherFilePath;
   final List<SavedBackend> savedBackends;
   final Map<String, List<SavedBackend>> savedBackendsByProfile;
+  final int totalAtlasPlaySeconds;
   final List<VersionEntry> versions;
   final String selectedVersionId;
 
@@ -19765,6 +21612,7 @@ class LauncherSettings {
     String? largePakPatcherFilePath,
     List<SavedBackend>? savedBackends,
     Map<String, List<SavedBackend>>? savedBackendsByProfile,
+    int? totalAtlasPlaySeconds,
     List<VersionEntry>? versions,
     String? selectedVersionId,
   }) {
@@ -19825,6 +21673,8 @@ class LauncherSettings {
       savedBackends: savedBackends ?? this.savedBackends,
       savedBackendsByProfile:
           savedBackendsByProfile ?? this.savedBackendsByProfile,
+      totalAtlasPlaySeconds:
+          totalAtlasPlaySeconds ?? this.totalAtlasPlaySeconds,
       versions: versions ?? this.versions,
       selectedVersionId: selectedVersionId ?? this.selectedVersionId,
     );
@@ -19870,6 +21720,7 @@ class LauncherSettings {
       largePakPatcherFilePath: '',
       savedBackends: <SavedBackend>[],
       savedBackendsByProfile: <String, List<SavedBackend>>{},
+      totalAtlasPlaySeconds: 0,
       versions: <VersionEntry>[],
       selectedVersionId: '',
     );
@@ -20119,6 +21970,10 @@ class LauncherSettings {
               .toString(),
       savedBackends: resolvedSavedBackends,
       savedBackendsByProfile: parsedSavedBackendsByProfile,
+      totalAtlasPlaySeconds: asInt(
+        json['totalAtlasPlaySeconds'] ?? json['atlasPlaySeconds'],
+        0,
+      ),
       versions: parsedVersions,
       selectedVersionId: selected,
     );
@@ -20169,6 +22024,7 @@ class LauncherSettings {
           profileSavedBackends.map((entry) => entry.toJson()).toList(),
         ),
       ),
+      'totalAtlasPlaySeconds': totalAtlasPlaySeconds,
       'versions': versions.map((entry) => entry.toJson()).toList(),
       'selectedVersionId': selectedVersionId,
     };
@@ -20214,6 +22070,8 @@ class VersionEntry {
     required this.location,
     required this.executablePath,
     this.splashImagePath = '',
+    this.playTimeSeconds = 0,
+    this.lastPlayedAtEpochMs = 0,
   });
 
   final String id;
@@ -20222,6 +22080,8 @@ class VersionEntry {
   final String location;
   final String executablePath;
   final String splashImagePath;
+  final int playTimeSeconds;
+  final int lastPlayedAtEpochMs;
 
   VersionEntry copyWith({
     String? id,
@@ -20230,6 +22090,8 @@ class VersionEntry {
     String? location,
     String? executablePath,
     String? splashImagePath,
+    int? playTimeSeconds,
+    int? lastPlayedAtEpochMs,
   }) {
     return VersionEntry(
       id: id ?? this.id,
@@ -20238,10 +22100,19 @@ class VersionEntry {
       location: location ?? this.location,
       executablePath: executablePath ?? this.executablePath,
       splashImagePath: splashImagePath ?? this.splashImagePath,
+      playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
+      lastPlayedAtEpochMs: lastPlayedAtEpochMs ?? this.lastPlayedAtEpochMs,
     );
   }
 
   factory VersionEntry.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
     return VersionEntry(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
@@ -20250,6 +22121,14 @@ class VersionEntry {
       executablePath: (json['executablePath'] ?? '').toString(),
       splashImagePath: (json['splashImagePath'] ?? json['coverImagePath'] ?? '')
           .toString(),
+      playTimeSeconds: asInt(
+        json['playTimeSeconds'] ?? json['trackedPlaySeconds'],
+        0,
+      ),
+      lastPlayedAtEpochMs: asInt(
+        json['lastPlayedAtEpochMs'] ?? json['lastPlayedAt'],
+        0,
+      ),
     );
   }
 
@@ -20261,6 +22140,8 @@ class VersionEntry {
       'location': location,
       'executablePath': executablePath,
       'splashImagePath': splashImagePath,
+      'playTimeSeconds': playTimeSeconds,
+      'lastPlayedAtEpochMs': lastPlayedAtEpochMs,
     };
   }
 }

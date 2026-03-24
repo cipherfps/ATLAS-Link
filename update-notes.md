@@ -1,4 +1,4 @@
-<!-- version: 1.1.7 -->
+<!-- version: 1.1.8 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -14,9 +14,9 @@ Markdown Quick Key
 
 ---
 # Improvements
-- Added Spotlight Submissions. Submit your clips in the ATLAS Discord to be featured!
+- Added Stats tab to see your total playtime for ATLAS!
+- Changed set up descriptions for more information
 # Fixes
-- Fixed a bug with the Discord RPC DLL that would crash many builds
-- Fixed bugs related to spotlights
+- Fixed visibiltiy and guidance in some areas for onboarding
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
