@@ -20,6 +20,123 @@ import 'package:win32/win32.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 
+String _joinAtlasBackendInstallPath(List<String> pieces) {
+  return pieces.join(Platform.pathSeparator);
+}
+
+class AtlasBackendInstallSupport {
+  static String? selectInstallerUrl(dynamic assetsRaw) {
+    if (assetsRaw is! List) return null;
+
+    String? atlasSetupExe;
+    String? setupExe;
+    String? atlasExe;
+    String? firstExe;
+    String? atlasInstallerMsi;
+    String? installerMsi;
+    String? atlasMsi;
+    String? firstMsi;
+
+    for (final asset in assetsRaw) {
+      if (asset is! Map<String, dynamic>) continue;
+      final name = asset['name']?.toString().toLowerCase() ?? '';
+      final url = asset['browser_download_url']?.toString().trim();
+      if (url == null || url.isEmpty || name.isEmpty) continue;
+
+      final isAtlasAsset = name.contains('atlas') || name.contains('backend');
+      final isInstaller =
+          name.contains('setup') ||
+          name.contains('installer') ||
+          name.contains('install');
+
+      if (name.endsWith('.exe')) {
+        if (isInstaller && isAtlasAsset) {
+          atlasSetupExe ??= url;
+        } else if (isInstaller) {
+          setupExe ??= url;
+        } else if (isAtlasAsset) {
+          atlasExe ??= url;
+        } else {
+          firstExe ??= url;
+        }
+        continue;
+      }
+
+      if (name.endsWith('.msi')) {
+        if (isInstaller && isAtlasAsset) {
+          atlasInstallerMsi ??= url;
+        } else if (isInstaller) {
+          installerMsi ??= url;
+        } else if (isAtlasAsset) {
+          atlasMsi ??= url;
+        } else {
+          firstMsi ??= url;
+        }
+      }
+    }
+
+    return atlasSetupExe ??
+        setupExe ??
+        atlasExe ??
+        firstExe ??
+        atlasInstallerMsi ??
+        installerMsi ??
+        atlasMsi ??
+        firstMsi;
+  }
+
+  static Iterable<String> executableCandidatesForRoot(String dirPath) sync* {
+    final trimmed = dirPath.trim();
+    if (trimmed.isEmpty) return;
+
+    for (final executableName in const <String>[
+      'ATLAS Backend.exe',
+      'ATLAS-Backend.exe',
+      'ATLAS.exe',
+    ]) {
+      yield _joinAtlasBackendInstallPath([trimmed, executableName]);
+    }
+
+    for (final relativeParts in const <List<String>>[
+      <String>['dist', 'ATLAS-Backend', 'ATLAS Backend.exe'],
+      <String>['dist', 'ATLAS-Backend', 'ATLAS-Backend.exe'],
+      <String>['dist', 'ATLAS-Backend', 'ATLAS.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS Backend.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS-Backend.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS.exe'],
+      <String>[
+        'atlas_gui_flutter',
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS Backend.exe',
+      ],
+      <String>[
+        'atlas_gui_flutter',
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS.exe',
+      ],
+      <String>[
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS Backend.exe',
+      ],
+      <String>['build', 'windows', 'x64', 'runner', 'Release', 'ATLAS.exe'],
+    ]) {
+      yield _joinAtlasBackendInstallPath([trimmed, ...relativeParts]);
+    }
+  }
+}
+
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
 const _fallbackAcrylicColorLight = Color(0x36F2F6FF);
 
@@ -519,8 +636,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.8';
-  static const String _launcherBuildLabel = 'Stable 1.1.8';
+  static const String _launcherVersion = '1.1.9';
+  static const String _launcherBuildLabel = 'Stable 1.1.9';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -16774,8 +16891,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ? '.msi'
           : initialLowerPath.endsWith('.exe')
           ? '.exe'
-          // Prefer MSI if the URL has no usable extension (common with redirects).
-          : '.msi';
+          : '.exe';
       var installerFile = File(
         _joinPath([tempDir.path, 'atlas-backend-installer$extension']),
       );
@@ -17274,63 +17390,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       ..connectionTimeout = const Duration(seconds: 8)
       ..userAgent = 'ATLAS-Link';
     try {
-      String? pickInstallerFromAssets(dynamic assets) {
-        if (assets is! List) return null;
-        String? atlasInstallerMsi;
-        String? installerMsi;
-        String? atlasMsi;
-        String? firstMsi;
-        String? atlasSetupExe;
-        String? setupExe;
-        String? atlasExe;
-        String? firstExe;
-        for (final asset in assets) {
-          if (asset is! Map<String, dynamic>) continue;
-          final name = (asset['name'] ?? '').toString().toLowerCase();
-          final url = (asset['browser_download_url'] ?? '').toString().trim();
-          if (url.isEmpty) continue;
-
-          final isAtlasAsset =
-              name.contains('atlas') || name.contains('backend');
-          final isInstaller =
-              name.contains('setup') ||
-              name.contains('installer') ||
-              name.contains('install');
-          if (name.endsWith('.msi')) {
-            if (isInstaller && isAtlasAsset) {
-              atlasInstallerMsi ??= url;
-            } else if (isInstaller) {
-              installerMsi ??= url;
-            } else if (isAtlasAsset) {
-              atlasMsi ??= url;
-            } else {
-              firstMsi ??= url;
-            }
-            continue;
-          }
-          if (name.endsWith('.exe')) {
-            if (isInstaller && isAtlasAsset) {
-              atlasSetupExe ??= url;
-            } else if (isInstaller) {
-              setupExe ??= url;
-            } else if (isAtlasAsset) {
-              atlasExe ??= url;
-            } else {
-              firstExe ??= url;
-            }
-          }
-        }
-        // Prefer MSI now that backend is distributed as an MSI again.
-        return atlasInstallerMsi ??
-            installerMsi ??
-            atlasMsi ??
-            firstMsi ??
-            atlasSetupExe ??
-            setupExe ??
-            atlasExe ??
-            firstExe;
-      }
-
       Future<dynamic> fetchGitHubJson(String url) async {
         final request = await client.getUrl(Uri.parse(url));
         request.followRedirects = true;
@@ -17359,7 +17418,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       final latest = await fetchGitHubJson(_atlasBackendLatestReleaseApi);
       if (latest is Map<String, dynamic>) {
-        final picked = pickInstallerFromAssets(latest['assets']);
+        final picked = AtlasBackendInstallSupport.selectInstallerUrl(
+          latest['assets'],
+        );
         if (picked != null) return picked;
       }
 
@@ -17375,7 +17436,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           if (release is! Map<String, dynamic>) continue;
           if (release['draft'] == true) continue;
           if (!includePrerelease && release['prerelease'] == true) continue;
-          final picked = pickInstallerFromAssets(release['assets']);
+          final picked = AtlasBackendInstallSupport.selectInstallerUrl(
+            release['assets'],
+          );
           if (picked != null) return picked;
         }
         return null;
@@ -17477,9 +17540,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final candidates = <String>[];
     void addWithNames(String? dirPath) {
       if (dirPath == null || dirPath.trim().isEmpty) return;
-      candidates.add(_joinPath([dirPath, 'ATLAS Backend.exe']));
-      candidates.add(_joinPath([dirPath, 'ATLAS-Backend.exe']));
-      candidates.add(_joinPath([dirPath, 'ATLAS.exe']));
+      candidates.addAll(
+        AtlasBackendInstallSupport.executableCandidatesForRoot(dirPath),
+      );
     }
 
     final configuredPath = _settings.backendWorkingDirectory.trim();

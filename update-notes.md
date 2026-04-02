@@ -1,4 +1,4 @@
-<!-- version: 1.1.8 -->
+<!-- version: 1.1.9 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -14,9 +14,6 @@ Markdown Quick Key
 
 ---
 # Improvements
-- Added Stats tab to see your total playtime for ATLAS!
-- Changed set up descriptions for more information
-# Fixes
-- Fixed visibiltiy and guidance in some areas for onboarding
+- Added support for reworked ATLAS Backend
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
