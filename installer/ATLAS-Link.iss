@@ -73,7 +73,6 @@ ReadyLabel2b=Click Install to continue with the installation.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "Additional options:"; Flags: unchecked
-Name: "launchafterinstall"; Description: "Automatically launch {#MyAppName} after setup finishes"; GroupDescription: "Additional options:"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -89,7 +88,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#ExecutableName}"; Tasks: 
 #if VcRedistPath != ""
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Check: NeedsVCRedist; Flags: runhidden waituntilterminated
 #endif
-Filename: "{app}\{#ExecutableName}"; Tasks: launchafterinstall; Flags: nowait skipifsilent
+Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var

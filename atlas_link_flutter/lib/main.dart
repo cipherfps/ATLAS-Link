@@ -10,13 +10,16 @@ import 'dart:ui';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:ffi/ffi.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
+import 'build_import.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 
@@ -433,7 +436,7 @@ class _SmoothScrollPhysics extends ScrollPhysics {
 
 enum LauncherTab { home, library, stats, backend, general }
 
-enum SettingsSection { profile, appearance, dataManagement, support }
+enum SettingsSection { profile, appearance, dataManagement, credits, support }
 
 enum GameServerInjectType { custom }
 
@@ -478,7 +481,6 @@ class _FortniteProcessState {
   bool largePakInjected = false;
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
-  bool gameServerInjectionScheduled = false;
   bool sawContinueLoggingIn = false;
   bool sawAnyCompletedLoginLine = false;
   bool sawEnglishCompletedLoginLine = false;
@@ -636,8 +638,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.9';
-  static const String _launcherBuildLabel = 'Stable 1.1.9';
+  static const String _launcherVersion = '1.2.0';
+  static const String _launcherBuildLabel = 'Stable 1.2.0';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -650,8 +652,6 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _authInjectionMaxAttempts = 3;
   // Optimized for low-end PCs: increased from 20s to 40s timeout to account for
   // slow disk I/O, AV scanning, and heavy system contention. This significantly
-  // reduces "Injection timed out" failures on low-end hardware.
-  static const int _dllInjectionWaitMs = 40000;
   static const int _gameServerInjectionRetryDelayMs = 100;
   static const int _gameServerInjectionMaxRetryDelayMs = 800;
   static const int _gameServerInjectionMaxAttempts = 3;
@@ -665,6 +665,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _postLoginInjectionDelayMs = 300;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
+  static const String _defaultEpicAuthPassword = 'AtlasDefault';
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _discordRpcDllName = 'discord-rpc.dll';
   static const String _discordRpcOriginalDllName = 'discord-rpc-original.dll';
@@ -3523,6 +3524,28 @@ class _LauncherScreenState extends State<LauncherScreen>
     return port;
   }
 
+  /// Do not pass `-BackendHost` / `-BackendPort` on the Fortnite argv (some builds crash).
+  /// Tellurium and related code can use `ATLAS_BACKEND_HOST` / `ATLAS_BACKEND_PORT` instead.
+  Map<String, String> _fortniteProcessEnvironment({
+    required bool includeGameServerPort,
+  }) {
+    final backendHost = _effectiveBackendHostForLaunchArgs();
+    final backendPort = _effectiveBackendPort();
+    final env = <String, String>{
+      ...Platform.environment,
+      'OPENSSL_ia32cap': '~0x20000000',
+      'ATLAS_BACKEND_HOST': backendHost,
+      'ATLAS_BACKEND_PORT': '$backendPort',
+    };
+    if (includeGameServerPort) {
+      final gamePort = _effectiveGameServerPort();
+      if (gamePort > 0) {
+        env['ATLAS_GAME_SERVER_PORT'] = '$gamePort';
+      }
+    }
+    return env;
+  }
+
   VersionEntry? _findVersionById(String versionId) {
     for (final version in _settings.versions) {
       if (version.id == versionId) return version;
@@ -4031,7 +4054,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     var server = await tryBind();
     if (server != null) return server;
 
-    // Reboot-style: free the default backend port and try again.
+    // Free the default backend port and try again.
     await _killExistingProcessByPort(_defaultBackendPort);
     await Future.delayed(const Duration(milliseconds: 200));
     server = await tryBind();
@@ -4418,8 +4441,8 @@ class _LauncherScreenState extends State<LauncherScreen>
                         ),
                         const SizedBox(height: 14),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
+                            const Spacer(),
                             TextButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(),
@@ -4480,36 +4503,46 @@ class _LauncherScreenState extends State<LauncherScreen>
       transitionDuration: const Duration(milliseconds: 240),
       pageBuilder: (dialogContext, animation, secondaryAnimation) {
         final secondary = Theme.of(dialogContext).colorScheme.secondary;
-        Widget linkRow({required String label, required String url}) {
-          final pretty = url
-              .replaceFirst('https://', '')
-              .replaceFirst('http://', '');
-          return Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 4,
-            runSpacing: 4,
-            children: [
-              Text(
-                '$label:',
-                style: TextStyle(
-                  color: _onSurface(dialogContext, 0.86),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              InkWell(
-                onTap: () => unawaited(_openUrl(url)),
-                borderRadius: BorderRadius.circular(6),
-                child: Text(
-                  pretty,
-                  style: TextStyle(
-                    color: secondary,
-                    fontWeight: FontWeight.w600,
-                    decoration: TextDecoration.underline,
-                    decorationColor: secondary,
-                  ),
-                ),
-              ),
-            ],
+        final size = MediaQuery.sizeOf(dialogContext);
+        final dialogWidth = max(320.0, min(920.0, size.width - 24));
+        final dialogMaxHeight = max(420.0, min(760.0, size.height - 24));
+        const creators = <_AboutCreatorProfile>[
+          _AboutCreatorProfile(
+            name: 'cipher',
+            handle: '@cipherfps',
+            role: 'Owner',
+            githubUrl: 'https://github.com/cipherfps',
+            avatarUrl: 'https://github.com/cipherfps.png?size=240',
+            description:
+                'Creator of ATLAS and constantly updates and develops the launcher/backend for the best possible experience. (Thank you for trying ATLAS! <3)',
+          ),
+          _AboutCreatorProfile(
+            name: 'ralz',
+            handle: '@Ralzify',
+            role: 'Co-Owner',
+            githubUrl: 'https://github.com/Ralzify',
+            avatarUrl: 'https://github.com/Ralzify.png?size=240',
+            description:
+                'Co-creator of ATLAS and helps maintain the gameserver Magnesium, as well as contributing to launcher/backend features and improvements.',
+          ),
+        ];
+
+        Widget aboutActionButton({
+          required Widget icon,
+          required String label,
+          required VoidCallback onPressed,
+        }) {
+          return OutlinedButton.icon(
+            onPressed: onPressed,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _onSurface(dialogContext, 0.92),
+              backgroundColor: _onSurface(dialogContext, 0.03),
+              side: BorderSide(color: _onSurface(dialogContext, 0.14)),
+              shape: const StadiumBorder(),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+            icon: icon,
+            label: Text(label),
           );
         }
 
@@ -4518,7 +4551,10 @@ class _LauncherScreenState extends State<LauncherScreen>
             child: Material(
               type: MaterialType.transparency,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 520),
+                constraints: BoxConstraints(
+                  maxWidth: dialogWidth,
+                  maxHeight: dialogMaxHeight,
+                ),
                 child: Container(
                   decoration: BoxDecoration(
                     color: _dialogSurfaceColor(dialogContext),
@@ -4532,17 +4568,18 @@ class _LauncherScreenState extends State<LauncherScreen>
                       ),
                     ],
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Container(
-                              width: 36,
-                              height: 36,
+                              width: 42,
+                              height: 42,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: _adaptiveScrimColor(
@@ -4555,23 +4592,40 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 ),
                               ),
                               child: Padding(
-                                padding: const EdgeInsets.all(5),
+                                padding: const EdgeInsets.all(6),
                                 child: Image.asset(
                                   'assets/images/atlas_logo.png',
                                   fit: BoxFit.contain,
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Text(
-                              'About',
-                              style: TextStyle(
-                                fontSize: 34,
-                                fontWeight: FontWeight.w700,
-                                color: _onSurface(dialogContext, 0.96),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'About',
+                                    style: TextStyle(
+                                      fontSize: 40,
+                                      fontWeight: FontWeight.w800,
+                                      color: _onSurface(dialogContext, 0.96),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'Created by the ATLAS team',
+                                    style: TextStyle(
+                                      color: _onSurface(dialogContext, 0.72),
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            const Spacer(),
+                            const SizedBox(width: 12),
                             _buildVersionTag(
                               dialogContext,
                               label: _versionLabel(_launcherVersion),
@@ -4579,23 +4633,87 @@ class _LauncherScreenState extends State<LauncherScreen>
                             ),
                           ],
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 18),
                         Text(
-                          'Made by cipher',
+                          'ATLAS is created and maintained by cipher and ralz. This launcher and project experience are shaped by the team below.',
                           style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.96),
+                            color: _onSurface(dialogContext, 0.82),
+                            fontSize: 15,
+                            height: 1.5,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        linkRow(label: 'GitHub', url: _atlasLinkRepository),
-                        const SizedBox(height: 6),
-                        linkRow(label: 'Support', url: _atlasLinkDiscordInvite),
-                        const SizedBox(height: 14),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
+                        const SizedBox(height: 16),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
                           children: [
+                            aboutActionButton(
+                              onPressed: () =>
+                                  unawaited(_openUrl(_atlasLinkRepository)),
+                              icon: const FaIcon(
+                                FontAwesomeIcons.github,
+                                size: 16,
+                              ),
+                              label: 'ATLAS Repo',
+                            ),
+                            aboutActionButton(
+                              onPressed: () =>
+                                  unawaited(_openUrl(_atlasLinkDiscordInvite)),
+                              icon: const Icon(Icons.discord_rounded, size: 18),
+                              label: 'Support',
+                            ),
+                            aboutActionButton(
+                              onPressed: () {
+                                Navigator.of(dialogContext).pop();
+                                unawaited(
+                                  _switchMenu(
+                                    LauncherTab.general,
+                                    settingsSection: SettingsSection.credits,
+                                  ),
+                                );
+                              },
+                              icon: const Icon(
+                                Icons.auto_awesome_rounded,
+                                size: 18,
+                              ),
+                              label: 'Extra Credits',
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 22),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final cards = creators
+                                .map(
+                                  (creator) =>
+                                      _aboutCreatorCard(dialogContext, creator),
+                                )
+                                .toList(growable: false);
+                            if (constraints.maxWidth < 780) {
+                              return Column(
+                                children: [
+                                  for (var i = 0; i < cards.length; i++) ...[
+                                    if (i > 0) const SizedBox(height: 16),
+                                    cards[i],
+                                  ],
+                                ],
+                              );
+                            }
+
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(child: cards[0]),
+                                const SizedBox(width: 16),
+                                Expanded(child: cards[1]),
+                              ],
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            const Spacer(),
                             TextButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(),
@@ -5624,13 +5742,110 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return _isLaunchInProgress();
   }
 
-  String _launchPopupLine({required String label, required String message}) {
+  String _launchPopupMessage(String message) {
     var text = message.trim();
     if (text.isEmpty) return '';
     if (text.endsWith('.') && !text.endsWith('...')) {
       text = text.substring(0, text.length - 1).trimRight();
     }
-    return '$label: $text';
+    return text;
+  }
+
+  Widget _buildLaunchPopupStatusLabel({
+    required IconData icon,
+    required String label,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 16, color: _onSurface(context, 0.74)),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '$label:',
+          style: TextStyle(
+            color: _onSurface(context, 0.90),
+            fontSize: 14,
+            height: 1.2,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLaunchPopupStatusContent(
+    List<({IconData icon, String label, String message})> statuses,
+  ) {
+    final visibleStatuses = statuses
+        .map(
+          (status) => (
+            icon: status.icon,
+            label: status.label,
+            message: _launchPopupMessage(status.message),
+          ),
+        )
+        .where((status) => status.message.isNotEmpty)
+        .toList(growable: false);
+
+    final textStyle = TextStyle(
+      color: _onSurface(context, 0.88),
+      fontSize: 14,
+      height: 1.2,
+      fontWeight: FontWeight.w600,
+    );
+
+    if (visibleStatuses.isEmpty) {
+      return Text('Working...', style: textStyle);
+    }
+
+    const dividerGap = 12.0;
+
+    return IntrinsicHeight(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IntrinsicWidth(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < visibleStatuses.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  _buildLaunchPopupStatusLabel(
+                    icon: visibleStatuses[i].icon,
+                    label: visibleStatuses[i].label,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: dividerGap),
+          Container(
+            width: 1,
+            margin: const EdgeInsets.symmetric(vertical: 2),
+            color: _onSurface(context, 0.12),
+          ),
+          const SizedBox(width: dividerGap),
+          Flexible(
+            fit: FlexFit.loose,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < visibleStatuses.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  Text(visibleStatuses[i].message, style: textStyle),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildLaunchProgressPopup() {
@@ -5640,19 +5855,110 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ? selected!.name.trim()
         : 'Launching';
     final subtitle = selected?.gameVersion.trim().isNotEmpty == true
-        ? selected!.gameVersion.trim()
+        ? () {
+            final f = _formatLibraryVersionLabel(selected!.gameVersion);
+            return f == '?' ? '' : f;
+          }()
         : '';
+    final titleTextStyle = TextStyle(
+      color: _onSurface(context, 0.94),
+      fontSize: 22,
+      fontWeight: FontWeight.w800,
+      height: 1.05,
+    );
+    final subtitleTextStyle = TextStyle(
+      color: _onSurface(context, 0.70),
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+      height: 1.0,
+    );
 
     final gameStatus = _currentLibraryGameStatus();
     final hostStatus = _currentLibraryGameServerStatus();
-    final lines = <String>[
-      if (hostStatus != null)
-        _launchPopupLine(label: 'Host', message: hostStatus.message),
+    final statusEntries = <({IconData icon, String label, String message})>[
       if (gameStatus != null)
-        _launchPopupLine(label: 'Fortnite', message: gameStatus.message),
-    ].where((line) => line.trim().isNotEmpty).toList();
-
-    final statusText = lines.isEmpty ? 'Working...' : lines.join('\n');
+        (
+          icon: Icons.sports_esports_rounded,
+          label: 'Fortnite',
+          message: gameStatus.message,
+        ),
+      if (hostStatus != null)
+        (
+          icon: Icons.settings_rounded,
+          label: 'Host',
+          message: hostStatus.message,
+        ),
+    ];
+    final closeButton = InkWell(
+      child: SizedBox(
+        width: 34,
+        height: 34,
+        child: Material(
+          color: _adaptiveScrimColor(
+            context,
+            darkAlpha: 0.08,
+            lightAlpha: 0.14,
+          ),
+          shape: CircleBorder(
+            side: BorderSide(color: _onSurface(context, 0.12)),
+          ),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: () {
+              setState(() => _launchProgressPopupDismissed = true);
+            },
+            child: Center(
+              child: Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: _onSurface(context, 0.84),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final titleBlock = Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image(image: cover, width: 60, height: 60, fit: BoxFit.cover),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: titleTextStyle,
+              ),
+              if (subtitle.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: subtitleTextStyle,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+    final statusPanel = Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: _onSurface(context, 0.05),
+        border: Border.all(color: _onSurface(context, 0.10)),
+      ),
+      child: _buildLaunchPopupStatusContent(statusEntries),
+    );
 
     return Stack(
       children: [
@@ -5670,9 +5976,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           child: Material(
             type: MaterialType.transparency,
             child: Container(
-              constraints: const BoxConstraints(maxWidth: 560),
+              width: min(560.0, MediaQuery.sizeOf(context).width - 48),
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+              padding: const EdgeInsets.fromLTRB(24, 22, 24, 22),
               decoration: BoxDecoration(
                 color: _dialogSurfaceColor(context),
                 borderRadius: BorderRadius.circular(28),
@@ -5690,107 +5996,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(16),
-                        child: Image(
-                          image: cover,
-                          width: 54,
-                          height: 54,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: _onSurface(context, 0.94),
-                                fontSize: 20,
-                                fontWeight: FontWeight.w800,
-                                height: 1.05,
-                              ),
-                            ),
-                            if (subtitle.isNotEmpty) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                subtitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: _onSurface(context, 0.70),
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.0,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(999),
-                        onTap: () {
-                          setState(() => _launchProgressPopupDismissed = true);
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.all(4),
-                          child: Icon(
-                            Icons.close_rounded,
-                            size: 18,
-                            color: _onSurface(context, 0.70),
-                          ),
-                        ),
-                      ),
+                      Expanded(child: titleBlock),
+                      const SizedBox(width: 12),
+                      closeButton,
                     ],
                   ),
-                  const SizedBox(height: 14),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      color: _onSurface(context, 0.05),
-                      border: Border.all(color: _onSurface(context, 0.10)),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.4,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Theme.of(context).colorScheme.secondary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            statusText,
-                            style: TextStyle(
-                              color: _onSurface(context, 0.88),
-                              fontSize: 13.5,
-                              height: 1.25,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 16),
+                  statusPanel,
+                  const SizedBox(height: 18),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(999),
                     child: LinearProgressIndicator(
@@ -6005,21 +6220,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('game', 'Client fully loaded. Scheduling large pak injection...');
       unawaited(_performDeferredLargePakInjection(state));
     }
-
-    // For hosting, delay the game server DLL injection until the lobby marker.
-    if (state.host &&
-        state.postLoginInjected &&
-        state.hostPostLoginPatchersInjected &&
-        !state.gameServerInjected &&
-        !state.gameServerInjectionScheduled &&
-        _clientLoadingCompleteMarkers.any(line.contains)) {
-      state.gameServerInjectionScheduled = true;
-      _log(
-        'gameserver',
-        'Host fully loaded. Scheduling game server DLL injection...',
-      );
-      unawaited(_performDeferredGameServerInjection(state));
-    }
   }
 
   int _calculateExponentialBackoffMs(
@@ -6049,9 +6249,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.host) {
       final inferredFallbackLogin = state.postLoginInferredFromFallback;
 
-      // For the host, inject post-login patchers and then schedule the game
-      // server DLL injection. If login was only inferred via fallback (no real
-      // login marker), skip memory.dll to avoid early-load access violations.
+      // For the host, inject post-login patchers then the game server DLL
+      // Host: memory patcher, port cleanup, then game server DLL.
+      // If login was only inferred via fallback (no real login marker), skip
+      // memory.dll to avoid early-load access violations.
       if (inferredFallbackLogin) {
         _log(
           'gameserver',
@@ -6094,10 +6295,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       state.hostPostLoginPatchersInjected = true;
       _setUiStatus(
         host: true,
-        message: 'Logged in. Waiting for host to finish loading...',
+        message: 'Injecting game server DLL...',
         severity: _UiStatusSeverity.info,
       );
-      unawaited(_scheduleHostFallbackGameServerInjection(state));
+      await Future<void>.delayed(
+        const Duration(milliseconds: _uiStatusDelayMs),
+      );
+      if (state.killed || state.exited) return;
+
+      await _performHostGameServerInjection(state);
     } else {
       _setUiStatus(
         host: false,
@@ -6213,23 +6419,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _performDeferredLargePakInjection(state);
   }
 
-  Future<void> _performDeferredGameServerInjection(
+  /// Injects the game server DLL right after login for the host.
+  Future<void> _performHostGameServerInjection(
     _FortniteProcessState state,
   ) async {
     if (!state.host) return;
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
-    // Give the lobby/subgame UI a moment to settle.
-    await Future<void>.delayed(const Duration(milliseconds: 450));
-    if (state.killed || state.exited) return;
-    if (state.gameServerInjected) return;
-
-    _setUiStatus(
-      host: true,
-      message: 'Injecting game server DLL...',
-      severity: _UiStatusSeverity.info,
-    );
     await Future<void>.delayed(const Duration(milliseconds: 120));
 
     final serverReport = await _injectConfiguredPatchers(
@@ -6244,7 +6441,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final serverFailure = serverReport.firstRequiredFailure;
     if (serverFailure != null) {
-      state.gameServerInjectionScheduled = false;
       _setUiStatus(
         host: true,
         message: 'Failed to inject ${serverFailure.name}.',
@@ -6259,28 +6455,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Running.',
       severity: _UiStatusSeverity.success,
     );
-  }
-
-  Future<void> _scheduleHostFallbackGameServerInjection(
-    _FortniteProcessState state,
-  ) async {
-    if (!state.host) return;
-    if (state.killed || state.exited) return;
-    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
-
-    // Some builds never emit the lobby UI marker. As a fallback, attempt the
-    // server DLL injection after a short delay once post-login patchers ran.
-    await Future<void>.delayed(const Duration(seconds: 16));
-    if (state.killed || state.exited) return;
-    if (!state.hostPostLoginPatchersInjected) return;
-    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
-
-    state.gameServerInjectionScheduled = true;
-    _log(
-      'gameserver',
-      'Host loading marker not seen. Running fallback game server DLL injection...',
-    );
-    unawaited(_performDeferredGameServerInjection(state));
   }
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
@@ -6735,17 +6909,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final backendHost = _effectiveBackendHostForLaunchArgs();
-      final backendPort = _effectiveBackendPort();
-      final args =
-          _createRebootLaunchArgs(
-              username: launchAuth.login,
-              password: launchAuth.password,
-              launchTokens: playLaunchTokens,
-              customArgs: playCustomArgs,
-            )
-            ..add('-BackendHost=$backendHost')
-            ..add('-BackendPort=$backendPort');
+      final args = _createFortniteLaunchArgs(
+        username: launchAuth.login,
+        password: launchAuth.password,
+        launchTokens: playLaunchTokens,
+        customArgs: playCustomArgs,
+      );
 
       _log(
         'game',
@@ -6763,10 +6932,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           exe,
           args,
           workingDirectory: File(exe).parent.path,
-          environment: {
-            ...Platform.environment,
-            'OPENSSL_ia32cap': '~0x20000000',
-          },
+          environment: _fortniteProcessEnvironment(
+            includeGameServerPort: false,
+          ),
         );
       } catch (error) {
         if (launcherPid != null) {
@@ -8113,21 +8281,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final backendHost = _effectiveBackendHostForLaunchArgs();
-      final backendPort = _effectiveBackendPort();
-      final args =
-          _createRebootLaunchArgs(
-              username: launchAuth.login,
-              password: launchAuth.password,
-              launchTokens: hostLaunchTokens,
-              host: true,
-              headless: _settings.hostHeadlessEnabled,
-              logging: false,
-              hostPort: _effectiveGameServerPort(),
-              customArgs: hostCustomArgs,
-            )
-            ..add('-BackendHost=$backendHost')
-            ..add('-BackendPort=$backendPort');
+      final args = _createFortniteLaunchArgs(
+        username: launchAuth.login,
+        password: launchAuth.password,
+        launchTokens: hostLaunchTokens,
+        host: true,
+        headless: _settings.hostHeadlessEnabled,
+        logging: false,
+        customArgs: hostCustomArgs,
+      );
 
       _log(
         'gameserver',
@@ -8140,10 +8302,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           exe,
           args,
           workingDirectory: File(exe).parent.path,
-          environment: {
-            ...Platform.environment,
-            'OPENSSL_ia32cap': '~0x20000000',
-          },
+          environment: _fortniteProcessEnvironment(includeGameServerPort: true),
         );
       } catch (error) {
         if (launcherPid != null) {
@@ -8265,7 +8424,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return null;
   }
 
-  String _buildRebootLoginUsername(String username) {
+  String _buildAtlasLoginUsername(String username) {
     final normalized = _normalizeClientUsername(username);
     return '$normalized@atlas.dev';
   }
@@ -8365,8 +8524,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     return _LaunchAuthCredentials(
-      login: _buildRebootLoginUsername(username),
-      password: 'Rebooted',
+      login: _buildAtlasLoginUsername(username),
+      password: _defaultEpicAuthPassword,
     );
   }
 
@@ -8537,17 +8696,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         .toList(growable: false);
   }
 
-  List<String> _createRebootLaunchArgs({
+  List<String> _createFortniteLaunchArgs({
     required String username,
     required String password,
     required _LaunchSessionTokens launchTokens,
     bool host = false,
     bool headless = false,
     bool logging = false,
-    int? hostPort,
     String customArgs = '',
   }) {
-    final resolvedPassword = password.trim().isEmpty ? 'Rebooted' : password;
+    final resolvedPassword = password.trim().isEmpty
+        ? _defaultEpicAuthPassword
+        : password;
     final args = <String>[
       '-epicapp=Fortnite',
       '-epicenv=Prod',
@@ -8568,9 +8728,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (host) {
       args.add('-nosplash');
       args.add('-nosound');
-      if (hostPort != null && hostPort > 0) {
-        args.add('-Port=$hostPort');
-      }
+      // Omit `-Port` here by default (some host builds crash with it on argv).
+      // `ATLAS_GAME_SERVER_PORT` is still set on the process environment for DLLs.
+      // Add `-Port=7777` (or your port) under Host launch arguments if this build requires it.
       if (headless) {
         args.add('-nullrhi');
       }
@@ -9673,126 +9833,82 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
+  /// `LoadLibraryA` remote thread; does not wait on completion.
   Future<void> _injectDllIntoProcess(int pid, String dllPath) async {
     if (!Platform.isWindows) return;
     final dllFile = File(dllPath);
     if (!dllFile.existsSync()) {
       throw 'DLL not found: $dllPath';
     }
-    // WinAPI calls (notably WaitForSingleObject) can block the UI isolate, so
-    // do the injection work in a background isolate.
-    await Isolate.run(() {
-      const waitObject0 = 0x00000000;
-      const waitTimeout = 0x00000102;
+    final dllLabel = _basename(dllPath);
+    try {
+      await dllFile.readAsBytes();
+    } catch (_) {
+      throw '$dllLabel is not accessible';
+    }
 
-      final processHandle = OpenProcess(
-        PROCESS_CREATE_THREAD |
-            PROCESS_QUERY_INFORMATION |
-            PROCESS_VM_OPERATION |
-            PROCESS_VM_WRITE |
-            PROCESS_VM_READ,
-        FALSE,
-        pid,
-      );
-      if (processHandle == NULL) {
+    const openProcessAccess = 0x43A;
+
+    await Isolate.run(() {
+      final process = OpenProcess(openProcessAccess, FALSE, pid);
+      if (process == NULL) {
         throw 'OpenProcess failed for pid $pid';
       }
 
-      final kernelModuleName = 'KERNEL32.DLL'.toNativeUtf16();
-      final loadLibraryProcName = 'LoadLibraryW'.toNativeUtf8();
-      final dllPathNative = dllPath.toNativeUtf16();
+      final kernelModuleName = 'KERNEL32'.toNativeUtf16();
+      final loadLibraryProcName = 'LoadLibraryA'.toNativeUtf8();
+      final dllPathUtf8 = dllPath.toNativeUtf8();
 
       try {
         final kernelModule = GetModuleHandle(kernelModuleName);
         if (kernelModule == NULL) {
-          throw 'GetModuleHandle failed.';
+          throw 'Cannot get module handle for KERNEL32.';
         }
 
-        final processAddress = GetProcAddress(
-          kernelModule,
-          loadLibraryProcName,
-        );
-        if (processAddress == ffi.nullptr) {
-          throw 'GetProcAddress failed for LoadLibraryW.';
+        final loadLibraryA = GetProcAddress(kernelModule, loadLibraryProcName);
+        if (loadLibraryA == ffi.nullptr) {
+          throw 'Cannot get process address for pid $pid';
         }
 
-        final bytesLength = (dllPath.length + 1) * 2;
-        final remoteAddress = VirtualAllocEx(
-          processHandle,
+        final dllAddress = VirtualAllocEx(
+          process,
           ffi.nullptr,
-          bytesLength,
+          dllPath.length + 1,
           MEM_COMMIT | MEM_RESERVE,
           PAGE_READWRITE,
         );
-        if (remoteAddress == ffi.nullptr) {
-          throw 'VirtualAllocEx failed.';
+        if (dllAddress == ffi.nullptr) {
+          throw 'Cannot allocate memory for dll';
         }
 
         final writeMemoryResult = WriteProcessMemory(
-          processHandle,
-          remoteAddress,
-          dllPathNative.cast(),
-          bytesLength,
+          process,
+          dllAddress,
+          dllPathUtf8.cast(),
+          dllPath.length,
           ffi.nullptr,
         );
         if (writeMemoryResult != 1) {
-          throw 'WriteProcessMemory failed.';
+          throw 'Memory write failed';
         }
 
         final createThreadResult = CreateRemoteThread(
-          processHandle,
+          process,
           ffi.nullptr,
           0,
-          processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
-          remoteAddress,
+          loadLibraryA.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
+          dllAddress,
           0,
           ffi.nullptr,
         );
         if (createThreadResult == NULL) {
-          throw 'CreateRemoteThread failed.';
-        }
-
-        try {
-          final waitResult = WaitForSingleObject(
-            createThreadResult,
-            _dllInjectionWaitMs,
-          );
-          if (waitResult == waitTimeout) {
-            throw 'Injection timed out.';
-          }
-          if (waitResult != waitObject0) {
-            throw 'WaitForSingleObject failed (code $waitResult).';
-          }
-
-          final exitCode = calloc<ffi.Uint32>();
-          try {
-            // The win32 package doesn't currently expose GetExitCodeThread, so
-            // bind it directly. We only need to know whether LoadLibraryW
-            // returned non-zero.
-            final kernel32 = ffi.DynamicLibrary.open('kernel32.dll');
-            final getExitCodeThread = kernel32
-                .lookupFunction<
-                  ffi.Int32 Function(ffi.IntPtr, ffi.Pointer<ffi.Uint32>),
-                  int Function(int, ffi.Pointer<ffi.Uint32>)
-                >('GetExitCodeThread');
-
-            final ok = getExitCodeThread(createThreadResult, exitCode);
-            if (ok == 0) throw 'GetExitCodeThread failed.';
-            if (exitCode.value == 0) {
-              throw 'LoadLibraryW returned 0 (DLL failed to load).';
-            }
-          } finally {
-            calloc.free(exitCode);
-          }
-        } finally {
-          VirtualFreeEx(processHandle, remoteAddress, 0, MEM_RELEASE);
-          CloseHandle(createThreadResult);
+          throw 'Thread creation failed';
         }
       } finally {
         calloc.free(kernelModuleName);
         calloc.free(loadLibraryProcName);
-        calloc.free(dllPathNative);
-        CloseHandle(processHandle);
+        calloc.free(dllPathUtf8);
+        CloseHandle(process);
       }
     });
   }
@@ -9909,6 +10025,126 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _syncLauncherDiscordPresence();
   }
 
+  /// Ensures the previous route (e.g. import dialog) is fully popped before
+  /// pushing another dialog — avoids Navigator popping the wrong overlay.
+  Future<void> _waitForPostFrame() async {
+    final completer = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!completer.isCompleted) completer.complete();
+    });
+    return completer.future;
+  }
+
+  Future<void> _runImportProgressDialog(
+    Future<void> Function(
+      void Function(String message, {double? progress}) update,
+    )
+    job, {
+    String title = 'Importing',
+  }) async {
+    if (!mounted) return;
+    final notifier = ValueNotifier<_ImportProgress>(
+      const _ImportProgress('Starting…', null),
+    );
+
+    void update(String message, {double? progress}) {
+      notifier.value = _ImportProgress(message, progress);
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(dialogContext),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _dialogShadowColor(dialogContext),
+                      blurRadius: 34,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(dialogContext, 0.96),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      ValueListenableBuilder<_ImportProgress>(
+                        valueListenable: notifier,
+                        builder: (context, state, _) {
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(6),
+                                child: LinearProgressIndicator(
+                                  value: state.progress,
+                                  minHeight: 8,
+                                  backgroundColor: _onSurface(
+                                    dialogContext,
+                                    0.08,
+                                  ),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Theme.of(
+                                      dialogContext,
+                                    ).colorScheme.secondary,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                state.message,
+                                style: TextStyle(
+                                  color: _onSurface(dialogContext, 0.82),
+                                  height: 1.35,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    try {
+      await job(update);
+    } finally {
+      notifier.dispose();
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    }
+  }
+
   Future<void> _importVersion() async {
     final importRequest = await _promptImportBuildDialog();
     if (importRequest == null) return;
@@ -9927,54 +10163,88 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return;
     }
 
-    final executable = await _findBuildExecutable(importRequest.buildRootPath);
-    if (executable == null) {
-      _toast('Fortnite executable not found inside selected build');
-      return;
-    }
-
-    final gameVersionFromName = _deriveVersion(importRequest.buildName);
-    final resolvedGameVersion = gameVersionFromName == 'Unknown'
-        ? _deriveVersion(importRequest.buildRootPath)
-        : gameVersionFromName;
-    final splashImagePath = await _findBuildSplashImage(
-      importRequest.buildRootPath,
-      gameVersionHint: resolvedGameVersion,
-      buildNameHint: importRequest.buildName,
-    );
-
-    final version = VersionEntry(
-      id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
-      name: importRequest.buildName,
-      gameVersion: resolvedGameVersion,
-      location: importRequest.buildRootPath,
-      executablePath: executable,
-      splashImagePath: splashImagePath ?? '',
-    );
-    setState(() {
-      _settings = _settings.copyWith(
-        versions: [..._settings.versions, version],
-        selectedVersionId: version.id,
+    await _runImportProgressDialog((update) async {
+      update('Looking for Fortnite executable…', progress: null);
+      final shippingPaths = await findShippingExecutables(
+        importRequest.buildRootPath,
       );
-    });
-    _syncLibraryActionsNudgePulse();
-    await _saveSettings(toast: false);
-    if (mounted) _toast('Version imported');
+      if (shippingPaths.isEmpty) {
+        _toast('Fortnite executable not found inside selected build');
+        return;
+      }
+      if (shippingPaths.length > 1) {
+        _toast(
+          'Multiple FortniteClient-Win64-Shipping.exe files found (${shippingPaths.length}). '
+          'Choose a folder that contains exactly one.',
+        );
+        return;
+      }
+      final executable = shippingPaths.first;
+      update('Applying headless patch…', progress: 0.25);
+      await patchHeadless(File(executable));
+
+      update('Reading game version…', progress: 0.5);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        importRequest.buildRootPath,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        _toast(
+          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
+        );
+        return;
+      }
+      update('Finding splash image…', progress: 0.72);
+      final splashImagePath = await _findBuildSplashImage(
+        importRequest.buildRootPath,
+        gameVersionHint: resolvedGameVersion,
+        buildNameHint: importRequest.buildName,
+      );
+
+      update('Saving build…', progress: 0.92);
+      final version = VersionEntry(
+        id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
+        name: importRequest.buildName,
+        gameVersion: resolvedGameVersion,
+        location: importRequest.buildRootPath,
+        executablePath: executable,
+        splashImagePath: splashImagePath ?? '',
+      );
+      setState(() {
+        _settings = _settings.copyWith(
+          versions: [..._settings.versions, version],
+          selectedVersionId: version.id,
+        );
+      });
+      _syncLibraryActionsNudgePulse();
+      await _saveSettings(toast: false);
+      update('Done.', progress: 1);
+      if (mounted) _toast('Version imported');
+    }, title: 'Importing build');
   }
 
   Future<void> _importManyVersionsFromParent(String parentPath) async {
     final rootPath = parentPath.trim();
     if (rootPath.isEmpty) return;
 
-    final buildRoots = await _discoverBuildRoots(rootPath);
-    if (buildRoots.length < 2) {
-      _toast(
-        'Select a folder that contains multiple build folders with FortniteGame and Engine',
+    await _runImportProgressDialog((update) async {
+      update(
+        'Scanning for build folders (FortniteGame + Engine)…',
+        progress: null,
       );
-      return;
-    }
+      final buildRoots = await _discoverBuildRoots(rootPath);
+      if (buildRoots.isEmpty) {
+        _toast(
+          'No valid build folders were found. Pick a path that contains at least one folder with FortniteGame and Engine.',
+        );
+        return;
+      }
 
-    await _importManyVersionsFromFolders(buildRoots);
+      update(
+        'Found ${buildRoots.length} build folder(s). Starting import…',
+        progress: 0,
+      );
+      await _importManyVersionsFromFolders(buildRoots, onProgress: update);
+    }, title: 'Importing builds');
   }
 
   Future<List<String>> _discoverBuildRoots(String parentPath) async {
@@ -10029,7 +10299,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return discoveredRoots;
   }
 
-  Future<void> _importManyVersionsFromFolders(Iterable<String> folders) async {
+  Future<void> _importManyVersionsFromFolders(
+    Iterable<String> folders, {
+    void Function(String message, {double? progress})? onProgress,
+  }) async {
     final normalizedSelection = <String>{};
     final selectedFolders = <String>[];
     for (final folder in folders) {
@@ -10052,38 +10325,83 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     var skippedDuplicates = 0;
     var skippedInvalid = 0;
 
-    for (final root in selectedFolders) {
+    final total = selectedFolders.length;
+    for (var i = 0; i < total; i++) {
+      final root = selectedFolders[i];
+      final label = _basename(root);
       final normalizedRoot = _normalizePath(root);
+
+      void phase(String name, double localT) {
+        final p = (i + localT.clamp(0.0, 1.0)) / total;
+        onProgress?.call('$name — $label (${i + 1} of $total)', progress: p);
+      }
+
+      phase('Checking', 0.05);
       if (existingLocations.contains(normalizedRoot)) {
         skippedDuplicates++;
+        onProgress?.call(
+          'Skipped duplicate: $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
       if (!_isBuildRootValid(root)) {
         skippedInvalid++;
+        onProgress?.call(
+          'Skipped invalid layout: $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
 
-      final executable = await _findBuildExecutable(root);
-      if (executable == null) {
+      phase('Locating Shipping.exe', 0.15);
+      final shippingPaths = await findShippingExecutables(root);
+      if (shippingPaths.isEmpty) {
         skippedInvalid++;
+        onProgress?.call(
+          'Skipped (no Shipping.exe): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
+        continue;
+      }
+      if (shippingPaths.length > 1) {
+        skippedInvalid++;
+        onProgress?.call(
+          'Skipped (multiple Shipping.exe): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
+        continue;
+      }
+      final executable = shippingPaths.first;
+
+      phase('Importing', 0.38);
+      await patchHeadless(File(executable));
+
+      phase('Reading version', 0.52);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        root,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        skippedInvalid++;
+        onProgress?.call(
+          'Skipped (unsupported version): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
 
-      final buildName = _basename(root);
-      final gameVersionFromName = _deriveVersion(buildName);
-      final resolvedGameVersion = gameVersionFromName == 'Unknown'
-          ? _deriveVersion(root)
-          : gameVersionFromName;
+      phase('Splash image', 0.68);
       final splashImagePath = await _findBuildSplashImage(
         root,
         gameVersionHint: resolvedGameVersion,
-        buildNameHint: buildName,
+        buildNameHint: label,
       );
 
+      phase('Saving', 0.88);
       imported.add(
         VersionEntry(
-          id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
-          name: buildName,
+          id: '${DateTime.now().millisecondsSinceEpoch}-$i-${_rng.nextInt(90000)}',
+          name: label,
           gameVersion: resolvedGameVersion,
           location: root,
           executablePath: executable,
@@ -10091,7 +10409,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ),
       );
       existingLocations.add(normalizedRoot);
+      onProgress?.call(
+        'Imported $label (${i + 1} of $total)',
+        progress: (i + 1) / total,
+      );
     }
+
+    onProgress?.call(
+      imported.isEmpty
+          ? 'No new builds imported'
+          : 'Saving ${imported.length} build(s) to library…',
+      progress: 1,
+    );
 
     if (imported.isEmpty) {
       final details = [
@@ -10120,14 +10449,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (skippedDuplicates > 0) '$skippedDuplicates duplicate',
       if (skippedInvalid > 0) '$skippedInvalid invalid',
     ];
-    _toast(summaryParts.join(' | '));
+    _toast(summaryParts.join(', '));
   }
 
   Future<void> _editVersion(VersionEntry entry) async {
     final editRequest = await _promptImportBuildDialog(
       title: 'Edit Build',
       description:
-          'Update your build name and root folder. The folder must include FortniteGame and Engine.',
+          'Update your build name and root folder. The folder must contain'
+          'FortniteClient-Win64-Shipping.exe',
       confirmLabel: 'Save',
       headerIcon: Icons.edit_rounded,
       confirmIcon: Icons.save_rounded,
@@ -10145,38 +10475,62 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return;
     }
 
-    final executable = await _findBuildExecutable(editRequest.buildRootPath);
-    if (executable == null) {
-      _toast('Fortnite executable not found inside selected build');
-      return;
-    }
-
-    final gameVersionFromName = _deriveVersion(editRequest.buildName);
-    final resolvedGameVersion = gameVersionFromName == 'Unknown'
-        ? _deriveVersion(editRequest.buildRootPath)
-        : gameVersionFromName;
-    final splashImagePath = await _findBuildSplashImage(
-      editRequest.buildRootPath,
-      gameVersionHint: resolvedGameVersion,
-      buildNameHint: editRequest.buildName,
-    );
-
-    setState(() {
-      _settings = _settings.copyWith(
-        versions: _settings.versions.map((version) {
-          if (version.id != entry.id) return version;
-          return version.copyWith(
-            name: editRequest.buildName,
-            gameVersion: resolvedGameVersion,
-            location: editRequest.buildRootPath,
-            executablePath: executable,
-            splashImagePath: splashImagePath ?? '',
-          );
-        }).toList(),
+    await _runImportProgressDialog((update) async {
+      update('Looking for Fortnite executable…', progress: null);
+      final shippingPaths = await findShippingExecutables(
+        editRequest.buildRootPath,
       );
-    });
-    await _saveSettings(toast: false);
-    if (mounted) _toast('Version updated');
+      if (shippingPaths.isEmpty) {
+        _toast('Fortnite executable not found inside selected build');
+        return;
+      }
+      if (shippingPaths.length > 1) {
+        _toast(
+          'Multiple FortniteClient-Win64-Shipping.exe files found (${shippingPaths.length}). '
+          'Choose a folder that contains exactly one.',
+        );
+        return;
+      }
+      final executable = shippingPaths.first;
+      update('Applying headless patch…', progress: 0.3);
+      await patchHeadless(File(executable));
+
+      update('Reading game version…', progress: 0.55);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        editRequest.buildRootPath,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        _toast(
+          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
+        );
+        return;
+      }
+      update('Finding splash image…', progress: 0.78);
+      final splashImagePath = await _findBuildSplashImage(
+        editRequest.buildRootPath,
+        gameVersionHint: resolvedGameVersion,
+        buildNameHint: editRequest.buildName,
+      );
+
+      update('Saving…', progress: 0.92);
+      setState(() {
+        _settings = _settings.copyWith(
+          versions: _settings.versions.map((version) {
+            if (version.id != entry.id) return version;
+            return version.copyWith(
+              name: editRequest.buildName,
+              gameVersion: resolvedGameVersion,
+              location: editRequest.buildRootPath,
+              executablePath: executable,
+              splashImagePath: splashImagePath ?? '',
+            );
+          }).toList(),
+        );
+      });
+      await _saveSettings(toast: false);
+      update('Done.', progress: 1);
+      if (mounted) _toast('Version updated');
+    }, title: 'Updating build');
   }
 
   Future<_BuildImportRequest?> _promptImportBuildDialog({
@@ -10886,7 +11240,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                                 !mounted) {
                                               return;
                                             }
-                                            dismissDialogSafely();
+                                            // Close the import dialog synchronously before
+                                            // showing the progress dialog. Deferred pops
+                                            // (dismissDialogSafely) can remove the progress
+                                            // route instead and leave this dialog stuck open.
+                                            FocusManager.instance.primaryFocus
+                                                ?.unfocus();
+                                            Navigator.of(dialogContext).pop();
+                                            await _waitForPostFrame();
                                             if (!mounted) return;
                                             await _importManyVersionsFromParent(
                                               parentPath,
@@ -10913,8 +11274,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           ),
                                         ),
                                       const Spacer(),
-                                      TextButton(
+                                      OutlinedButton(
                                         onPressed: dismissDialogSafely,
+                                        style: OutlinedButton.styleFrom(
+                                          shape: const StadiumBorder(),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 11,
+                                          ),
+                                          side: BorderSide(
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.14,
+                                            ),
+                                          ),
+                                        ),
                                         child: const Text('Cancel'),
                                       ),
                                     ],
@@ -10934,8 +11308,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           label: const Text('Back'),
                                         ),
                                       const Spacer(),
-                                      TextButton(
+                                      OutlinedButton(
                                         onPressed: dismissDialogSafely,
+                                        style: OutlinedButton.styleFrom(
+                                          shape: const StadiumBorder(),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 11,
+                                          ),
+                                          side: BorderSide(
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.14,
+                                            ),
+                                          ),
+                                        ),
                                         child: const Text('Cancel'),
                                       ),
                                       const SizedBox(width: 8),
@@ -11068,28 +11455,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       normalized = normalized.toLowerCase();
     }
     return normalized;
-  }
-
-  Future<String?> _findBuildExecutable(String buildRootPath) async {
-    final expectedPath = _joinPath([
-      buildRootPath,
-      'FortniteGame',
-      'Binaries',
-      'Win64',
-      _shippingExeName,
-    ]);
-    if (File(expectedPath).existsSync()) return expectedPath;
-
-    final fortniteGameRoot = _joinPath([buildRootPath, 'FortniteGame']);
-    if (Directory(fortniteGameRoot).existsSync()) {
-      final foundInFortniteGame = await _findRecursive(
-        fortniteGameRoot,
-        _shippingExeName,
-      );
-      if (foundInFortniteGame != null) return foundInFortniteGame;
-    }
-
-    return _findRecursive(buildRootPath, _shippingExeName);
   }
 
   Future<String?> _findBuildSplashImage(
@@ -12256,6 +12621,58 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return const AssetImage('assets/images/default_pfp.png');
   }
 
+  Widget _barProfileAvatar({required double radius}) {
+    final dark = _isDarkTheme(context);
+    final avatarDiameter = radius * 2;
+    final haloDiameter = avatarDiameter + 12;
+    final haloColor = (dark ? Colors.white : Colors.black).withValues(
+      alpha: dark ? 0.18 : 0.12,
+    );
+    final frameColor = (dark ? Colors.white : Colors.black).withValues(
+      alpha: dark ? 0.12 : 0.10,
+    );
+    final avatarBackground = (dark ? Colors.black : Colors.white).withValues(
+      alpha: dark ? 0.18 : 0.88,
+    );
+
+    return SizedBox(
+      width: haloDiameter,
+      height: haloDiameter,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          IgnorePointer(
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+              child: Container(
+                width: haloDiameter - 2,
+                height: haloDiameter - 2,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: haloColor, width: 2),
+                ),
+              ),
+            ),
+          ),
+          Container(
+            width: avatarDiameter + 4,
+            height: avatarDiameter + 4,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: frameColor, width: 1.2),
+            ),
+          ),
+          CircleAvatar(
+            radius: radius,
+            backgroundColor: avatarBackground,
+            backgroundImage: _profileImage(),
+          ),
+        ],
+      ),
+    );
+  }
+
   ImageProvider<Object> _libraryCoverImage(VersionEntry? version) {
     if (version == null) {
       return const AssetImage('assets/images/missingbuild.webp');
@@ -12286,6 +12703,52 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     return a.toLowerCase().compareTo(b.toLowerCase());
+  }
+
+  /// Display label for library pills: `30.00` (two-part season) or `1.2.3`
+  /// when a patch segment exists. Uses [raw] from import metadata when possible.
+  ///
+  /// Two-part builds use Fortnite-style display: `2.5` → `2.50` (trailing zero),
+  /// not `2.05`. Two digits after the dot are kept as-is (`5.41`, `2.05`).
+  /// Unknown / empty → `?`.
+  String _formatLibraryVersionLabel(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '?';
+    final lower = s.toLowerCase();
+    if (lower == 'unknown' || lower == 'n/a') return '?';
+    if (lower.startsWith('v')) {
+      s = s.substring(1).trim();
+    }
+
+    final triple = RegExp(r'\b(\d+)\.(\d+)\.(\d+)\b').firstMatch(s);
+    if (triple != null) {
+      final major = int.parse(triple.group(1)!);
+      final minor = int.parse(triple.group(2)!);
+      final patch = int.parse(triple.group(3)!);
+      return '$major.$minor.$patch';
+    }
+
+    final pair = RegExp(r'\b(\d+)\.(\d+)\b').firstMatch(s);
+    if (pair != null) {
+      final major = pair.group(1)!;
+      final minorStr = pair.group(2)!;
+      final minorPart = minorStr.length == 1 ? '${minorStr}0' : minorStr;
+      return '$major.$minorPart';
+    }
+
+    try {
+      final v = Version.parse(s);
+      if (v.patch != 0) {
+        return '${v.major}.${v.minor}.${v.patch}';
+      }
+      // Match two-part season rules when only major.minor.patch(0) is available.
+      if (v.minor < 10) {
+        return '${v.major}.${v.minor}0';
+      }
+      return '${v.major}.${v.minor}';
+    } catch (_) {
+      return s;
+    }
   }
 
   @override
@@ -12783,7 +13246,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const SizedBox(width: 22),
-                  CircleAvatar(radius: 24, backgroundImage: _profileImage()),
+                  _barProfileAvatar(radius: 24),
                   const SizedBox(width: 12),
                   Text(
                     '${_timeGreeting()}, $username!',
@@ -13811,7 +14274,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   ),
                   const SizedBox(width: 4),
                   tabStrip,
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 4),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: _onSurface(context, 0.18),
+                  ),
+                  const SizedBox(width: 5),
                   InkWell(
                     borderRadius: BorderRadius.circular(999),
                     overlayColor: transparentOverlay,
@@ -13826,10 +14295,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                         settingsSection: SettingsSection.profile,
                       ),
                     ),
-                    child: CircleAvatar(
-                      radius: 17,
-                      backgroundImage: _profileImage(),
-                    ),
+                    child: _barProfileAvatar(radius: 17),
                   ),
                 ],
               ),
@@ -15104,6 +15570,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final accent = active
         ? const Color(0xFF3DDC97)
         : Theme.of(context).colorScheme.secondary.withValues(alpha: 0.9);
+    final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -15150,9 +15617,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             children: [
               _statsMetaChip(
                 icon: Icons.tag_rounded,
-                label: entry.gameVersion == 'Unknown'
-                    ? 'Unknown version'
-                    : 'v${entry.gameVersion}',
+                label: versionPill == '?' ? 'Unknown version' : versionPill,
               ),
               _statsMetaChip(
                 icon: active ? null : Icons.history_rounded,
@@ -16023,6 +16488,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         final bgProvider = ResizeImage(splashImage, width: bgCacheWidth);
         final thumbProvider = ResizeImage(splashImage, width: thumbCache);
 
+        final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
+
         return _HoverScale(
           scale: 1.01,
           child: InkWell(
@@ -16189,7 +16656,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                     ),
                                   ),
                                   child: Text(
-                                    entry.gameVersion,
+                                    versionPill == '?'
+                                        ? 'Unknown'
+                                        : versionPill,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
@@ -19133,7 +19602,7 @@ foreach ($app in $appPaths) {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            'Default login: ${_buildRebootLoginUsername(_usernameController.text)}',
+                            'Default login: ${_buildAtlasLoginUsername(_usernameController.text)}',
                             style: TextStyle(
                               color: Theme.of(
                                 context,
@@ -19160,6 +19629,9 @@ foreach ($app in $appPaths) {
                             ),
                             FilledButton.icon(
                               onPressed: _saveProfileSettings,
+                              style: FilledButton.styleFrom(
+                                foregroundColor: Colors.white,
+                              ),
                               icon: const Icon(Icons.save_rounded),
                               label: const Text('Save'),
                             ),
@@ -19687,6 +20159,95 @@ foreach ($app in $appPaths) {
             ),
           ),
         );
+      case SettingsSection.credits:
+        const credits = <_CreditProfileData>[
+          _CreditProfileData(
+            name: 'Auties',
+            handle: '@Auties00',
+            role: 'Launcher Foundation',
+            githubUrl: 'https://github.com/Auties00',
+            discordUrl: 'https://discord.gg/u9tYQJ6x7M',
+            discordLabel: 'Join Reboot',
+            avatarUrl: 'https://github.com/Auties00.png?size=240',
+            description:
+                'Built Reboot Launcher, the base that ATLAS Link was developed from. Reboot has given us the structure and workflow gave this project its starting point.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Reboot Launcher',
+                url: 'https://github.com/Auties00/Reboot-Launcher',
+              ),
+            ],
+          ),
+          _CreditProfileData(
+            name: 'sarah',
+            handle: '@plooshi',
+            role: 'Console, Auth & Gameserver Foundation',
+            githubUrl: 'https://github.com/plooshi',
+            discordUrl: 'https://discord.gg/vWdKfkbaAj',
+            discordLabel: 'Join Erbium',
+            avatarUrl: 'https://github.com/plooshi.png?size=240',
+            description:
+                'Created Erbium, the base behind Magnesium and the console DLL, and built Tellurium, the authentication patcher that gives the launcher\'s backend redirect.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Erbium',
+                url: 'https://github.com/plooshi/Erbium',
+              ),
+              _CreditProjectLink(
+                label: 'Tellurium',
+                url: 'https://github.com/plooshi/Tellurium',
+              ),
+            ],
+          ),
+        ];
+        body = _glass(
+          radius: 24,
+          child: SingleChildScrollView(
+            primary: false,
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Credits', style: sectionTitleStyle),
+                const SizedBox(height: 12),
+                Text(
+                  'ATLAS Link was developed through open-source work. These people and projects provided core foundations for the launcher, dlls, etc.',
+                  style: TextStyle(
+                    color: _onSurface(context, 0.78),
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final cards = credits
+                        .map((credit) => _creditProfileCard(credit))
+                        .toList(growable: false);
+                    if (constraints.maxWidth < 940) {
+                      return Column(
+                        children: [
+                          for (var i = 0; i < cards.length; i++) ...[
+                            if (i > 0) const SizedBox(height: 16),
+                            cards[i],
+                          ],
+                        ],
+                      );
+                    }
+
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: cards[0]),
+                        const SizedBox(width: 16),
+                        Expanded(child: cards[1]),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
       case SettingsSection.support:
         body = _glass(
           radius: 24,
@@ -19706,7 +20267,7 @@ foreach ($app in $appPaths) {
                 OutlinedButton.icon(
                   onPressed: () => _openUrl('https://discord.gg'),
                   icon: const Icon(Icons.discord_rounded),
-                  label: const Text('Open Discord'),
+                  label: const Text('Join Discord'),
                 ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
@@ -19922,6 +20483,11 @@ foreach ($app in $appPaths) {
               title: 'Data Management',
             ),
             tile(
+              section: SettingsSection.credits,
+              icon: Icons.auto_awesome_rounded,
+              title: 'Credits',
+            ),
+            tile(
               section: SettingsSection.support,
               icon: Icons.help_rounded,
               title: 'Support',
@@ -19977,6 +20543,355 @@ foreach ($app in $appPaths) {
               border: Border.all(color: _onSurface(context, 0.08)),
             ),
             child: child,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _creditProfileCard(_CreditProfileData credit) {
+    final dark = _isDarkTheme(context);
+    final secondary = Theme.of(context).colorScheme.secondary;
+    final cardTop = dark
+        ? const Color(0xFF0E1728).withValues(alpha: 0.92)
+        : Colors.white.withValues(alpha: 0.92);
+    final cardBottom = dark
+        ? secondary.withValues(alpha: 0.12)
+        : secondary.withValues(alpha: 0.10);
+    final accent = dark
+        ? secondary.withValues(alpha: 0.88)
+        : const Color(0xFF1565C0);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [cardTop, cardBottom],
+        ),
+        border: Border.all(color: _onSurface(context, 0.10)),
+        boxShadow: [
+          BoxShadow(
+            color: _glassShadowColor(
+              context,
+            ).withValues(alpha: dark ? 0.18 : 0.10),
+            blurRadius: 26,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _creditAvatar(avatarUrl: credit.avatarUrl),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        color: accent.withValues(alpha: dark ? 0.18 : 0.12),
+                        border: Border.all(
+                          color: accent.withValues(alpha: dark ? 0.36 : 0.24),
+                        ),
+                      ),
+                      child: Text(
+                        credit.role,
+                        style: TextStyle(
+                          color: _onSurface(context, 0.92),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      credit.name,
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(context, 0.96),
+                        height: 1.0,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      credit.handle,
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.66),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            credit.description,
+            style: TextStyle(
+              color: _onSurface(context, 0.82),
+              height: 1.5,
+              fontSize: 14.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'Projects',
+            style: TextStyle(
+              color: _onSurface(context, 0.92),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final project in credit.projects)
+                ActionChip(
+                  onPressed: () => unawaited(_openUrl(project.url)),
+                  backgroundColor: _onSurface(context, 0.06),
+                  side: BorderSide(color: _onSurface(context, 0.12)),
+                  avatar: Icon(
+                    Icons.open_in_new_rounded,
+                    size: 15,
+                    color: _onSurface(context, 0.82),
+                  ),
+                  label: Text(project.label),
+                  labelStyle: TextStyle(
+                    color: _onSurface(context, 0.90),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              FilledButton.icon(
+                onPressed: () => unawaited(_openUrl(credit.githubUrl)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: dark
+                      ? const Color(0xFF0A0F18)
+                      : const Color(0xFF111827),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+                label: Text('View ${credit.handle}'),
+              ),
+              FilledButton.icon(
+                onPressed: () => unawaited(_openUrl(credit.discordUrl)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF5865F2),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const Icon(Icons.discord_rounded, size: 18),
+                label: Text(credit.discordLabel),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _aboutCreatorCard(
+    BuildContext dialogContext,
+    _AboutCreatorProfile creator,
+  ) {
+    final dark = _isDarkTheme(dialogContext);
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    final cardTop = dark
+        ? const Color(0xFF0D1628).withValues(alpha: 0.94)
+        : Colors.white.withValues(alpha: 0.94);
+    final cardBottom = dark
+        ? secondary.withValues(alpha: 0.10)
+        : secondary.withValues(alpha: 0.08);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [cardTop, cardBottom],
+        ),
+        border: Border.all(color: _onSurface(dialogContext, 0.10)),
+        boxShadow: [
+          BoxShadow(
+            color: _glassShadowColor(
+              dialogContext,
+            ).withValues(alpha: dark ? 0.16 : 0.10),
+            blurRadius: 24,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _creditAvatar(avatarUrl: creator.avatarUrl),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        color: secondary.withValues(alpha: dark ? 0.18 : 0.12),
+                        border: Border.all(
+                          color: secondary.withValues(
+                            alpha: dark ? 0.36 : 0.24,
+                          ),
+                        ),
+                      ),
+                      child: Text(
+                        creator.role,
+                        style: TextStyle(
+                          color: _onSurface(dialogContext, 0.92),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      creator.name,
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(dialogContext, 0.96),
+                        height: 1.0,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      creator.handle,
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(dialogContext, 0.66),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            creator.description,
+            style: TextStyle(
+              color: _onSurface(dialogContext, 0.82),
+              height: 1.5,
+              fontSize: 14.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: () => unawaited(_openUrl(creator.githubUrl)),
+            style: FilledButton.styleFrom(
+              backgroundColor: dark
+                  ? const Color(0xFF0A0F18)
+                  : const Color(0xFF111827),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: const StadiumBorder(),
+            ),
+            icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+            label: Text('View ${creator.handle}'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _creditAvatar({required String avatarUrl}) {
+    final dark = _isDarkTheme(context);
+    final secondary = Theme.of(context).colorScheme.secondary;
+
+    return Container(
+      width: 86,
+      height: 86,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: SweepGradient(
+          colors: [
+            secondary.withValues(alpha: 0.92),
+            Colors.white.withValues(alpha: dark ? 0.55 : 0.90),
+            secondary.withValues(alpha: 0.50),
+            secondary.withValues(alpha: 0.92),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: secondary.withValues(alpha: dark ? 0.24 : 0.14),
+            blurRadius: 22,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: (dark ? const Color(0xFF07111F) : Colors.white).withValues(
+            alpha: dark ? 0.92 : 0.96,
+          ),
+        ),
+        child: ClipOval(
+          child: FadeInImage.assetNetwork(
+            placeholder: 'assets/images/default_pfp.png',
+            image: avatarUrl,
+            width: 80,
+            height: 80,
+            fit: BoxFit.cover,
+            fadeInDuration: const Duration(milliseconds: 260),
+            fadeOutDuration: const Duration(milliseconds: 140),
+            imageErrorBuilder: (context, error, stackTrace) {
+              return Image.asset(
+                'assets/images/default_pfp.png',
+                width: 80,
+                height: 80,
+                fit: BoxFit.cover,
+              );
+            },
           ),
         ),
       ),
@@ -20101,13 +21016,6 @@ foreach ($app in $appPaths) {
       }
       return null;
     });
-  }
-
-  String _deriveVersion(String path) {
-    final match = RegExp(
-      r'(\d+\.\d+(?:\.\d+)?)',
-    ).firstMatch(path.replaceAll('\\', '/'));
-    return match?.group(1) ?? 'Unknown';
   }
 
   String _basename(String path) {
@@ -20829,6 +21737,55 @@ Color _adaptiveScrimColor(
   return base.withValues(alpha: dark ? darkAlpha : lightAlpha);
 }
 
+class _CreditProjectLink {
+  const _CreditProjectLink({required this.label, required this.url});
+
+  final String label;
+  final String url;
+}
+
+class _AboutCreatorProfile {
+  const _AboutCreatorProfile({
+    required this.name,
+    required this.handle,
+    required this.role,
+    required this.githubUrl,
+    required this.avatarUrl,
+    required this.description,
+  });
+
+  final String name;
+  final String handle;
+  final String role;
+  final String githubUrl;
+  final String avatarUrl;
+  final String description;
+}
+
+class _CreditProfileData {
+  const _CreditProfileData({
+    required this.name,
+    required this.handle,
+    required this.role,
+    required this.githubUrl,
+    required this.discordUrl,
+    required this.discordLabel,
+    required this.avatarUrl,
+    required this.description,
+    required this.projects,
+  });
+
+  final String name;
+  final String handle;
+  final String role;
+  final String githubUrl;
+  final String discordUrl;
+  final String discordLabel;
+  final String avatarUrl;
+  final String description;
+  final List<_CreditProjectLink> projects;
+}
+
 class _ToastOverlayHost extends StatefulWidget {
   const _ToastOverlayHost({super.key, required this.onEmpty});
 
@@ -21117,6 +22074,14 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       ),
     );
   }
+}
+
+class _ImportProgress {
+  const _ImportProgress(this.message, this.progress);
+  final String message;
+
+  /// Null means indeterminate (pulsing bar).
+  final double? progress;
 }
 
 class _BuildImportRequest {
