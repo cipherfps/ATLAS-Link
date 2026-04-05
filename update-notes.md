@@ -1,4 +1,4 @@
-<!-- version: 1.2.1 -->
+<!-- version: 1.2.2 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,9 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Stricter Build Imports for Consistency
-- REVERTED Launching Logic (whoops)
-- Updated Visuals for GUI
-- New Credits Tab in Settings
+- Improved Headless Host Stability
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

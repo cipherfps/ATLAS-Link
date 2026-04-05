@@ -457,6 +457,7 @@ class _FortniteProcessState {
     required this.versionId,
     required this.gameVersion,
     required this.clientName,
+    this.headless = false,
     this.launcherPid,
     this.eacPid,
     this.child,
@@ -467,6 +468,7 @@ class _FortniteProcessState {
   final String versionId;
   final String gameVersion;
   final String clientName;
+  final bool headless;
   final int? launcherPid;
   final int? eacPid;
   final _FortniteProcessState? child;
@@ -639,8 +641,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.1';
-  static const String _launcherBuildLabel = 'Stable 1.2.1';
+  static const String _launcherVersion = '1.2.2';
+  static const String _launcherBuildLabel = 'Stable 1.2.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -666,6 +668,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const Duration _playtimeCheckpointInterval = Duration(seconds: 15);
   // Reduced post-login delay for faster injection start on low-end PCs
   static const int _postLoginInjectionDelayMs = 300;
+  static const int _headlessPostLoginInjectionDelayMs = 900;
+  static const int _headlessGameServerInjectionSettleDelayMs = 3000;
+  static const int _headlessGameServerInjectionUiDelayMs = 240;
+  static const int _headlessFallbackPostLoginDelaySeconds = 16;
+  static const int _headlessFallbackGameServerInjectionDelaySeconds = 28;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
   static const String _defaultEpicAuthPassword = 'AtlasDefault';
@@ -4649,7 +4656,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 unawaited(
                                   _switchMenu(
                                     LauncherTab.general,
-                                    settingsSection: SettingsSection.credits,
+                                    settingsSection: SettingsSection.support,
                                   ),
                                 );
                               },
@@ -4657,7 +4664,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 Icons.auto_awesome_rounded,
                                 size: 18,
                               ),
-                              label: 'Extra Credits',
+                              label: 'Credits',
                             ),
                           ],
                         ),
@@ -6158,6 +6165,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     'Engine',
   ];
 
+  static const List<String> _hostGameServerReadyMarkers = [
+    'ui.state.startup.subgameselect',
+    'ui.state.athena.frontend',
+    'ui.state.lobby',
+    'lobbyui',
+  ];
+
+  String? _hostGameServerReadySignalReason(String line) {
+    final lower = line.toLowerCase();
+    if (lower.contains('states from: login to subgameselect')) {
+      return 'login_to_subgameselect';
+    }
+    if (lower.contains('states from: subgameselect to frontend')) {
+      return 'subgameselect_to_frontend';
+    }
+    for (final marker in _hostGameServerReadyMarkers) {
+      if (lower.contains(marker)) {
+        return marker;
+      }
+    }
+
+    // Headless hosts are much more sensitive to early injection. Avoid broad
+    // client markers like "Engine" here and fall back to the delayed path
+    // instead when a stronger UI signal never arrives.
+    return null;
+  }
+
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed || state.exited) return;
     _recordReadinessDiagnostics(state, line);
@@ -6202,17 +6236,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       unawaited(_performDeferredLargePakInjection(state));
     }
 
-    // For hosting, delay the game server DLL injection until the lobby marker.
-    if (state.host &&
-        state.postLoginInjected &&
-        state.hostPostLoginPatchersInjected &&
-        !state.gameServerInjected &&
-        !state.gameServerInjectionScheduled &&
-        _clientLoadingCompleteMarkers.any(line.contains)) {
+    // For hosting, wait for a stronger frontend-ready signal before injecting
+    // the game server DLL. This is especially important for headless hosts.
+    final hostReadySignalReason =
+        state.host &&
+            state.postLoginInjected &&
+            state.hostPostLoginPatchersInjected &&
+            !state.gameServerInjected &&
+            !state.gameServerInjectionScheduled
+        ? _hostGameServerReadySignalReason(line)
+        : null;
+    if (hostReadySignalReason != null) {
       state.gameServerInjectionScheduled = true;
       _log(
         'gameserver',
-        'Host fully loaded. Scheduling game server DLL injection...',
+        'Host ready via $hostReadySignalReason. Scheduling game server DLL injection...',
       );
       unawaited(_performDeferredGameServerInjection(state));
     }
@@ -6237,9 +6275,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
     // Optimized for low-end PCs: reduced from 900ms to 300ms to start injections faster
     // while still giving the client time to initialize.
-    await Future.delayed(
-      const Duration(milliseconds: _postLoginInjectionDelayMs),
-    );
+    final postLoginDelayMs = state.host && state.headless
+        ? _headlessPostLoginInjectionDelayMs
+        : _postLoginInjectionDelayMs;
+    await Future.delayed(Duration(milliseconds: postLoginDelayMs));
     if (state.killed || state.exited) return;
 
     if (state.host) {
@@ -6416,8 +6455,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
-    // Give the lobby/subgame UI a moment to settle.
-    await Future<void>.delayed(const Duration(milliseconds: 450));
+    // Give the lobby/subgame UI a moment to settle. Headless hosts benefit
+    // from a longer pause here because the frontend signal can arrive before
+    // the process is actually safe to patch.
+    final settleDelayMs = state.headless
+        ? _headlessGameServerInjectionSettleDelayMs
+        : 450;
+    await Future<void>.delayed(Duration(milliseconds: settleDelayMs));
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
@@ -6426,7 +6470,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Injecting game server DLL...',
       severity: _UiStatusSeverity.info,
     );
-    await Future<void>.delayed(const Duration(milliseconds: 120));
+    final injectionUiDelayMs = state.headless
+        ? _headlessGameServerInjectionUiDelayMs
+        : 120;
+    await Future<void>.delayed(Duration(milliseconds: injectionUiDelayMs));
 
     final serverReport = await _injectConfiguredPatchers(
       state.pid,
@@ -6466,7 +6513,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     // Some builds never emit the lobby UI marker. As a fallback, attempt the
     // server DLL injection after a short delay once post-login patchers ran.
-    await Future<void>.delayed(const Duration(seconds: 16));
+    final fallbackDelaySeconds = state.headless
+        ? _headlessFallbackGameServerInjectionDelaySeconds
+        : 16;
+    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
     if (state.killed || state.exited) return;
     if (!state.hostPostLoginPatchersInjected) return;
     if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
@@ -8357,6 +8407,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         versionId: version.id,
         gameVersion: version.gameVersion,
         clientName: _normalizeClientUsername(hostUsername),
+        headless: _settings.hostHeadlessEnabled,
         launcherPid: launcherPid,
         eacPid: eacPid,
       );
@@ -8417,9 +8468,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.postLoginInjected) return;
 
     // Dedicated/headless hosting flows may never emit the UI-based login
-    // markers used by `_isLoginCompleteSignal`. As a safety net, attempt
+    // markers used by `_loginCompleteSignalReason`. As a safety net, attempt
     // post-login injections after a short delay if the server is still running.
-    await Future<void>.delayed(const Duration(seconds: 12));
+    final fallbackDelaySeconds = state.headless
+        ? _headlessFallbackPostLoginDelaySeconds
+        : 12;
+    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
     if (state.killed || state.exited) return;
     if (state.postLoginInjected) return;
 
@@ -9651,11 +9705,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         );
       } else {
-        _log('game', 'Game server patcher path is empty.');
+        _log('game', 'Game server path is empty.');
         parallelInjections.add(
           Future.value(
             const _InjectionAttempt(
-              name: 'game server patcher',
+              name: 'game server',
               required: true,
               attempted: false,
               success: false,
@@ -9681,7 +9735,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _InjectionAttempt attempt = await _injectSinglePatcher(
       gamePid: gamePid,
       patcherPath: gameServerPath,
-      patcherName: 'game server patcher',
+      patcherName: 'game server',
       required: true,
     );
     if (attempt.success || !attempt.attempted) return attempt;
@@ -9689,7 +9743,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     for (var retry = 2; retry <= _gameServerInjectionMaxAttempts; retry++) {
       _log(
         'game',
-        'Game server patcher injection retry $retry/$_gameServerInjectionMaxAttempts.',
+        'Game server injection retry $retry/$_gameServerInjectionMaxAttempts.',
       );
       // Use exponential backoff instead of fixed delay for better low-end PC performance
       final delayMs = _calculateExponentialBackoffMs(
@@ -9701,7 +9755,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       attempt = await _injectSinglePatcher(
         gamePid: gamePid,
         patcherPath: gameServerPath,
-        patcherName: 'game server patcher',
+        patcherName: 'game server',
         required: true,
       );
       if (attempt.success || !attempt.attempted) return attempt;
@@ -20246,6 +20300,7 @@ foreach ($app in $appPaths) {
           ),
         );
       case SettingsSection.credits:
+      case SettingsSection.support:
         const credits = <_CreditProfileData>[
           _CreditProfileData(
             name: 'Auties',
@@ -20294,6 +20349,26 @@ foreach ($app in $appPaths) {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text('Support', style: sectionTitleStyle),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _showLatestLauncherUpdateNotes,
+                  icon: const Icon(Icons.auto_awesome_rounded),
+                  label: const Text('Update notes'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () => _openUrl('https://discord.gg'),
+                  icon: const Icon(Icons.discord_rounded),
+                  label: const Text('Join Discord'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _openLogs,
+                  icon: const Icon(Icons.article_rounded),
+                  label: const Text('Open Launcher Logs'),
+                ),
+                const SizedBox(height: 24),
                 Text('Credits', style: sectionTitleStyle),
                 const SizedBox(height: 12),
                 Text(
@@ -20329,37 +20404,6 @@ foreach ($app in $appPaths) {
                       ],
                     );
                   },
-                ),
-              ],
-            ),
-          ),
-        );
-      case SettingsSection.support:
-        body = _glass(
-          radius: 24,
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Support', style: sectionTitleStyle),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _showLatestLauncherUpdateNotes,
-                  icon: const Icon(Icons.auto_awesome_rounded),
-                  label: const Text('Update notes'),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: () => _openUrl('https://discord.gg'),
-                  icon: const Icon(Icons.discord_rounded),
-                  label: const Text('Join Discord'),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _openLogs,
-                  icon: const Icon(Icons.article_rounded),
-                  label: const Text('Open Launcher Logs'),
                 ),
               ],
             ),
@@ -20567,11 +20611,6 @@ foreach ($app in $appPaths) {
               section: SettingsSection.dataManagement,
               icon: Icons.storage_rounded,
               title: 'Data Management',
-            ),
-            tile(
-              section: SettingsSection.credits,
-              icon: Icons.auto_awesome_rounded,
-              title: 'Credits',
             ),
             tile(
               section: SettingsSection.support,
