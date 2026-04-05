@@ -481,6 +481,7 @@ class _FortniteProcessState {
   bool largePakInjected = false;
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
+  bool gameServerInjectionScheduled = false;
   bool sawContinueLoggingIn = false;
   bool sawAnyCompletedLoginLine = false;
   bool sawEnglishCompletedLoginLine = false;
@@ -638,8 +639,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.0';
-  static const String _launcherBuildLabel = 'Stable 1.2.0';
+  static const String _launcherVersion = '1.2.1';
+  static const String _launcherBuildLabel = 'Stable 1.2.1';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -652,6 +653,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const int _authInjectionMaxAttempts = 3;
   // Optimized for low-end PCs: increased from 20s to 40s timeout to account for
   // slow disk I/O, AV scanning, and heavy system contention. This significantly
+  // reduces "Injection timed out" failures on low-end hardware.
+  static const int _dllInjectionWaitMs = 40000;
   static const int _gameServerInjectionRetryDelayMs = 100;
   static const int _gameServerInjectionMaxRetryDelayMs = 800;
   static const int _gameServerInjectionMaxAttempts = 3;
@@ -3524,28 +3527,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     return port;
   }
 
-  /// Do not pass `-BackendHost` / `-BackendPort` on the Fortnite argv (some builds crash).
-  /// Tellurium and related code can use `ATLAS_BACKEND_HOST` / `ATLAS_BACKEND_PORT` instead.
-  Map<String, String> _fortniteProcessEnvironment({
-    required bool includeGameServerPort,
-  }) {
-    final backendHost = _effectiveBackendHostForLaunchArgs();
-    final backendPort = _effectiveBackendPort();
-    final env = <String, String>{
-      ...Platform.environment,
-      'OPENSSL_ia32cap': '~0x20000000',
-      'ATLAS_BACKEND_HOST': backendHost,
-      'ATLAS_BACKEND_PORT': '$backendPort',
-    };
-    if (includeGameServerPort) {
-      final gamePort = _effectiveGameServerPort();
-      if (gamePort > 0) {
-        env['ATLAS_GAME_SERVER_PORT'] = '$gamePort';
-      }
-    }
-    return env;
-  }
-
   VersionEntry? _findVersionById(String versionId) {
     for (final version in _settings.versions) {
       if (version.id == versionId) return version;
@@ -6220,6 +6201,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('game', 'Client fully loaded. Scheduling large pak injection...');
       unawaited(_performDeferredLargePakInjection(state));
     }
+
+    // For hosting, delay the game server DLL injection until the lobby marker.
+    if (state.host &&
+        state.postLoginInjected &&
+        state.hostPostLoginPatchersInjected &&
+        !state.gameServerInjected &&
+        !state.gameServerInjectionScheduled &&
+        _clientLoadingCompleteMarkers.any(line.contains)) {
+      state.gameServerInjectionScheduled = true;
+      _log(
+        'gameserver',
+        'Host fully loaded. Scheduling game server DLL injection...',
+      );
+      unawaited(_performDeferredGameServerInjection(state));
+    }
   }
 
   int _calculateExponentialBackoffMs(
@@ -6249,10 +6245,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.host) {
       final inferredFallbackLogin = state.postLoginInferredFromFallback;
 
-      // For the host, inject post-login patchers then the game server DLL
-      // Host: memory patcher, port cleanup, then game server DLL.
-      // If login was only inferred via fallback (no real login marker), skip
-      // memory.dll to avoid early-load access violations.
+      // For the host, inject post-login patchers and then schedule the game
+      // server DLL injection. If login was only inferred via fallback (no real
+      // login marker), skip memory.dll to avoid early-load access violations.
       if (inferredFallbackLogin) {
         _log(
           'gameserver',
@@ -6295,15 +6290,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       state.hostPostLoginPatchersInjected = true;
       _setUiStatus(
         host: true,
-        message: 'Injecting game server DLL...',
+        message: 'Logged in. Waiting for host to finish loading...',
         severity: _UiStatusSeverity.info,
       );
-      await Future<void>.delayed(
-        const Duration(milliseconds: _uiStatusDelayMs),
-      );
-      if (state.killed || state.exited) return;
-
-      await _performHostGameServerInjection(state);
+      unawaited(_scheduleHostFallbackGameServerInjection(state));
     } else {
       _setUiStatus(
         host: false,
@@ -6419,14 +6409,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _performDeferredLargePakInjection(state);
   }
 
-  /// Injects the game server DLL right after login for the host.
-  Future<void> _performHostGameServerInjection(
+  Future<void> _performDeferredGameServerInjection(
     _FortniteProcessState state,
   ) async {
     if (!state.host) return;
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
+    // Give the lobby/subgame UI a moment to settle.
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    if (state.killed || state.exited) return;
+    if (state.gameServerInjected) return;
+
+    _setUiStatus(
+      host: true,
+      message: 'Injecting game server DLL...',
+      severity: _UiStatusSeverity.info,
+    );
     await Future<void>.delayed(const Duration(milliseconds: 120));
 
     final serverReport = await _injectConfiguredPatchers(
@@ -6441,6 +6440,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final serverFailure = serverReport.firstRequiredFailure;
     if (serverFailure != null) {
+      state.gameServerInjectionScheduled = false;
       _setUiStatus(
         host: true,
         message: 'Failed to inject ${serverFailure.name}.',
@@ -6455,6 +6455,28 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Running.',
       severity: _UiStatusSeverity.success,
     );
+  }
+
+  Future<void> _scheduleHostFallbackGameServerInjection(
+    _FortniteProcessState state,
+  ) async {
+    if (!state.host) return;
+    if (state.killed || state.exited) return;
+    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
+
+    // Some builds never emit the lobby UI marker. As a fallback, attempt the
+    // server DLL injection after a short delay once post-login patchers ran.
+    await Future<void>.delayed(const Duration(seconds: 16));
+    if (state.killed || state.exited) return;
+    if (!state.hostPostLoginPatchersInjected) return;
+    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
+
+    state.gameServerInjectionScheduled = true;
+    _log(
+      'gameserver',
+      'Host loading marker not seen. Running fallback game server DLL injection...',
+    );
+    unawaited(_performDeferredGameServerInjection(state));
   }
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
@@ -6909,12 +6931,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final args = _createFortniteLaunchArgs(
-        username: launchAuth.login,
-        password: launchAuth.password,
-        launchTokens: playLaunchTokens,
-        customArgs: playCustomArgs,
-      );
+      final backendHost = _effectiveBackendHostForLaunchArgs();
+      final backendPort = _effectiveBackendPort();
+      final args =
+          _createFortniteLaunchArgs(
+              username: launchAuth.login,
+              password: launchAuth.password,
+              launchTokens: playLaunchTokens,
+              customArgs: playCustomArgs,
+            )
+            ..add('-BackendHost=$backendHost')
+            ..add('-BackendPort=$backendPort');
 
       _log(
         'game',
@@ -6932,9 +6959,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           exe,
           args,
           workingDirectory: File(exe).parent.path,
-          environment: _fortniteProcessEnvironment(
-            includeGameServerPort: false,
-          ),
+          environment: {
+            ...Platform.environment,
+            'OPENSSL_ia32cap': '~0x20000000',
+          },
         );
       } catch (error) {
         if (launcherPid != null) {
@@ -8281,15 +8309,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         hintDir: exeDir,
       );
 
-      final args = _createFortniteLaunchArgs(
-        username: launchAuth.login,
-        password: launchAuth.password,
-        launchTokens: hostLaunchTokens,
-        host: true,
-        headless: _settings.hostHeadlessEnabled,
-        logging: false,
-        customArgs: hostCustomArgs,
-      );
+      final backendHost = _effectiveBackendHostForLaunchArgs();
+      final backendPort = _effectiveBackendPort();
+      final args =
+          _createFortniteLaunchArgs(
+              username: launchAuth.login,
+              password: launchAuth.password,
+              launchTokens: hostLaunchTokens,
+              host: true,
+              headless: _settings.hostHeadlessEnabled,
+              logging: false,
+              hostPort: _effectiveGameServerPort(),
+              customArgs: hostCustomArgs,
+            )
+            ..add('-BackendHost=$backendHost')
+            ..add('-BackendPort=$backendPort');
 
       _log(
         'gameserver',
@@ -8302,7 +8336,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           exe,
           args,
           workingDirectory: File(exe).parent.path,
-          environment: _fortniteProcessEnvironment(includeGameServerPort: true),
+          environment: {
+            ...Platform.environment,
+            'OPENSSL_ia32cap': '~0x20000000',
+          },
         );
       } catch (error) {
         if (launcherPid != null) {
@@ -8703,6 +8740,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     bool host = false,
     bool headless = false,
     bool logging = false,
+    int? hostPort,
     String customArgs = '',
   }) {
     final resolvedPassword = password.trim().isEmpty
@@ -8728,9 +8766,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (host) {
       args.add('-nosplash');
       args.add('-nosound');
-      // Omit `-Port` here by default (some host builds crash with it on argv).
-      // `ATLAS_GAME_SERVER_PORT` is still set on the process environment for DLLs.
-      // Add `-Port=7777` (or your port) under Host launch arguments if this build requires it.
+      if (hostPort != null && hostPort > 0) {
+        args.add('-Port=$hostPort');
+      }
       if (headless) {
         args.add('-nullrhi');
       }
@@ -9833,7 +9871,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
-  /// `LoadLibraryA` remote thread; does not wait on completion.
   Future<void> _injectDllIntoProcess(int pid, String dllPath) async {
     if (!Platform.isWindows) return;
     final dllFile = File(dllPath);
@@ -9847,68 +9884,117 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       throw '$dllLabel is not accessible';
     }
 
-    const openProcessAccess = 0x43A;
-
+    // WinAPI calls (notably WaitForSingleObject) can block the UI isolate, so
+    // do the injection work in a background isolate.
     await Isolate.run(() {
-      final process = OpenProcess(openProcessAccess, FALSE, pid);
-      if (process == NULL) {
+      const waitObject0 = 0x00000000;
+      const waitTimeout = 0x00000102;
+
+      final processHandle = OpenProcess(
+        PROCESS_CREATE_THREAD |
+            PROCESS_QUERY_INFORMATION |
+            PROCESS_VM_OPERATION |
+            PROCESS_VM_WRITE |
+            PROCESS_VM_READ,
+        FALSE,
+        pid,
+      );
+      if (processHandle == NULL) {
         throw 'OpenProcess failed for pid $pid';
       }
 
-      final kernelModuleName = 'KERNEL32'.toNativeUtf16();
-      final loadLibraryProcName = 'LoadLibraryA'.toNativeUtf8();
-      final dllPathUtf8 = dllPath.toNativeUtf8();
+      final kernelModuleName = 'KERNEL32.DLL'.toNativeUtf16();
+      final loadLibraryProcName = 'LoadLibraryW'.toNativeUtf8();
+      final dllPathNative = dllPath.toNativeUtf16();
 
       try {
         final kernelModule = GetModuleHandle(kernelModuleName);
         if (kernelModule == NULL) {
-          throw 'Cannot get module handle for KERNEL32.';
+          throw 'GetModuleHandle failed.';
         }
 
-        final loadLibraryA = GetProcAddress(kernelModule, loadLibraryProcName);
-        if (loadLibraryA == ffi.nullptr) {
-          throw 'Cannot get process address for pid $pid';
+        final processAddress = GetProcAddress(
+          kernelModule,
+          loadLibraryProcName,
+        );
+        if (processAddress == ffi.nullptr) {
+          throw 'GetProcAddress failed for LoadLibraryW.';
         }
 
-        final dllAddress = VirtualAllocEx(
-          process,
+        final bytesLength = (dllPath.length + 1) * 2;
+        final remoteAddress = VirtualAllocEx(
+          processHandle,
           ffi.nullptr,
-          dllPath.length + 1,
+          bytesLength,
           MEM_COMMIT | MEM_RESERVE,
           PAGE_READWRITE,
         );
-        if (dllAddress == ffi.nullptr) {
-          throw 'Cannot allocate memory for dll';
+        if (remoteAddress == ffi.nullptr) {
+          throw 'VirtualAllocEx failed.';
         }
 
         final writeMemoryResult = WriteProcessMemory(
-          process,
-          dllAddress,
-          dllPathUtf8.cast(),
-          dllPath.length,
+          processHandle,
+          remoteAddress,
+          dllPathNative.cast(),
+          bytesLength,
           ffi.nullptr,
         );
         if (writeMemoryResult != 1) {
-          throw 'Memory write failed';
+          throw 'WriteProcessMemory failed.';
         }
 
         final createThreadResult = CreateRemoteThread(
-          process,
+          processHandle,
           ffi.nullptr,
           0,
-          loadLibraryA.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
-          dllAddress,
+          processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
+          remoteAddress,
           0,
           ffi.nullptr,
         );
         if (createThreadResult == NULL) {
-          throw 'Thread creation failed';
+          throw 'CreateRemoteThread failed.';
+        }
+
+        try {
+          final waitResult = WaitForSingleObject(
+            createThreadResult,
+            _dllInjectionWaitMs,
+          );
+          if (waitResult == waitTimeout) {
+            throw 'Injection timed out.';
+          }
+          if (waitResult != waitObject0) {
+            throw 'WaitForSingleObject failed (code $waitResult).';
+          }
+
+          final exitCode = calloc<ffi.Uint32>();
+          try {
+            final kernel32 = ffi.DynamicLibrary.open('kernel32.dll');
+            final getExitCodeThread = kernel32
+                .lookupFunction<
+                  ffi.Int32 Function(ffi.IntPtr, ffi.Pointer<ffi.Uint32>),
+                  int Function(int, ffi.Pointer<ffi.Uint32>)
+                >('GetExitCodeThread');
+
+            final ok = getExitCodeThread(createThreadResult, exitCode);
+            if (ok == 0) throw 'GetExitCodeThread failed.';
+            if (exitCode.value == 0) {
+              throw 'LoadLibraryW returned 0 (DLL failed to load).';
+            }
+          } finally {
+            calloc.free(exitCode);
+          }
+        } finally {
+          VirtualFreeEx(processHandle, remoteAddress, 0, MEM_RELEASE);
+          CloseHandle(createThreadResult);
         }
       } finally {
         calloc.free(kernelModuleName);
         calloc.free(loadLibraryProcName);
-        calloc.free(dllPathUtf8);
-        CloseHandle(process);
+        calloc.free(dllPathNative);
+        CloseHandle(processHandle);
       }
     });
   }

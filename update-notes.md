@@ -1,4 +1,4 @@
-<!-- version: 1.2.0 -->
+<!-- version: 1.2.1 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -16,7 +16,7 @@ Markdown Quick Key
 
 # Improvements
 - Stricter Build Imports for Consistency
-- Changed Launching Logic
+- REVERTED Launching Logic (whoops)
 - Updated Visuals for GUI
 - New Credits Tab in Settings
 
