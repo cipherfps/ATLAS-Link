@@ -16,5 +16,6 @@ Markdown Quick Key
 
 # Improvements
 - Improved Headless Host Stability
+- Moved Credits to Support
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

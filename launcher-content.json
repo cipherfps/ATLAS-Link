@@ -16,6 +16,15 @@
         "buttonUrl": "https://www.youtube.com/watch?v=a9ohl7o3c7U"
       },
       {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/rev.jpg",
+        "imageFit": "cover",
+        "category": "SPOTLIGHT SUBMISSION",
+        "title": "Featured Video",
+        "description": "ATLAS Trickshotting Montage (Submitted by @vzbw)",
+        "buttonLabel": "Watch Video",
+        "buttonUrl": "https://www.youtube.com/watch?v=juJEE1aRgZs"
+      },
+      {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/vourpire.jpg",
         "imageFit": "cover",
         "category": "SPOTLIGHT SUBMISSION",
