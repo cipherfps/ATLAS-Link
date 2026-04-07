@@ -13,16 +13,25 @@
         "title": "ATLAS Tutorial",
         "description": "Watch this YouTube tutorial to learn how to use ATLAS, made by Nova (@someth9ng)!",
         "buttonLabel": "Watch Video",
-        "buttonUrl": "https://www.youtube.com/watch?v=uPYFMgo6RJw"
+        "buttonUrl": "https://www.youtube.com/watch?v=a9ohl7o3c7U"
+      },
+      {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/rev.jpg",
+        "imageFit": "cover",
+        "category": "SPOTLIGHT SUBMISSION",
+        "title": "Featured Video",
+        "description": "ATLAS Trickshotting Montage (Submitted by @vzbw)",
+        "buttonLabel": "Watch Video",
+        "buttonUrl": "https://www.youtube.com/watch?v=juJEE1aRgZs"
       },
       {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/vourpire.jpg",
         "imageFit": "cover",
         "category": "SPOTLIGHT SUBMISSION",
         "title": "Featured Video",
-        "description": "vertigo (Submitted by @vourpire)",
+        "description": "Cologne (Submitted by @vourpire)",
         "buttonLabel": "Watch Video",
-        "buttonUrl": "https://www.youtube.com/watch?v=-3hlQ9uJXSI"
+        "buttonUrl": "https://www.youtube.com/watch?v=hIFs6ufl41k"
       },
       {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",

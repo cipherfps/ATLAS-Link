@@ -10,15 +10,135 @@ import 'dart:ui';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:ffi/ffi.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
+import 'build_import.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
+
+String _joinAtlasBackendInstallPath(List<String> pieces) {
+  return pieces.join(Platform.pathSeparator);
+}
+
+class AtlasBackendInstallSupport {
+  static String? selectInstallerUrl(dynamic assetsRaw) {
+    if (assetsRaw is! List) return null;
+
+    String? atlasSetupExe;
+    String? setupExe;
+    String? atlasExe;
+    String? firstExe;
+    String? atlasInstallerMsi;
+    String? installerMsi;
+    String? atlasMsi;
+    String? firstMsi;
+
+    for (final asset in assetsRaw) {
+      if (asset is! Map<String, dynamic>) continue;
+      final name = asset['name']?.toString().toLowerCase() ?? '';
+      final url = asset['browser_download_url']?.toString().trim();
+      if (url == null || url.isEmpty || name.isEmpty) continue;
+
+      final isAtlasAsset = name.contains('atlas') || name.contains('backend');
+      final isInstaller =
+          name.contains('setup') ||
+          name.contains('installer') ||
+          name.contains('install');
+
+      if (name.endsWith('.exe')) {
+        if (isInstaller && isAtlasAsset) {
+          atlasSetupExe ??= url;
+        } else if (isInstaller) {
+          setupExe ??= url;
+        } else if (isAtlasAsset) {
+          atlasExe ??= url;
+        } else {
+          firstExe ??= url;
+        }
+        continue;
+      }
+
+      if (name.endsWith('.msi')) {
+        if (isInstaller && isAtlasAsset) {
+          atlasInstallerMsi ??= url;
+        } else if (isInstaller) {
+          installerMsi ??= url;
+        } else if (isAtlasAsset) {
+          atlasMsi ??= url;
+        } else {
+          firstMsi ??= url;
+        }
+      }
+    }
+
+    return atlasSetupExe ??
+        setupExe ??
+        atlasExe ??
+        firstExe ??
+        atlasInstallerMsi ??
+        installerMsi ??
+        atlasMsi ??
+        firstMsi;
+  }
+
+  static Iterable<String> executableCandidatesForRoot(String dirPath) sync* {
+    final trimmed = dirPath.trim();
+    if (trimmed.isEmpty) return;
+
+    for (final executableName in const <String>[
+      'ATLAS Backend.exe',
+      'ATLAS-Backend.exe',
+      'ATLAS.exe',
+    ]) {
+      yield _joinAtlasBackendInstallPath([trimmed, executableName]);
+    }
+
+    for (final relativeParts in const <List<String>>[
+      <String>['dist', 'ATLAS-Backend', 'ATLAS Backend.exe'],
+      <String>['dist', 'ATLAS-Backend', 'ATLAS-Backend.exe'],
+      <String>['dist', 'ATLAS-Backend', 'ATLAS.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS Backend.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS-Backend.exe'],
+      <String>['dist', 'ATLAS Backend', 'ATLAS.exe'],
+      <String>[
+        'atlas_gui_flutter',
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS Backend.exe',
+      ],
+      <String>[
+        'atlas_gui_flutter',
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS.exe',
+      ],
+      <String>[
+        'build',
+        'windows',
+        'x64',
+        'runner',
+        'Release',
+        'ATLAS Backend.exe',
+      ],
+      <String>['build', 'windows', 'x64', 'runner', 'Release', 'ATLAS.exe'],
+    ]) {
+      yield _joinAtlasBackendInstallPath([trimmed, ...relativeParts]);
+    }
+  }
+}
 
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
 const _fallbackAcrylicColorLight = Color(0x36F2F6FF);
@@ -314,9 +434,9 @@ class _SmoothScrollPhysics extends ScrollPhysics {
   }
 }
 
-enum LauncherTab { home, library, backend, general }
+enum LauncherTab { home, library, stats, backend, general }
 
-enum SettingsSection { profile, appearance, dataManagement, support }
+enum SettingsSection { profile, appearance, dataManagement, credits, support }
 
 enum GameServerInjectType { custom }
 
@@ -337,6 +457,7 @@ class _FortniteProcessState {
     required this.versionId,
     required this.gameVersion,
     required this.clientName,
+    this.headless = false,
     this.launcherPid,
     this.eacPid,
     this.child,
@@ -347,6 +468,7 @@ class _FortniteProcessState {
   final String versionId;
   final String gameVersion;
   final String clientName;
+  final bool headless;
   final int? launcherPid;
   final int? eacPid;
   final _FortniteProcessState? child;
@@ -362,6 +484,20 @@ class _FortniteProcessState {
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
   bool gameServerInjectionScheduled = false;
+  bool sawContinueLoggingIn = false;
+  bool sawAnyCompletedLoginLine = false;
+  bool sawEnglishCompletedLoginLine = false;
+  bool sawLoginUiStateTransition = false;
+  bool sawUpdateSuccess = false;
+  bool sawUpdateSuccessNoChange = false;
+  bool sawUpdateResult1 = false;
+  bool sawUpdateResult2 = false;
+  bool sawLoginToSubgameSelect = false;
+  bool sawSubgameSelectToFrontEnd = false;
+  bool sawClientLoadingMarker = false;
+  bool sawPotentialLocalizedLoginCompletion = false;
+  bool sawPotentialGarbledLoginCompletion = false;
+  bool loggedPotentialLoginMarkerMismatch = false;
 
   void killAuxiliary() {
     final launcher = launcherPid;
@@ -505,8 +641,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.1.7';
-  static const String _launcherBuildLabel = 'Stable 1.1.7';
+  static const String _launcherVersion = '1.2.2';
+  static const String _launcherBuildLabel = 'Stable 1.2.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -529,10 +665,17 @@ class _LauncherScreenState extends State<LauncherScreen>
       'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
   static const Duration _maxLaunchTokenAge = Duration(days: 30);
   static const Duration _maxLaunchTokenClockSkew = Duration(minutes: 10);
+  static const Duration _playtimeCheckpointInterval = Duration(seconds: 15);
   // Reduced post-login delay for faster injection start on low-end PCs
   static const int _postLoginInjectionDelayMs = 300;
+  static const int _headlessPostLoginInjectionDelayMs = 900;
+  static const int _headlessGameServerInjectionSettleDelayMs = 3000;
+  static const int _headlessGameServerInjectionUiDelayMs = 240;
+  static const int _headlessFallbackPostLoginDelaySeconds = 16;
+  static const int _headlessFallbackGameServerInjectionDelaySeconds = 28;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
+  static const String _defaultEpicAuthPassword = 'AtlasDefault';
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _discordRpcDllName = 'discord-rpc.dll';
   static const String _discordRpcOriginalDllName = 'discord-rpc-original.dll';
@@ -644,6 +787,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _backendHostController = TextEditingController();
   final _backendPortController = TextEditingController();
   final _librarySearchController = TextEditingController();
+  final _statsSearchController = TextEditingController();
   final _savedBackendSearchController = TextEditingController();
   final ScrollController _libraryScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
@@ -708,6 +852,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   BackendConnectionType? _backendQuickTipOriginalType;
   String? _backendQuickTipOriginalHost;
   String _versionSearchQuery = '';
+  String _statsSearchQuery = '';
   String _savedBackendSearchQuery = '';
 
   Process? _gameProcess;
@@ -727,9 +872,12 @@ class _LauncherScreenState extends State<LauncherScreen>
   final List<_FortniteProcessState> _extraGameInstances =
       <_FortniteProcessState>[];
   _FortniteProcessState? _gameServerInstance;
+  DateTime? _atlasPlaySessionStartedAt;
+  final Map<String, DateTime> _activeVersionPlaySessions = <String, DateTime>{};
   Timer? _homeHeroTimer;
   Timer? _pollTimer;
   Timer? _gameServerCrashStatusClearTimer;
+  Timer? _playtimeCheckpointTimer;
   bool _runtimePollingStarted = false;
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
@@ -774,6 +922,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _installStateFile;
   late File _launcherContentCacheFile;
   late File _logFile;
+  bool _storageReady = false;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
 
@@ -810,6 +959,9 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   @override
   void dispose() {
+    _checkpointActivePlaytime(syncSave: true);
+    _playtimeCheckpointTimer?.cancel();
+    _playtimeCheckpointTimer = null;
     _homeHeroTimer?.cancel();
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
@@ -827,6 +979,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _backendHostController.dispose();
     _backendPortController.dispose();
     _librarySearchController.dispose();
+    _statsSearchController.dispose();
     _savedBackendSearchController.dispose();
     _libraryScrollController.dispose();
     _unrealEnginePatcherController.dispose();
@@ -902,6 +1055,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         setState(() {});
       }
       _log('launcher', 'ATLAS Link initialized.');
+      _log(
+        'launcher',
+        'Environment: os=${Platform.operatingSystem}, locale=${Platform.localeName}.',
+      );
 
       unawaited(_cleanupAtlasBackendInstallerIfBackendDetected());
       if (!_showStartup) {
@@ -959,7 +1116,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     try {
       await _saveSettings(toast: false, applyControllers: false);
     } catch (error) {
-      _log('settings', 'Failed to persist settings during update migration: $error');
+      _log(
+        'settings',
+        'Failed to persist settings during update migration: $error',
+      );
     }
 
     try {
@@ -1795,8 +1955,14 @@ class _LauncherScreenState extends State<LauncherScreen>
                                     onPressed: submitted
                                         ? null
                                         : () => submitDialog(setDialogState),
-                                    icon: const Icon(Icons.check_rounded),
-                                    label: const Text('Continue'),
+                                    icon: const Icon(
+                                      Icons.check_rounded,
+                                      color: Colors.white,
+                                    ),
+                                    label: const Text(
+                                      'Continue',
+                                      style: TextStyle(color: Colors.white),
+                                    ),
                                     style: FilledButton.styleFrom(
                                       padding: const EdgeInsets.symmetric(
                                         horizontal: 18,
@@ -1929,6 +2095,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
     _logFileReady = true;
+    _storageReady = true;
   }
 
   Future<void> _migrateLegacyDataDirIfNeeded({
@@ -2807,6 +2974,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       } else {
         _settings = LauncherSettings.defaults();
       }
+      _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
       await _migrateAppearanceSettingsFileIfNeeded();
     } catch (error) {
       _settings = LauncherSettings.defaults();
@@ -3199,15 +3367,33 @@ class _LauncherScreenState extends State<LauncherScreen>
     bool applyControllers = true,
   }) async {
     if (applyControllers) _applyControllers();
-    _syncSavedBackendsForActiveProfile();
-    final pretty = const JsonEncoder.withIndent(
-      '  ',
-    ).convert(_settings.toJson());
-    await _settingsFile.writeAsString(pretty, flush: true);
+    await _saveSettingsSnapshot();
     _log('settings', 'Settings saved.');
     if (!mounted) return;
     setState(() {});
     if (toast) _toast('Settings saved');
+  }
+
+  String _buildSettingsSnapshotJson() {
+    _syncSavedBackendsForActiveProfile();
+    _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
+    return const JsonEncoder.withIndent('  ').convert(_settings.toJson());
+  }
+
+  Future<void> _saveSettingsSnapshot() async {
+    if (!_storageReady) return;
+    final pretty = _buildSettingsSnapshotJson();
+    await _settingsFile.writeAsString(pretty, flush: true);
+  }
+
+  void _saveSettingsSnapshotSync() {
+    if (!_storageReady) return;
+    final pretty = _buildSettingsSnapshotJson();
+    try {
+      _settingsFile.writeAsStringSync(pretty, flush: true);
+    } catch (_) {
+      // Ignore shutdown save failures.
+    }
   }
 
   Map<String, List<SavedBackend>> _cloneSavedBackendsByProfile({
@@ -3368,6 +3554,252 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   bool get _hasRunningGameClient => _runningGameClients().isNotEmpty;
+
+  List<VersionEntry> _activeTrackedVersions() {
+    final seenVersionIds = <String>{};
+    final activeVersions = <VersionEntry>[];
+    for (final client in _runningGameClients()) {
+      if (!seenVersionIds.add(client.versionId)) continue;
+      final version = _findVersionById(client.versionId);
+      if (version != null) activeVersions.add(version);
+    }
+    return activeVersions;
+  }
+
+  bool _hasRunningClientForVersion(String versionId) {
+    for (final client in _runningGameClients()) {
+      if (client.versionId == versionId) return true;
+    }
+    return false;
+  }
+
+  void _recordGameplaySessionStart(String versionId) {
+    final now = DateTime.now();
+    _atlasPlaySessionStartedAt ??= now;
+    _activeVersionPlaySessions.putIfAbsent(versionId, () => now);
+    _syncPlaytimeCheckpointTimer();
+  }
+
+  LauncherSettings _withRecordedVersionPlaytime(
+    LauncherSettings settings,
+    String versionId, {
+    required int additionalSeconds,
+    required int lastPlayedAtEpochMs,
+  }) {
+    var updated = false;
+    final versions = settings.versions.map((version) {
+      if (version.id != versionId) return version;
+      updated = true;
+      return version.copyWith(
+        playTimeSeconds: max(0, version.playTimeSeconds + additionalSeconds),
+        lastPlayedAtEpochMs: lastPlayedAtEpochMs,
+      );
+    }).toList();
+
+    return updated ? settings.copyWith(versions: versions) : settings;
+  }
+
+  int _persistedTrackedVersionPlaySeconds([LauncherSettings? settings]) {
+    final source = settings ?? _settings;
+    var total = 0;
+    for (final version in source.versions) {
+      total += max(0, version.playTimeSeconds);
+    }
+    return total;
+  }
+
+  LauncherSettings _settingsWithSynchronizedOverallPlaytime(
+    LauncherSettings settings,
+  ) {
+    final combinedVersionSeconds = _persistedTrackedVersionPlaySeconds(
+      settings,
+    );
+    if (settings.totalAtlasPlaySeconds == combinedVersionSeconds) {
+      return settings;
+    }
+    return settings.copyWith(totalAtlasPlaySeconds: combinedVersionSeconds);
+  }
+
+  void _recordGameplaySessionEnd(String versionId) {
+    final endedAt = DateTime.now();
+    var nextSettings = _settings;
+
+    final versionSessionStartedAt = _activeVersionPlaySessions[versionId];
+    if (versionSessionStartedAt != null &&
+        !_hasRunningClientForVersion(versionId)) {
+      _activeVersionPlaySessions.remove(versionId);
+      nextSettings = _withRecordedVersionPlaytime(
+        nextSettings,
+        versionId,
+        additionalSeconds: max(
+          0,
+          endedAt.difference(versionSessionStartedAt).inSeconds,
+        ),
+        lastPlayedAtEpochMs: endedAt.millisecondsSinceEpoch,
+      );
+    }
+
+    if (_atlasPlaySessionStartedAt != null && !_hasRunningGameClient) {
+      _atlasPlaySessionStartedAt = null;
+    }
+    nextSettings = _settingsWithSynchronizedOverallPlaytime(nextSettings);
+
+    if (identical(nextSettings, _settings)) {
+      _syncPlaytimeCheckpointTimer();
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _settings = nextSettings);
+    } else {
+      _settings = nextSettings;
+    }
+    _syncPlaytimeCheckpointTimer();
+    unawaited(_saveSettings(toast: false, applyControllers: false));
+  }
+
+  void _syncPlaytimeCheckpointTimer() {
+    final shouldRun = _activeVersionPlaySessions.isNotEmpty;
+    if (!shouldRun) {
+      _playtimeCheckpointTimer?.cancel();
+      _playtimeCheckpointTimer = null;
+      return;
+    }
+
+    _playtimeCheckpointTimer ??= Timer.periodic(
+      _playtimeCheckpointInterval,
+      (_) => _checkpointActivePlaytime(),
+    );
+  }
+
+  void _checkpointActivePlaytime({bool syncSave = false}) {
+    if (!_storageReady) return;
+
+    final now = DateTime.now();
+    var nextSettings = _settings;
+    var changed = false;
+
+    final activeVersionIds = _activeVersionPlaySessions.keys.toList();
+    for (final versionId in activeVersionIds) {
+      final startedAt = _activeVersionPlaySessions[versionId];
+      if (startedAt == null) continue;
+      if (!_hasRunningClientForVersion(versionId)) continue;
+
+      final elapsedSeconds = max(0, now.difference(startedAt).inSeconds);
+      if (elapsedSeconds == 0) continue;
+
+      nextSettings = _withRecordedVersionPlaytime(
+        nextSettings,
+        versionId,
+        additionalSeconds: elapsedSeconds,
+        lastPlayedAtEpochMs: now.millisecondsSinceEpoch,
+      );
+      _activeVersionPlaySessions[versionId] = now;
+      changed = true;
+    }
+
+    final synchronizedSettings = _settingsWithSynchronizedOverallPlaytime(
+      nextSettings,
+    );
+    if (synchronizedSettings.totalAtlasPlaySeconds !=
+        nextSettings.totalAtlasPlaySeconds) {
+      nextSettings = synchronizedSettings;
+      changed = true;
+    }
+
+    if (changed) {
+      _settings = nextSettings;
+      if (syncSave) {
+        _saveSettingsSnapshotSync();
+      } else {
+        unawaited(_saveSettingsSnapshot());
+      }
+    }
+
+    _syncPlaytimeCheckpointTimer();
+  }
+
+  int _effectiveTotalAtlasPlaySeconds() {
+    var total = 0;
+    for (final version in _settings.versions) {
+      total += _effectiveVersionPlaySeconds(version);
+    }
+    return total;
+  }
+
+  int _effectiveVersionPlaySeconds(VersionEntry version) {
+    final startedAt = _activeVersionPlaySessions[version.id];
+    if (startedAt == null) return version.playTimeSeconds;
+    return version.playTimeSeconds +
+        max(0, DateTime.now().difference(startedAt).inSeconds);
+  }
+
+  bool _hasTrackedPlaytime(VersionEntry version) {
+    return version.playTimeSeconds > 0 ||
+        version.lastPlayedAtEpochMs > 0 ||
+        _activeVersionPlaySessions.containsKey(version.id);
+  }
+
+  String _formatTrackedPlaytime(int totalSeconds) {
+    final seconds = max(0, totalSeconds);
+    final days = seconds ~/ 86400;
+    final hours = (seconds % 86400) ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    final remainingSeconds = seconds % 60;
+
+    if (days > 0) {
+      return hours > 0 ? '${days}d ${hours}h' : '${days}d';
+    }
+    if (hours > 0) {
+      return minutes > 0 ? '${hours}h ${minutes}m' : '${hours}h';
+    }
+    if (minutes > 0) {
+      return remainingSeconds > 0
+          ? '${minutes}m ${remainingSeconds}s'
+          : '${minutes}m';
+    }
+    return '${remainingSeconds}s';
+  }
+
+  String _monthAbbreviation(int month) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    if (month < 1 || month > 12) return 'Unknown';
+    return months[month - 1];
+  }
+
+  String _formatVersionLastPlayed(VersionEntry version) {
+    if (_activeVersionPlaySessions.containsKey(version.id)) {
+      return 'Tracking live session';
+    }
+    if (version.lastPlayedAtEpochMs <= 0) return 'Not played yet';
+
+    final playedAt = DateTime.fromMillisecondsSinceEpoch(
+      version.lastPlayedAtEpochMs,
+    );
+    final now = DateTime.now();
+    final playedDate = DateTime(playedAt.year, playedAt.month, playedAt.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final difference = today.difference(playedDate).inDays;
+
+    if (difference <= 0) return 'Last played today';
+    if (difference == 1) return 'Last played yesterday';
+    if (difference < 7) return 'Last played $difference days ago';
+    return 'Last played ${_monthAbbreviation(playedAt.month)} '
+        '${playedAt.day}, ${playedAt.year}';
+  }
 
   Set<String> _activeGameClientNames() {
     final names = <String>{};
@@ -3610,7 +4042,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     var server = await tryBind();
     if (server != null) return server;
 
-    // Reboot-style: free the default backend port and try again.
+    // Free the default backend port and try again.
     await _killExistingProcessByPort(_defaultBackendPort);
     await Future.delayed(const Duration(milliseconds: 200));
     server = await tryBind();
@@ -3997,8 +4429,8 @@ class _LauncherScreenState extends State<LauncherScreen>
                         ),
                         const SizedBox(height: 14),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
+                            const Spacer(),
                             TextButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(),
@@ -4059,36 +4491,46 @@ class _LauncherScreenState extends State<LauncherScreen>
       transitionDuration: const Duration(milliseconds: 240),
       pageBuilder: (dialogContext, animation, secondaryAnimation) {
         final secondary = Theme.of(dialogContext).colorScheme.secondary;
-        Widget linkRow({required String label, required String url}) {
-          final pretty = url
-              .replaceFirst('https://', '')
-              .replaceFirst('http://', '');
-          return Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 4,
-            runSpacing: 4,
-            children: [
-              Text(
-                '$label:',
-                style: TextStyle(
-                  color: _onSurface(dialogContext, 0.86),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              InkWell(
-                onTap: () => unawaited(_openUrl(url)),
-                borderRadius: BorderRadius.circular(6),
-                child: Text(
-                  pretty,
-                  style: TextStyle(
-                    color: secondary,
-                    fontWeight: FontWeight.w600,
-                    decoration: TextDecoration.underline,
-                    decorationColor: secondary,
-                  ),
-                ),
-              ),
-            ],
+        final size = MediaQuery.sizeOf(dialogContext);
+        final dialogWidth = max(320.0, min(920.0, size.width - 24));
+        final dialogMaxHeight = max(420.0, min(760.0, size.height - 24));
+        const creators = <_AboutCreatorProfile>[
+          _AboutCreatorProfile(
+            name: 'cipher',
+            handle: '@cipherfps',
+            role: 'Owner',
+            githubUrl: 'https://github.com/cipherfps',
+            avatarUrl: 'https://github.com/cipherfps.png?size=240',
+            description:
+                'Creator of ATLAS and constantly updates and develops the launcher/backend for the best possible experience. (Thank you for trying ATLAS! <3)',
+          ),
+          _AboutCreatorProfile(
+            name: 'ralz',
+            handle: '@Ralzify',
+            role: 'Co-Owner',
+            githubUrl: 'https://github.com/Ralzify',
+            avatarUrl: 'https://github.com/Ralzify.png?size=240',
+            description:
+                'Co-creator of ATLAS and helps maintain the gameserver Magnesium, as well as contributing to launcher/backend features and improvements.',
+          ),
+        ];
+
+        Widget aboutActionButton({
+          required Widget icon,
+          required String label,
+          required VoidCallback onPressed,
+        }) {
+          return OutlinedButton.icon(
+            onPressed: onPressed,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _onSurface(dialogContext, 0.92),
+              backgroundColor: _onSurface(dialogContext, 0.03),
+              side: BorderSide(color: _onSurface(dialogContext, 0.14)),
+              shape: const StadiumBorder(),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+            icon: icon,
+            label: Text(label),
           );
         }
 
@@ -4097,7 +4539,10 @@ class _LauncherScreenState extends State<LauncherScreen>
             child: Material(
               type: MaterialType.transparency,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 520),
+                constraints: BoxConstraints(
+                  maxWidth: dialogWidth,
+                  maxHeight: dialogMaxHeight,
+                ),
                 child: Container(
                   decoration: BoxDecoration(
                     color: _dialogSurfaceColor(dialogContext),
@@ -4111,17 +4556,18 @@ class _LauncherScreenState extends State<LauncherScreen>
                       ),
                     ],
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Container(
-                              width: 36,
-                              height: 36,
+                              width: 42,
+                              height: 42,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: _adaptiveScrimColor(
@@ -4134,23 +4580,40 @@ class _LauncherScreenState extends State<LauncherScreen>
                                 ),
                               ),
                               child: Padding(
-                                padding: const EdgeInsets.all(5),
+                                padding: const EdgeInsets.all(6),
                                 child: Image.asset(
                                   'assets/images/atlas_logo.png',
                                   fit: BoxFit.contain,
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Text(
-                              'About',
-                              style: TextStyle(
-                                fontSize: 34,
-                                fontWeight: FontWeight.w700,
-                                color: _onSurface(dialogContext, 0.96),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'About',
+                                    style: TextStyle(
+                                      fontSize: 40,
+                                      fontWeight: FontWeight.w800,
+                                      color: _onSurface(dialogContext, 0.96),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'Created by the ATLAS team',
+                                    style: TextStyle(
+                                      color: _onSurface(dialogContext, 0.72),
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            const Spacer(),
+                            const SizedBox(width: 12),
                             _buildVersionTag(
                               dialogContext,
                               label: _versionLabel(_launcherVersion),
@@ -4158,23 +4621,87 @@ class _LauncherScreenState extends State<LauncherScreen>
                             ),
                           ],
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 18),
                         Text(
-                          'Made by cipher',
+                          'ATLAS is created and maintained by cipher and ralz. This launcher and project experience are shaped by the team below.',
                           style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.96),
+                            color: _onSurface(dialogContext, 0.82),
+                            fontSize: 15,
+                            height: 1.5,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        linkRow(label: 'GitHub', url: _atlasLinkRepository),
-                        const SizedBox(height: 6),
-                        linkRow(label: 'Support', url: _atlasLinkDiscordInvite),
-                        const SizedBox(height: 14),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
+                        const SizedBox(height: 16),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
                           children: [
+                            aboutActionButton(
+                              onPressed: () =>
+                                  unawaited(_openUrl(_atlasLinkRepository)),
+                              icon: const FaIcon(
+                                FontAwesomeIcons.github,
+                                size: 16,
+                              ),
+                              label: 'ATLAS Repo',
+                            ),
+                            aboutActionButton(
+                              onPressed: () =>
+                                  unawaited(_openUrl(_atlasLinkDiscordInvite)),
+                              icon: const Icon(Icons.discord_rounded, size: 18),
+                              label: 'Support',
+                            ),
+                            aboutActionButton(
+                              onPressed: () {
+                                Navigator.of(dialogContext).pop();
+                                unawaited(
+                                  _switchMenu(
+                                    LauncherTab.general,
+                                    settingsSection: SettingsSection.support,
+                                  ),
+                                );
+                              },
+                              icon: const Icon(
+                                Icons.auto_awesome_rounded,
+                                size: 18,
+                              ),
+                              label: 'Credits',
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 22),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final cards = creators
+                                .map(
+                                  (creator) =>
+                                      _aboutCreatorCard(dialogContext, creator),
+                                )
+                                .toList(growable: false);
+                            if (constraints.maxWidth < 780) {
+                              return Column(
+                                children: [
+                                  for (var i = 0; i < cards.length; i++) ...[
+                                    if (i > 0) const SizedBox(height: 16),
+                                    cards[i],
+                                  ],
+                                ],
+                              );
+                            }
+
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(child: cards[0]),
+                                const SizedBox(width: 16),
+                                Expanded(child: cards[1]),
+                              ],
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            const Spacer(),
                             TextButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(),
@@ -5203,13 +5730,110 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return _isLaunchInProgress();
   }
 
-  String _launchPopupLine({required String label, required String message}) {
+  String _launchPopupMessage(String message) {
     var text = message.trim();
     if (text.isEmpty) return '';
     if (text.endsWith('.') && !text.endsWith('...')) {
       text = text.substring(0, text.length - 1).trimRight();
     }
-    return '$label: $text';
+    return text;
+  }
+
+  Widget _buildLaunchPopupStatusLabel({
+    required IconData icon,
+    required String label,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 16, color: _onSurface(context, 0.74)),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '$label:',
+          style: TextStyle(
+            color: _onSurface(context, 0.90),
+            fontSize: 14,
+            height: 1.2,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLaunchPopupStatusContent(
+    List<({IconData icon, String label, String message})> statuses,
+  ) {
+    final visibleStatuses = statuses
+        .map(
+          (status) => (
+            icon: status.icon,
+            label: status.label,
+            message: _launchPopupMessage(status.message),
+          ),
+        )
+        .where((status) => status.message.isNotEmpty)
+        .toList(growable: false);
+
+    final textStyle = TextStyle(
+      color: _onSurface(context, 0.88),
+      fontSize: 14,
+      height: 1.2,
+      fontWeight: FontWeight.w600,
+    );
+
+    if (visibleStatuses.isEmpty) {
+      return Text('Working...', style: textStyle);
+    }
+
+    const dividerGap = 12.0;
+
+    return IntrinsicHeight(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IntrinsicWidth(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < visibleStatuses.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  _buildLaunchPopupStatusLabel(
+                    icon: visibleStatuses[i].icon,
+                    label: visibleStatuses[i].label,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: dividerGap),
+          Container(
+            width: 1,
+            margin: const EdgeInsets.symmetric(vertical: 2),
+            color: _onSurface(context, 0.12),
+          ),
+          const SizedBox(width: dividerGap),
+          Flexible(
+            fit: FlexFit.loose,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < visibleStatuses.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  Text(visibleStatuses[i].message, style: textStyle),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildLaunchProgressPopup() {
@@ -5219,19 +5843,110 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ? selected!.name.trim()
         : 'Launching';
     final subtitle = selected?.gameVersion.trim().isNotEmpty == true
-        ? selected!.gameVersion.trim()
+        ? () {
+            final f = _formatLibraryVersionLabel(selected!.gameVersion);
+            return f == '?' ? '' : f;
+          }()
         : '';
+    final titleTextStyle = TextStyle(
+      color: _onSurface(context, 0.94),
+      fontSize: 22,
+      fontWeight: FontWeight.w800,
+      height: 1.05,
+    );
+    final subtitleTextStyle = TextStyle(
+      color: _onSurface(context, 0.70),
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+      height: 1.0,
+    );
 
     final gameStatus = _currentLibraryGameStatus();
     final hostStatus = _currentLibraryGameServerStatus();
-    final lines = <String>[
-      if (hostStatus != null)
-        _launchPopupLine(label: 'Host', message: hostStatus.message),
+    final statusEntries = <({IconData icon, String label, String message})>[
       if (gameStatus != null)
-        _launchPopupLine(label: 'Fortnite', message: gameStatus.message),
-    ].where((line) => line.trim().isNotEmpty).toList();
-
-    final statusText = lines.isEmpty ? 'Working...' : lines.join('\n');
+        (
+          icon: Icons.sports_esports_rounded,
+          label: 'Fortnite',
+          message: gameStatus.message,
+        ),
+      if (hostStatus != null)
+        (
+          icon: Icons.settings_rounded,
+          label: 'Host',
+          message: hostStatus.message,
+        ),
+    ];
+    final closeButton = InkWell(
+      child: SizedBox(
+        width: 34,
+        height: 34,
+        child: Material(
+          color: _adaptiveScrimColor(
+            context,
+            darkAlpha: 0.08,
+            lightAlpha: 0.14,
+          ),
+          shape: CircleBorder(
+            side: BorderSide(color: _onSurface(context, 0.12)),
+          ),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: () {
+              setState(() => _launchProgressPopupDismissed = true);
+            },
+            child: Center(
+              child: Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: _onSurface(context, 0.84),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final titleBlock = Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image(image: cover, width: 60, height: 60, fit: BoxFit.cover),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: titleTextStyle,
+              ),
+              if (subtitle.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: subtitleTextStyle,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+    final statusPanel = Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: _onSurface(context, 0.05),
+        border: Border.all(color: _onSurface(context, 0.10)),
+      ),
+      child: _buildLaunchPopupStatusContent(statusEntries),
+    );
 
     return Stack(
       children: [
@@ -5249,9 +5964,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           child: Material(
             type: MaterialType.transparency,
             child: Container(
-              constraints: const BoxConstraints(maxWidth: 560),
+              width: min(560.0, MediaQuery.sizeOf(context).width - 48),
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+              padding: const EdgeInsets.fromLTRB(24, 22, 24, 22),
               decoration: BoxDecoration(
                 color: _dialogSurfaceColor(context),
                 borderRadius: BorderRadius.circular(28),
@@ -5269,107 +5984,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(16),
-                        child: Image(
-                          image: cover,
-                          width: 54,
-                          height: 54,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: _onSurface(context, 0.94),
-                                fontSize: 20,
-                                fontWeight: FontWeight.w800,
-                                height: 1.05,
-                              ),
-                            ),
-                            if (subtitle.isNotEmpty) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                subtitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: _onSurface(context, 0.70),
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.0,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(999),
-                        onTap: () {
-                          setState(() => _launchProgressPopupDismissed = true);
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.all(4),
-                          child: Icon(
-                            Icons.close_rounded,
-                            size: 18,
-                            color: _onSurface(context, 0.70),
-                          ),
-                        ),
-                      ),
+                      Expanded(child: titleBlock),
+                      const SizedBox(width: 12),
+                      closeButton,
                     ],
                   ),
-                  const SizedBox(height: 14),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      color: _onSurface(context, 0.05),
-                      border: Border.all(color: _onSurface(context, 0.10)),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.4,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Theme.of(context).colorScheme.secondary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            statusText,
-                            style: TextStyle(
-                              color: _onSurface(context, 0.88),
-                              fontSize: 13.5,
-                              height: 1.25,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 16),
+                  statusPanel,
+                  const SizedBox(height: 18),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(999),
                     child: LinearProgressIndicator(
@@ -5392,22 +6016,139 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  bool _isLoginCompleteSignal(String line) {
+  String? _loginCompleteSignalReason(String line) {
     final lower = line.toLowerCase();
 
     // Most reliable marker across builds.
     if (lower.contains(_loginContinueMarker.toLowerCase()) &&
         lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
         lower.contains(_loginCompletedMarker.toLowerCase())) {
-      return true;
+      return 'continue_logging_in_completed_en';
     }
 
     // Fallback marker some builds emit immediately after finishing login.
     if (lower.contains(_loginUiStateTransitionMarker.toLowerCase())) {
-      return true;
+      return 'ui_state_transition';
     }
 
-    return false;
+    return null;
+  }
+
+  void _recordReadinessDiagnostics(_FortniteProcessState state, String line) {
+    final lower = line.toLowerCase();
+    final continueLoggingInSeen = lower.contains(
+      _loginContinueMarker.toLowerCase(),
+    );
+    final completedSuffixSeen = lower.contains(
+      _loginCompletedMarker.toLowerCase(),
+    );
+    final englishCompletedLoginSeen =
+        continueLoggingInSeen &&
+        lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
+        completedSuffixSeen;
+    final loginUiStateTransitionSeen = lower.contains(
+      _loginUiStateTransitionMarker.toLowerCase(),
+    );
+
+    if (continueLoggingInSeen) state.sawContinueLoggingIn = true;
+    if (continueLoggingInSeen && completedSuffixSeen) {
+      state.sawAnyCompletedLoginLine = true;
+    }
+    if (englishCompletedLoginSeen) {
+      state.sawEnglishCompletedLoginLine = true;
+    }
+    if (loginUiStateTransitionSeen) {
+      state.sawLoginUiStateTransition = true;
+    }
+
+    if (continueLoggingInSeen &&
+        completedSuffixSeen &&
+        !englishCompletedLoginSeen) {
+      state.sawPotentialLocalizedLoginCompletion = true;
+      if (RegExp(r'\?{3,}').hasMatch(line)) {
+        state.sawPotentialGarbledLoginCompletion = true;
+      }
+      if (!state.loggedPotentialLoginMarkerMismatch) {
+        state.loggedPotentialLoginMarkerMismatch = true;
+        _log(
+          state.host ? 'gameserver' : 'game',
+          'Observed a login completion line ending with "(Completed)" that did not match the expected English marker. This machine may be hitting a localized or garbled readiness signal.',
+        );
+      }
+    }
+
+    if (line.contains('CheckComplete UpdateSuccess_NoChange')) {
+      state.sawUpdateSuccessNoChange = true;
+    } else if (line.contains('CheckComplete UpdateSuccess')) {
+      state.sawUpdateSuccess = true;
+    }
+
+    if (line.contains(
+      'AFortGameModeFrontEnd::OnUpdateCheckComplete called. Result=2',
+    )) {
+      state.sawUpdateResult2 = true;
+    } else if (line.contains(
+      'AFortGameModeFrontEnd::OnUpdateCheckComplete called. Result=1',
+    )) {
+      state.sawUpdateResult1 = true;
+    }
+
+    if (lower.contains('states from: login to subgameselect')) {
+      state.sawLoginToSubgameSelect = true;
+    }
+    if (lower.contains('states from: subgameselect to frontend')) {
+      state.sawSubgameSelectToFrontEnd = true;
+    }
+    if (_clientLoadingCompleteMarkers.any(
+      (marker) => lower.contains(marker.toLowerCase()),
+    )) {
+      state.sawClientLoadingMarker = true;
+    }
+  }
+
+  String _buildClientReadinessFailureCode(_FortniteProcessState state) {
+    final codes = <String>[];
+
+    if (!state.postLoginInjected) {
+      if (state.sawPotentialGarbledLoginCompletion) {
+        codes.add('R8-encoding-sensitive-login-marker');
+      } else if (state.sawPotentialLocalizedLoginCompletion) {
+        codes.add('R6-localized-login-marker');
+      }
+      if (state.sawUpdateSuccessNoChange || state.sawUpdateResult2) {
+        codes.add('R6-alternate-update-complete');
+      }
+      if (state.sawAnyCompletedLoginLine ||
+          state.sawLoginUiStateTransition ||
+          state.sawLoginToSubgameSelect ||
+          state.sawSubgameSelectToFrontEnd) {
+        codes.add('R3-ready-signal-missed');
+      } else {
+        codes.add('R3-login-complete-never-seen');
+      }
+      if (state.killed) {
+        codes.add('R7-client-closed-before-ready');
+      }
+    }
+
+    if (codes.isEmpty) return 'R0-no-client-readiness-failure';
+    return codes.join(', ');
+  }
+
+  String _buildClientReadinessSummary(_FortniteProcessState state) {
+    return 'continueLoggingInSeen=${state.sawContinueLoggingIn}, '
+        'completedLoginSeen=${state.sawAnyCompletedLoginLine}, '
+        'englishCompletedLoginSeen=${state.sawEnglishCompletedLoginLine}, '
+        'loginUiTransitionSeen=${state.sawLoginUiStateTransition}, '
+        'updateSuccess=${state.sawUpdateSuccess}, '
+        'updateSuccessNoChange=${state.sawUpdateSuccessNoChange}, '
+        'result1=${state.sawUpdateResult1}, '
+        'result2=${state.sawUpdateResult2}, '
+        'loginToSubgameSelect=${state.sawLoginToSubgameSelect}, '
+        'subgameSelectToFrontEnd=${state.sawSubgameSelectToFrontEnd}, '
+        'clientLoadingMarkerSeen=${state.sawClientLoadingMarker}, '
+        'localizedLoginCompletion=${state.sawPotentialLocalizedLoginCompletion}, '
+        'garbledLoginCompletion=${state.sawPotentialGarbledLoginCompletion}';
   }
 
   /// Markers that indicate the client loading screen has completed.
@@ -5424,8 +6165,36 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     'Engine',
   ];
 
+  static const List<String> _hostGameServerReadyMarkers = [
+    'ui.state.startup.subgameselect',
+    'ui.state.athena.frontend',
+    'ui.state.lobby',
+    'lobbyui',
+  ];
+
+  String? _hostGameServerReadySignalReason(String line) {
+    final lower = line.toLowerCase();
+    if (lower.contains('states from: login to subgameselect')) {
+      return 'login_to_subgameselect';
+    }
+    if (lower.contains('states from: subgameselect to frontend')) {
+      return 'subgameselect_to_frontend';
+    }
+    for (final marker in _hostGameServerReadyMarkers) {
+      if (lower.contains(marker)) {
+        return marker;
+      }
+    }
+
+    // Headless hosts are much more sensitive to early injection. Avoid broad
+    // client markers like "Engine" here and fall back to the delayed path
+    // instead when a stronger UI signal never arrives.
+    return null;
+  }
+
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed || state.exited) return;
+    _recordReadinessDiagnostics(state, line);
 
     if (!state.launched) {
       if (_cannotConnectErrors.any(line.contains)) {
@@ -5436,13 +6205,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     }
 
-    if (!state.postLoginInjected && _isLoginCompleteSignal(line)) {
+    final loginCompleteSignalReason = state.postLoginInjected
+        ? null
+        : _loginCompleteSignalReason(line);
+    if (!state.postLoginInjected && loginCompleteSignalReason != null) {
       state.launched = true;
       state.postLoginInjected = true;
       state.postLoginInferredFromFallback = false;
       _log(
         state.host ? 'gameserver' : 'game',
-        'Login complete detected. Scheduling post-login injections...',
+        'Login complete detected via $loginCompleteSignalReason. Scheduling post-login injections...',
       );
       _setUiStatus(
         host: state.host,
@@ -5464,17 +6236,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       unawaited(_performDeferredLargePakInjection(state));
     }
 
-    // For hosting, delay the game server DLL injection until the lobby marker.
-    if (state.host &&
-        state.postLoginInjected &&
-        state.hostPostLoginPatchersInjected &&
-        !state.gameServerInjected &&
-        !state.gameServerInjectionScheduled &&
-        _clientLoadingCompleteMarkers.any(line.contains)) {
+    // For hosting, wait for a stronger frontend-ready signal before injecting
+    // the game server DLL. This is especially important for headless hosts.
+    final hostReadySignalReason =
+        state.host &&
+            state.postLoginInjected &&
+            state.hostPostLoginPatchersInjected &&
+            !state.gameServerInjected &&
+            !state.gameServerInjectionScheduled
+        ? _hostGameServerReadySignalReason(line)
+        : null;
+    if (hostReadySignalReason != null) {
       state.gameServerInjectionScheduled = true;
       _log(
         'gameserver',
-        'Host fully loaded. Scheduling game server DLL injection...',
+        'Host ready via $hostReadySignalReason. Scheduling game server DLL injection...',
       );
       unawaited(_performDeferredGameServerInjection(state));
     }
@@ -5499,9 +6275,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
     // Optimized for low-end PCs: reduced from 900ms to 300ms to start injections faster
     // while still giving the client time to initialize.
-    await Future.delayed(
-      const Duration(milliseconds: _postLoginInjectionDelayMs),
-    );
+    final postLoginDelayMs = state.host && state.headless
+        ? _headlessPostLoginInjectionDelayMs
+        : _postLoginInjectionDelayMs;
+    await Future.delayed(Duration(milliseconds: postLoginDelayMs));
     if (state.killed || state.exited) return;
 
     if (state.host) {
@@ -5678,8 +6455,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
-    // Give the lobby/subgame UI a moment to settle.
-    await Future<void>.delayed(const Duration(milliseconds: 450));
+    // Give the lobby/subgame UI a moment to settle. Headless hosts benefit
+    // from a longer pause here because the frontend signal can arrive before
+    // the process is actually safe to patch.
+    final settleDelayMs = state.headless
+        ? _headlessGameServerInjectionSettleDelayMs
+        : 450;
+    await Future<void>.delayed(Duration(milliseconds: settleDelayMs));
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
@@ -5688,7 +6470,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Injecting game server DLL...',
       severity: _UiStatusSeverity.info,
     );
-    await Future<void>.delayed(const Duration(milliseconds: 120));
+    final injectionUiDelayMs = state.headless
+        ? _headlessGameServerInjectionUiDelayMs
+        : 120;
+    await Future<void>.delayed(Duration(milliseconds: injectionUiDelayMs));
 
     final serverReport = await _injectConfiguredPatchers(
       state.pid,
@@ -5728,7 +6513,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     // Some builds never emit the lobby UI marker. As a fallback, attempt the
     // server DLL injection after a short delay once post-login patchers ran.
-    await Future<void>.delayed(const Duration(seconds: 16));
+    final fallbackDelaySeconds = state.headless
+        ? _headlessFallbackGameServerInjectionDelaySeconds
+        : 16;
+    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
     if (state.killed || state.exited) return;
     if (!state.hostPostLoginPatchersInjected) return;
     if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
@@ -5807,6 +6595,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ? _extraGameInstances.removeAt(0)
             : null;
       }
+      _recordGameplaySessionEnd(state.versionId);
     }
 
     final tag = state.host ? 'gameserver' : 'game';
@@ -5818,6 +6607,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       'hostPostLoginPatchersInjected=${state.hostPostLoginPatchersInjected}, '
       'gameServerInjected=${state.gameServerInjected}).',
     );
+    if (!state.host && !state.postLoginInjected) {
+      _log(
+        tag,
+        'Client readiness diagnostics: failure=${_buildClientReadinessFailureCode(state)}; ${_buildClientReadinessSummary(state)}.',
+      );
+    }
 
     if (!state.host) {
       // If hosting was started for this session, stop it only once every client
@@ -6189,7 +6984,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final backendHost = _effectiveBackendHostForLaunchArgs();
       final backendPort = _effectiveBackendPort();
       final args =
-          _createRebootLaunchArgs(
+          _createFortniteLaunchArgs(
               username: launchAuth.login,
               password: launchAuth.password,
               launchTokens: playLaunchTokens,
@@ -6245,6 +7040,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       } else {
         _extraGameInstances.add(instance);
       }
+      _recordGameplaySessionStart(version.id);
       _attachProcessLogs(
         child,
         source: 'game',
@@ -6508,7 +7304,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           vertical: 12,
                                         ),
                                       ),
-                                      child: const Text('Launch client'),
+                                      child: const Text(
+                                        'Launch Client',
+                                        style: TextStyle(color: Colors.white),
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -7563,7 +8362,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final backendHost = _effectiveBackendHostForLaunchArgs();
       final backendPort = _effectiveBackendPort();
       final args =
-          _createRebootLaunchArgs(
+          _createFortniteLaunchArgs(
               username: launchAuth.login,
               password: launchAuth.password,
               launchTokens: hostLaunchTokens,
@@ -7608,6 +8407,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         versionId: version.id,
         gameVersion: version.gameVersion,
         clientName: _normalizeClientUsername(hostUsername),
+        headless: _settings.hostHeadlessEnabled,
         launcherPid: launcherPid,
         eacPid: eacPid,
       );
@@ -7668,9 +8468,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (state.postLoginInjected) return;
 
     // Dedicated/headless hosting flows may never emit the UI-based login
-    // markers used by `_isLoginCompleteSignal`. As a safety net, attempt
+    // markers used by `_loginCompleteSignalReason`. As a safety net, attempt
     // post-login injections after a short delay if the server is still running.
-    await Future<void>.delayed(const Duration(seconds: 12));
+    final fallbackDelaySeconds = state.headless
+        ? _headlessFallbackPostLoginDelaySeconds
+        : 12;
+    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
     if (state.killed || state.exited) return;
     if (state.postLoginInjected) return;
 
@@ -7712,7 +8515,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return null;
   }
 
-  String _buildRebootLoginUsername(String username) {
+  String _buildAtlasLoginUsername(String username) {
     final normalized = _normalizeClientUsername(username);
     return '$normalized@atlas.dev';
   }
@@ -7812,8 +8615,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     return _LaunchAuthCredentials(
-      login: _buildRebootLoginUsername(username),
-      password: 'Rebooted',
+      login: _buildAtlasLoginUsername(username),
+      password: _defaultEpicAuthPassword,
     );
   }
 
@@ -7984,7 +8787,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         .toList(growable: false);
   }
 
-  List<String> _createRebootLaunchArgs({
+  List<String> _createFortniteLaunchArgs({
     required String username,
     required String password,
     required _LaunchSessionTokens launchTokens,
@@ -7994,7 +8797,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     int? hostPort,
     String customArgs = '',
   }) {
-    final resolvedPassword = password.trim().isEmpty ? 'Rebooted' : password;
+    final resolvedPassword = password.trim().isEmpty
+        ? _defaultEpicAuthPassword
+        : password;
     final args = <String>[
       '-epicapp=Fortnite',
       '-epicenv=Prod',
@@ -8900,11 +9705,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         );
       } else {
-        _log('game', 'Game server patcher path is empty.');
+        _log('game', 'Game server path is empty.');
         parallelInjections.add(
           Future.value(
             const _InjectionAttempt(
-              name: 'game server patcher',
+              name: 'game server',
               required: true,
               attempted: false,
               success: false,
@@ -8930,7 +9735,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _InjectionAttempt attempt = await _injectSinglePatcher(
       gamePid: gamePid,
       patcherPath: gameServerPath,
-      patcherName: 'game server patcher',
+      patcherName: 'game server',
       required: true,
     );
     if (attempt.success || !attempt.attempted) return attempt;
@@ -8938,7 +9743,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     for (var retry = 2; retry <= _gameServerInjectionMaxAttempts; retry++) {
       _log(
         'game',
-        'Game server patcher injection retry $retry/$_gameServerInjectionMaxAttempts.',
+        'Game server injection retry $retry/$_gameServerInjectionMaxAttempts.',
       );
       // Use exponential backoff instead of fixed delay for better low-end PC performance
       final delayMs = _calculateExponentialBackoffMs(
@@ -8950,7 +9755,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       attempt = await _injectSinglePatcher(
         gamePid: gamePid,
         patcherPath: gameServerPath,
-        patcherName: 'game server patcher',
+        patcherName: 'game server',
         required: true,
       );
       if (attempt.success || !attempt.attempted) return attempt;
@@ -9126,6 +9931,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!dllFile.existsSync()) {
       throw 'DLL not found: $dllPath';
     }
+    final dllLabel = _basename(dllPath);
+    try {
+      await dllFile.readAsBytes();
+    } catch (_) {
+      throw '$dllLabel is not accessible';
+    }
+
     // WinAPI calls (notably WaitForSingleObject) can block the UI isolate, so
     // do the injection work in a background isolate.
     await Isolate.run(() {
@@ -9213,9 +10025,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
           final exitCode = calloc<ffi.Uint32>();
           try {
-            // The win32 package doesn't currently expose GetExitCodeThread, so
-            // bind it directly. We only need to know whether LoadLibraryW
-            // returned non-zero.
             final kernel32 = ffi.DynamicLibrary.open('kernel32.dll');
             final getExitCodeThread = kernel32
                 .lookupFunction<
@@ -9356,6 +10165,126 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _syncLauncherDiscordPresence();
   }
 
+  /// Ensures the previous route (e.g. import dialog) is fully popped before
+  /// pushing another dialog — avoids Navigator popping the wrong overlay.
+  Future<void> _waitForPostFrame() async {
+    final completer = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!completer.isCompleted) completer.complete();
+    });
+    return completer.future;
+  }
+
+  Future<void> _runImportProgressDialog(
+    Future<void> Function(
+      void Function(String message, {double? progress}) update,
+    )
+    job, {
+    String title = 'Importing',
+  }) async {
+    if (!mounted) return;
+    final notifier = ValueNotifier<_ImportProgress>(
+      const _ImportProgress('Starting…', null),
+    );
+
+    void update(String message, {double? progress}) {
+      notifier.value = _ImportProgress(message, progress);
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(dialogContext),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _dialogShadowColor(dialogContext),
+                      blurRadius: 34,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(dialogContext, 0.96),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      ValueListenableBuilder<_ImportProgress>(
+                        valueListenable: notifier,
+                        builder: (context, state, _) {
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(6),
+                                child: LinearProgressIndicator(
+                                  value: state.progress,
+                                  minHeight: 8,
+                                  backgroundColor: _onSurface(
+                                    dialogContext,
+                                    0.08,
+                                  ),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Theme.of(
+                                      dialogContext,
+                                    ).colorScheme.secondary,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                state.message,
+                                style: TextStyle(
+                                  color: _onSurface(dialogContext, 0.82),
+                                  height: 1.35,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    try {
+      await job(update);
+    } finally {
+      notifier.dispose();
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    }
+  }
+
   Future<void> _importVersion() async {
     final importRequest = await _promptImportBuildDialog();
     if (importRequest == null) return;
@@ -9374,54 +10303,88 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return;
     }
 
-    final executable = await _findBuildExecutable(importRequest.buildRootPath);
-    if (executable == null) {
-      _toast('Fortnite executable not found inside selected build');
-      return;
-    }
-
-    final gameVersionFromName = _deriveVersion(importRequest.buildName);
-    final resolvedGameVersion = gameVersionFromName == 'Unknown'
-        ? _deriveVersion(importRequest.buildRootPath)
-        : gameVersionFromName;
-    final splashImagePath = await _findBuildSplashImage(
-      importRequest.buildRootPath,
-      gameVersionHint: resolvedGameVersion,
-      buildNameHint: importRequest.buildName,
-    );
-
-    final version = VersionEntry(
-      id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
-      name: importRequest.buildName,
-      gameVersion: resolvedGameVersion,
-      location: importRequest.buildRootPath,
-      executablePath: executable,
-      splashImagePath: splashImagePath ?? '',
-    );
-    setState(() {
-      _settings = _settings.copyWith(
-        versions: [..._settings.versions, version],
-        selectedVersionId: version.id,
+    await _runImportProgressDialog((update) async {
+      update('Looking for Fortnite executable…', progress: null);
+      final shippingPaths = await findShippingExecutables(
+        importRequest.buildRootPath,
       );
-    });
-    _syncLibraryActionsNudgePulse();
-    await _saveSettings(toast: false);
-    if (mounted) _toast('Version imported');
+      if (shippingPaths.isEmpty) {
+        _toast('Fortnite executable not found inside selected build');
+        return;
+      }
+      if (shippingPaths.length > 1) {
+        _toast(
+          'Multiple FortniteClient-Win64-Shipping.exe files found (${shippingPaths.length}). '
+          'Choose a folder that contains exactly one.',
+        );
+        return;
+      }
+      final executable = shippingPaths.first;
+      update('Applying headless patch…', progress: 0.25);
+      await patchHeadless(File(executable));
+
+      update('Reading game version…', progress: 0.5);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        importRequest.buildRootPath,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        _toast(
+          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
+        );
+        return;
+      }
+      update('Finding splash image…', progress: 0.72);
+      final splashImagePath = await _findBuildSplashImage(
+        importRequest.buildRootPath,
+        gameVersionHint: resolvedGameVersion,
+        buildNameHint: importRequest.buildName,
+      );
+
+      update('Saving build…', progress: 0.92);
+      final version = VersionEntry(
+        id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
+        name: importRequest.buildName,
+        gameVersion: resolvedGameVersion,
+        location: importRequest.buildRootPath,
+        executablePath: executable,
+        splashImagePath: splashImagePath ?? '',
+      );
+      setState(() {
+        _settings = _settings.copyWith(
+          versions: [..._settings.versions, version],
+          selectedVersionId: version.id,
+        );
+      });
+      _syncLibraryActionsNudgePulse();
+      await _saveSettings(toast: false);
+      update('Done.', progress: 1);
+      if (mounted) _toast('Version imported');
+    }, title: 'Importing build');
   }
 
   Future<void> _importManyVersionsFromParent(String parentPath) async {
     final rootPath = parentPath.trim();
     if (rootPath.isEmpty) return;
 
-    final buildRoots = await _discoverBuildRoots(rootPath);
-    if (buildRoots.length < 2) {
-      _toast(
-        'Select a folder that contains multiple build folders with FortniteGame and Engine',
+    await _runImportProgressDialog((update) async {
+      update(
+        'Scanning for build folders (FortniteGame + Engine)…',
+        progress: null,
       );
-      return;
-    }
+      final buildRoots = await _discoverBuildRoots(rootPath);
+      if (buildRoots.isEmpty) {
+        _toast(
+          'No valid build folders were found. Pick a path that contains at least one folder with FortniteGame and Engine.',
+        );
+        return;
+      }
 
-    await _importManyVersionsFromFolders(buildRoots);
+      update(
+        'Found ${buildRoots.length} build folder(s). Starting import…',
+        progress: 0,
+      );
+      await _importManyVersionsFromFolders(buildRoots, onProgress: update);
+    }, title: 'Importing builds');
   }
 
   Future<List<String>> _discoverBuildRoots(String parentPath) async {
@@ -9476,7 +10439,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return discoveredRoots;
   }
 
-  Future<void> _importManyVersionsFromFolders(Iterable<String> folders) async {
+  Future<void> _importManyVersionsFromFolders(
+    Iterable<String> folders, {
+    void Function(String message, {double? progress})? onProgress,
+  }) async {
     final normalizedSelection = <String>{};
     final selectedFolders = <String>[];
     for (final folder in folders) {
@@ -9499,38 +10465,83 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     var skippedDuplicates = 0;
     var skippedInvalid = 0;
 
-    for (final root in selectedFolders) {
+    final total = selectedFolders.length;
+    for (var i = 0; i < total; i++) {
+      final root = selectedFolders[i];
+      final label = _basename(root);
       final normalizedRoot = _normalizePath(root);
+
+      void phase(String name, double localT) {
+        final p = (i + localT.clamp(0.0, 1.0)) / total;
+        onProgress?.call('$name — $label (${i + 1} of $total)', progress: p);
+      }
+
+      phase('Checking', 0.05);
       if (existingLocations.contains(normalizedRoot)) {
         skippedDuplicates++;
+        onProgress?.call(
+          'Skipped duplicate: $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
       if (!_isBuildRootValid(root)) {
         skippedInvalid++;
+        onProgress?.call(
+          'Skipped invalid layout: $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
 
-      final executable = await _findBuildExecutable(root);
-      if (executable == null) {
+      phase('Locating Shipping.exe', 0.15);
+      final shippingPaths = await findShippingExecutables(root);
+      if (shippingPaths.isEmpty) {
         skippedInvalid++;
+        onProgress?.call(
+          'Skipped (no Shipping.exe): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
+        continue;
+      }
+      if (shippingPaths.length > 1) {
+        skippedInvalid++;
+        onProgress?.call(
+          'Skipped (multiple Shipping.exe): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
+        continue;
+      }
+      final executable = shippingPaths.first;
+
+      phase('Importing', 0.38);
+      await patchHeadless(File(executable));
+
+      phase('Reading version', 0.52);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        root,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        skippedInvalid++;
+        onProgress?.call(
+          'Skipped (unsupported version): $label (${i + 1} of $total)',
+          progress: (i + 1) / total,
+        );
         continue;
       }
 
-      final buildName = _basename(root);
-      final gameVersionFromName = _deriveVersion(buildName);
-      final resolvedGameVersion = gameVersionFromName == 'Unknown'
-          ? _deriveVersion(root)
-          : gameVersionFromName;
+      phase('Splash image', 0.68);
       final splashImagePath = await _findBuildSplashImage(
         root,
         gameVersionHint: resolvedGameVersion,
-        buildNameHint: buildName,
+        buildNameHint: label,
       );
 
+      phase('Saving', 0.88);
       imported.add(
         VersionEntry(
-          id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
-          name: buildName,
+          id: '${DateTime.now().millisecondsSinceEpoch}-$i-${_rng.nextInt(90000)}',
+          name: label,
           gameVersion: resolvedGameVersion,
           location: root,
           executablePath: executable,
@@ -9538,7 +10549,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ),
       );
       existingLocations.add(normalizedRoot);
+      onProgress?.call(
+        'Imported $label (${i + 1} of $total)',
+        progress: (i + 1) / total,
+      );
     }
+
+    onProgress?.call(
+      imported.isEmpty
+          ? 'No new builds imported'
+          : 'Saving ${imported.length} build(s) to library…',
+      progress: 1,
+    );
 
     if (imported.isEmpty) {
       final details = [
@@ -9567,14 +10589,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (skippedDuplicates > 0) '$skippedDuplicates duplicate',
       if (skippedInvalid > 0) '$skippedInvalid invalid',
     ];
-    _toast(summaryParts.join(' | '));
+    _toast(summaryParts.join(', '));
   }
 
   Future<void> _editVersion(VersionEntry entry) async {
     final editRequest = await _promptImportBuildDialog(
       title: 'Edit Build',
       description:
-          'Update your build name and root folder. The folder must include FortniteGame and Engine.',
+          'Update your build name and root folder. The folder must contain'
+          'FortniteClient-Win64-Shipping.exe',
       confirmLabel: 'Save',
       headerIcon: Icons.edit_rounded,
       confirmIcon: Icons.save_rounded,
@@ -9592,38 +10615,62 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return;
     }
 
-    final executable = await _findBuildExecutable(editRequest.buildRootPath);
-    if (executable == null) {
-      _toast('Fortnite executable not found inside selected build');
-      return;
-    }
-
-    final gameVersionFromName = _deriveVersion(editRequest.buildName);
-    final resolvedGameVersion = gameVersionFromName == 'Unknown'
-        ? _deriveVersion(editRequest.buildRootPath)
-        : gameVersionFromName;
-    final splashImagePath = await _findBuildSplashImage(
-      editRequest.buildRootPath,
-      gameVersionHint: resolvedGameVersion,
-      buildNameHint: editRequest.buildName,
-    );
-
-    setState(() {
-      _settings = _settings.copyWith(
-        versions: _settings.versions.map((version) {
-          if (version.id != entry.id) return version;
-          return version.copyWith(
-            name: editRequest.buildName,
-            gameVersion: resolvedGameVersion,
-            location: editRequest.buildRootPath,
-            executablePath: executable,
-            splashImagePath: splashImagePath ?? '',
-          );
-        }).toList(),
+    await _runImportProgressDialog((update) async {
+      update('Looking for Fortnite executable…', progress: null);
+      final shippingPaths = await findShippingExecutables(
+        editRequest.buildRootPath,
       );
-    });
-    await _saveSettings(toast: false);
-    if (mounted) _toast('Version updated');
+      if (shippingPaths.isEmpty) {
+        _toast('Fortnite executable not found inside selected build');
+        return;
+      }
+      if (shippingPaths.length > 1) {
+        _toast(
+          'Multiple FortniteClient-Win64-Shipping.exe files found (${shippingPaths.length}). '
+          'Choose a folder that contains exactly one.',
+        );
+        return;
+      }
+      final executable = shippingPaths.first;
+      update('Applying headless patch…', progress: 0.3);
+      await patchHeadless(File(executable));
+
+      update('Reading game version…', progress: 0.55);
+      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+        editRequest.buildRootPath,
+      );
+      if (shouldRejectImportVersion(resolvedGameVersion)) {
+        _toast(
+          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
+        );
+        return;
+      }
+      update('Finding splash image…', progress: 0.78);
+      final splashImagePath = await _findBuildSplashImage(
+        editRequest.buildRootPath,
+        gameVersionHint: resolvedGameVersion,
+        buildNameHint: editRequest.buildName,
+      );
+
+      update('Saving…', progress: 0.92);
+      setState(() {
+        _settings = _settings.copyWith(
+          versions: _settings.versions.map((version) {
+            if (version.id != entry.id) return version;
+            return version.copyWith(
+              name: editRequest.buildName,
+              gameVersion: resolvedGameVersion,
+              location: editRequest.buildRootPath,
+              executablePath: executable,
+              splashImagePath: splashImagePath ?? '',
+            );
+          }).toList(),
+        );
+      });
+      await _saveSettings(toast: false);
+      update('Done.', progress: 1);
+      if (mounted) _toast('Version updated');
+    }, title: 'Updating build');
   }
 
   Future<_BuildImportRequest?> _promptImportBuildDialog({
@@ -10333,7 +11380,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                                 !mounted) {
                                               return;
                                             }
-                                            dismissDialogSafely();
+                                            // Close the import dialog synchronously before
+                                            // showing the progress dialog. Deferred pops
+                                            // (dismissDialogSafely) can remove the progress
+                                            // route instead and leave this dialog stuck open.
+                                            FocusManager.instance.primaryFocus
+                                                ?.unfocus();
+                                            Navigator.of(dialogContext).pop();
+                                            await _waitForPostFrame();
                                             if (!mounted) return;
                                             await _importManyVersionsFromParent(
                                               parentPath,
@@ -10360,8 +11414,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           ),
                                         ),
                                       const Spacer(),
-                                      TextButton(
+                                      OutlinedButton(
                                         onPressed: dismissDialogSafely,
+                                        style: OutlinedButton.styleFrom(
+                                          shape: const StadiumBorder(),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 11,
+                                          ),
+                                          side: BorderSide(
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.14,
+                                            ),
+                                          ),
+                                        ),
                                         child: const Text('Cancel'),
                                       ),
                                     ],
@@ -10381,8 +11448,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                           label: const Text('Back'),
                                         ),
                                       const Spacer(),
-                                      TextButton(
+                                      OutlinedButton(
                                         onPressed: dismissDialogSafely,
+                                        style: OutlinedButton.styleFrom(
+                                          shape: const StadiumBorder(),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 11,
+                                          ),
+                                          side: BorderSide(
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.14,
+                                            ),
+                                          ),
+                                        ),
                                         child: const Text('Cancel'),
                                       ),
                                       const SizedBox(width: 8),
@@ -10515,28 +11595,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       normalized = normalized.toLowerCase();
     }
     return normalized;
-  }
-
-  Future<String?> _findBuildExecutable(String buildRootPath) async {
-    final expectedPath = _joinPath([
-      buildRootPath,
-      'FortniteGame',
-      'Binaries',
-      'Win64',
-      _shippingExeName,
-    ]);
-    if (File(expectedPath).existsSync()) return expectedPath;
-
-    final fortniteGameRoot = _joinPath([buildRootPath, 'FortniteGame']);
-    if (Directory(fortniteGameRoot).existsSync()) {
-      final foundInFortniteGame = await _findRecursive(
-        fortniteGameRoot,
-        _shippingExeName,
-      );
-      if (foundInFortniteGame != null) return foundInFortniteGame;
-    }
-
-    return _findRecursive(buildRootPath, _shippingExeName);
   }
 
   Future<String?> _findBuildSplashImage(
@@ -10887,6 +11945,155 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (mounted) _toast('All builds cleared');
   }
 
+  Future<void> _clearAllTrackedTime() async {
+    final hasTrackedTime =
+        _settings.totalAtlasPlaySeconds > 0 ||
+        _settings.versions.any(
+          (version) =>
+              version.playTimeSeconds > 0 || version.lastPlayedAtEpochMs > 0,
+        ) ||
+        _activeVersionPlaySessions.isNotEmpty;
+    if (!hasTrackedTime) return;
+
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Clear all tracked time?',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w700,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'This will reset the total ATLAS time and every per-version tracked time back to zero.',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.84),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFB3261E),
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Clear time'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final now = DateTime.now();
+    setState(() {
+      _settings = _settings.copyWith(
+        totalAtlasPlaySeconds: 0,
+        versions: _settings.versions
+            .map(
+              (version) =>
+                  version.copyWith(playTimeSeconds: 0, lastPlayedAtEpochMs: 0),
+            )
+            .toList(),
+      );
+      if (_activeVersionPlaySessions.isEmpty) {
+        _atlasPlaySessionStartedAt = null;
+      } else {
+        _atlasPlaySessionStartedAt = now;
+        final activeVersionIds = _activeVersionPlaySessions.keys.toList();
+        for (final versionId in activeVersionIds) {
+          _activeVersionPlaySessions[versionId] = now;
+        }
+      }
+    });
+    _syncPlaytimeCheckpointTimer();
+    await _saveSettings(toast: false, applyControllers: false);
+    if (mounted) _toast('Tracked time cleared');
+  }
+
   Future<void> _pickAvatar() async {
     final picked = await FilePicker.platform.pickFiles(
       type: FileType.image,
@@ -10984,27 +12191,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           'This will restore ATLAS Link to a default state and make it feel like a fresh install.',
                           style: TextStyle(
                             color: _onSurface(dialogContext, 0.86),
-                            height: 1.35,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'It will:',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: _onSurface(dialogContext, 0.9),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          '- Clear imported builds\n'
-                          '- Reset profile (name + PFP) and show first-run setup again\n'
-                          '- Reset launch options, backend settings, visuals, and DLL paths\n'
-                          '- Clear saved backends\n'
-                          '- Clear internal caches (installer + bundled DLL copies)\n'
-                          '- Clear launcher logs',
-                          style: TextStyle(
-                            color: _onSurface(dialogContext, 0.82),
                             height: 1.35,
                           ),
                         ),
@@ -11257,6 +12443,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _applyBundledDllDefaults();
     await _saveSettings(toast: false);
     unawaited(_checkForBundledDllDefaultUpdates(silent: true));
+
+    final cachedLauncherContent = await _readCachedLauncherContent();
+    if (cachedLauncherContent != null) {
+      _applyLauncherContent(cachedLauncherContent);
+    }
+    await _refreshLauncherContentFromGitHub(silent: true);
 
     _installState = _installState.copyWith(
       lastSeenLauncherVersion: _launcherVersion,
@@ -11569,6 +12761,58 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return const AssetImage('assets/images/default_pfp.png');
   }
 
+  Widget _barProfileAvatar({required double radius}) {
+    final dark = _isDarkTheme(context);
+    final avatarDiameter = radius * 2;
+    final haloDiameter = avatarDiameter + 12;
+    final haloColor = (dark ? Colors.white : Colors.black).withValues(
+      alpha: dark ? 0.18 : 0.12,
+    );
+    final frameColor = (dark ? Colors.white : Colors.black).withValues(
+      alpha: dark ? 0.12 : 0.10,
+    );
+    final avatarBackground = (dark ? Colors.black : Colors.white).withValues(
+      alpha: dark ? 0.18 : 0.88,
+    );
+
+    return SizedBox(
+      width: haloDiameter,
+      height: haloDiameter,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          IgnorePointer(
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+              child: Container(
+                width: haloDiameter - 2,
+                height: haloDiameter - 2,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: haloColor, width: 2),
+                ),
+              ),
+            ),
+          ),
+          Container(
+            width: avatarDiameter + 4,
+            height: avatarDiameter + 4,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: frameColor, width: 1.2),
+            ),
+          ),
+          CircleAvatar(
+            radius: radius,
+            backgroundColor: avatarBackground,
+            backgroundImage: _profileImage(),
+          ),
+        ],
+      ),
+    );
+  }
+
   ImageProvider<Object> _libraryCoverImage(VersionEntry? version) {
     if (version == null) {
       return const AssetImage('assets/images/missingbuild.webp');
@@ -11599,6 +12843,52 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     return a.toLowerCase().compareTo(b.toLowerCase());
+  }
+
+  /// Display label for library pills: `30.00` (two-part season) or `1.2.3`
+  /// when a patch segment exists. Uses [raw] from import metadata when possible.
+  ///
+  /// Two-part builds use Fortnite-style display: `2.5` → `2.50` (trailing zero),
+  /// not `2.05`. Two digits after the dot are kept as-is (`5.41`, `2.05`).
+  /// Unknown / empty → `?`.
+  String _formatLibraryVersionLabel(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '?';
+    final lower = s.toLowerCase();
+    if (lower == 'unknown' || lower == 'n/a') return '?';
+    if (lower.startsWith('v')) {
+      s = s.substring(1).trim();
+    }
+
+    final triple = RegExp(r'\b(\d+)\.(\d+)\.(\d+)\b').firstMatch(s);
+    if (triple != null) {
+      final major = int.parse(triple.group(1)!);
+      final minor = int.parse(triple.group(2)!);
+      final patch = int.parse(triple.group(3)!);
+      return '$major.$minor.$patch';
+    }
+
+    final pair = RegExp(r'\b(\d+)\.(\d+)\b').firstMatch(s);
+    if (pair != null) {
+      final major = pair.group(1)!;
+      final minorStr = pair.group(2)!;
+      final minorPart = minorStr.length == 1 ? '${minorStr}0' : minorStr;
+      return '$major.$minorPart';
+    }
+
+    try {
+      final v = Version.parse(s);
+      if (v.patch != 0) {
+        return '${v.major}.${v.minor}.${v.patch}';
+      }
+      // Match two-part season rules when only major.minor.patch(0) is available.
+      if (v.minor < 10) {
+        return '${v.major}.${v.minor}0';
+      }
+      return '${v.major}.${v.minor}';
+    } catch (_) {
+      return s;
+    }
   }
 
   @override
@@ -11686,16 +12976,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           final compact = constraints.maxWidth < 1080;
                           return Column(
                             children: [
-                              Text(
-                                _launcherBuildLabel,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  color: _onSurface(context, 0.86),
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              _shellHeader(
+                                compact,
+                                suppressLibraryQuickTipOverlayTargets:
+                                    _showLibraryQuickTipBackdrop &&
+                                    !_libraryImportTipFadingOut,
                               ),
-                              const SizedBox(height: 10),
-                              _topBar(compact),
                               const SizedBox(height: 18),
                               Expanded(child: _tabContent()),
                             ],
@@ -11704,6 +12990,47 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                     ),
                   ),
+                ),
+              ),
+            ),
+          if (_startupConfigResolved &&
+              !_showStartup &&
+              _showLibraryQuickTipBackdrop)
+            Positioned.fill(
+              child: AnimatedOpacity(
+                opacity: _libraryImportTipFadingOut ? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {},
+                      child: IgnorePointer(
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 2.4, sigmaY: 2.4),
+                          child: Container(
+                            color: _dialogBarrierColor(context, 1.0),
+                          ),
+                        ),
+                      ),
+                    ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 8, 22, 18),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final compact = constraints.maxWidth < 1080;
+                            return Align(
+                              alignment: Alignment.topCenter,
+                              child: _libraryQuickTipOverlayHeader(compact),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -11948,7 +13275,107 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  Widget _topBar(bool compact) {
+  Widget _shellHeader(
+    bool compact, {
+    bool suppressLibraryQuickTipOverlayTargets = false,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          _launcherBuildLabel,
+          style: TextStyle(
+            fontSize: 15,
+            color: _onSurface(context, 0.86),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _topBar(
+          compact,
+          suppressLibraryQuickTipOverlayTargets:
+              suppressLibraryQuickTipOverlayTargets,
+        ),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipOverlayHeader(bool compact) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Opacity(
+          opacity: 0,
+          child: Text(
+            _launcherBuildLabel,
+            style: TextStyle(
+              fontSize: 15,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _topBar(compact, libraryQuickTipOverlayOnly: true),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipActionButtons() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _libraryPulseGlow(
+          _titleActionButton(Icons.add_rounded, () {
+            unawaited(
+              _dismissLibraryImportTip(onDismissedAction: _importVersion),
+            );
+          }),
+        ),
+        const SizedBox(width: 8),
+        _libraryPulseGlow(
+          _titleActionButton(Icons.download_rounded, () {
+            unawaited(
+              _dismissLibraryImportTip(
+                onDismissedAction: () =>
+                    _openUrl('https://builds.fortforge.dev/builds'),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _libraryQuickTipActionButtonPlaceholders() {
+    return IgnorePointer(
+      child: Opacity(
+        opacity: 0,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed: () {},
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: () {},
+              icon: const Icon(Icons.help_outline_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(onPressed: () {}, icon: _settingsActionIcon()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _topBar(
+    bool compact, {
+    bool suppressLibraryQuickTipOverlayTargets = false,
+    bool libraryQuickTipOverlayOnly = false,
+  }) {
     final username = _settings.username.trim().isEmpty
         ? 'Player'
         : _settings.username.trim();
@@ -11959,7 +13386,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const SizedBox(width: 22),
-                  CircleAvatar(radius: 24, backgroundImage: _profileImage()),
+                  _barProfileAvatar(radius: 24),
                   const SizedBox(width: 12),
                   Text(
                     '${_timeGreeting()}, $username!',
@@ -11992,6 +13419,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         ],
       ),
+      LauncherTab.stats => Text(
+        'Stats',
+        style: TextStyle(
+          fontSize: 52,
+          fontWeight: FontWeight.w700,
+          color: _onSurface(context, 0.95),
+        ),
+      ),
       LauncherTab.backend => Text(
         'Backend',
         style: TextStyle(
@@ -12017,55 +13452,50 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
 
     const showRightControls = true;
+    final showLibraryQuickTipTargets =
+        _tab == LauncherTab.library &&
+        (!suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly);
+    final showOtherRightControls = !libraryQuickTipOverlayOnly;
+    final showLeft = !libraryQuickTipOverlayOnly;
+    final showNav =
+        !suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly;
     final right = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (showRightControls) ...[
-          if (_tab == LauncherTab.library) ...[
-            _libraryPulseGlow(
-              _titleActionButton(Icons.add_rounded, () {
-                unawaited(
-                  _dismissLibraryImportTip(onDismissedAction: _importVersion),
-                );
-              }),
+          if (showLibraryQuickTipTargets) ...[
+            _libraryQuickTipActionButtons(),
+            if (showOtherRightControls || libraryQuickTipOverlayOnly)
+              const SizedBox(width: 10),
+            if (libraryQuickTipOverlayOnly)
+              _libraryQuickTipActionButtonPlaceholders(),
+          ],
+          if (showOtherRightControls) ...[
+            IconButton(
+              onPressed: _handleRefreshPressed,
+              tooltip: 'Refresh / check updates',
+              icon: const Icon(Icons.refresh_rounded),
             ),
             const SizedBox(width: 8),
-            _libraryPulseGlow(
-              _titleActionButton(Icons.download_rounded, () {
+            IconButton(
+              onPressed: _showQuickTipForCurrentTab,
+              tooltip: 'Show quick tips',
+              icon: const Icon(Icons.help_outline_rounded),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: () {
                 unawaited(
-                  _dismissLibraryImportTip(
-                    onDismissedAction: () =>
-                        _openUrl('https://builds.fortforge.dev/builds'),
+                  _switchMenu(
+                    LauncherTab.general,
+                    settingsSection: SettingsSection.dataManagement,
                   ),
                 );
-              }),
+              },
+              tooltip: _dataManagementButtonTooltip,
+              icon: _settingsActionIcon(),
             ),
-            const SizedBox(width: 10),
           ],
-          IconButton(
-            onPressed: _handleRefreshPressed,
-            tooltip: 'Refresh / check updates',
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: _showQuickTipForCurrentTab,
-            tooltip: 'Show quick tips',
-            icon: const Icon(Icons.help_outline_rounded),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: () {
-              unawaited(
-                _switchMenu(
-                  LauncherTab.general,
-                  settingsSection: SettingsSection.dataManagement,
-                ),
-              );
-            },
-            tooltip: _dataManagementButtonTooltip,
-            icon: _settingsActionIcon(),
-          ),
         ],
       ],
     );
@@ -12075,10 +13505,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          leftAnimated,
-          const SizedBox(height: 12),
-          Align(alignment: Alignment.center, child: nav),
-          if (showRightControls) ...[
+          if (showLeft) leftAnimated,
+          if (showLeft && (showNav || right.children.isNotEmpty))
+            const SizedBox(height: 12),
+          if (showNav) Align(alignment: Alignment.center, child: nav),
+          if (right.children.isNotEmpty) ...[
             const SizedBox(height: 10),
             Align(alignment: Alignment.centerRight, child: right),
           ],
@@ -12090,9 +13521,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Align(alignment: Alignment.centerLeft, child: leftAnimated),
-          Align(alignment: Alignment.center, child: nav),
-          if (showRightControls)
+          if (showLeft)
+            Align(alignment: Alignment.centerLeft, child: leftAnimated),
+          if (showNav) Align(alignment: Alignment.center, child: nav),
+          if (right.children.isNotEmpty)
             Align(alignment: Alignment.centerRight, child: right),
         ],
       ),
@@ -12265,6 +13697,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       (_libraryQuickTipManualVisible ||
           !_settings.libraryActionsNudgeComplete ||
           _libraryImportTipFadingOut);
+
+  bool get _showLibraryQuickTipBackdrop =>
+      _tab == LauncherTab.library &&
+      !_libraryQuickTipManualVisible &&
+      (!_settings.libraryActionsNudgeComplete || _libraryImportTipFadingOut);
 
   bool get _showBackendConnectionTip =>
       _backendQuickTipManualVisible ||
@@ -12798,6 +14235,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             selected: _tab == LauncherTab.backend,
             onTap: () => unawaited(_switchMenu(LauncherTab.backend)),
           ),
+          (
+            key: 'stats',
+            label: 'Stats',
+            icon: Icons.bar_chart_rounded,
+            selected: _tab == LauncherTab.stats,
+            onTap: () => unawaited(_switchMenu(LauncherTab.stats)),
+          ),
         ];
     final selectedTabIndex = navItems.indexWhere((item) => item.selected);
     final computedTabWidth =
@@ -12970,7 +14414,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   ),
                   const SizedBox(width: 4),
                   tabStrip,
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 4),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: _onSurface(context, 0.18),
+                  ),
+                  const SizedBox(width: 5),
                   InkWell(
                     borderRadius: BorderRadius.circular(999),
                     overlayColor: transparentOverlay,
@@ -12985,10 +14435,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                         settingsSection: SettingsSection.profile,
                       ),
                     ),
-                    child: CircleAvatar(
-                      radius: 17,
-                      backgroundImage: _profileImage(),
-                    ),
+                    child: _barProfileAvatar(radius: 17),
                   ),
                 ],
               ),
@@ -13003,6 +14450,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final child = switch (_tab) {
       LauncherTab.home => _homeTab(),
       LauncherTab.library => _libraryTab(),
+      LauncherTab.stats => _statsTab(),
       LauncherTab.backend => _backendTab(),
       LauncherTab.general => _generalTab(),
     };
@@ -13032,6 +14480,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return switch (_tab) {
       LauncherTab.home => 'Browsing Homepage',
       LauncherTab.library => 'Browsing Library',
+      LauncherTab.stats => 'Reviewing Stats',
       LauncherTab.backend => 'Configuring Backend',
       LauncherTab.general => 'Editing Settings',
     };
@@ -13936,12 +15385,67 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 const SliverToBoxAdapter(child: SizedBox(height: 12)),
                 if (filteredVersions.isEmpty)
                   SliverToBoxAdapter(
-                    child: Text(
-                      'No installed versions match "$_versionSearchQuery".',
-                      style: TextStyle(
-                        color: Theme.of(
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        color: _adaptiveScrimColor(
                           context,
-                        ).colorScheme.onSurface.withValues(alpha: 0.82),
+                          darkAlpha: 0.08,
+                          lightAlpha: 0.16,
+                        ),
+                        border: Border.all(color: _onSurface(context, 0.08)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              color: _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.1,
+                                lightAlpha: 0.18,
+                              ),
+                              border: Border.all(
+                                color: _onSurface(context, 0.1),
+                              ),
+                            ),
+                            child: Icon(
+                              Icons.search_off_rounded,
+                              color: _onSurface(context, 0.9),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'No installed versions match "$_versionSearchQuery".',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: _onSurface(context, 0.94),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Try a different build name or clear the search to see every imported version again.',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    height: 1.25,
+                                    fontWeight: FontWeight.w600,
+                                    color: _onSurface(context, 0.72),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   )
@@ -13988,6 +15492,1078 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           const SliverToBoxAdapter(child: SizedBox(height: 14)),
         ],
       ],
+    );
+  }
+
+  Widget _statsSummaryCard({
+    required IconData icon,
+    required String label,
+    required String value,
+    required String subtitle,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: Theme.of(context).colorScheme.secondary.withValues(
+                alpha: _isDarkTheme(context) ? 0.16 : 0.12,
+              ),
+            ),
+            child: Icon(
+              icon,
+              size: 19,
+              color: Theme.of(context).colorScheme.secondary,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: _onSurface(context, 0.68),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.96),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.3,
+              fontWeight: FontWeight.w600,
+              color: _onSurface(context, 0.7),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsMetaChip({
+    IconData? icon,
+    Widget? leading,
+    required String label,
+    Color? iconColor,
+  }) {
+    assert(icon != null || leading != null);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          leading ??
+              Icon(
+                icon,
+                size: 14,
+                color: iconColor ?? _onSurface(context, 0.74),
+              ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: _onSurface(context, 0.78),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsStatusDot({required Color color, double size = 10}) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    );
+  }
+
+  Widget _liveTrackingSplashStack(
+    List<VersionEntry> versions, {
+    double splashSize = 68,
+    double overlap = 24,
+  }) {
+    final visibleVersions = versions.take(3).toList();
+    final width = splashSize + (max(visibleVersions.length - 1, 0) * overlap);
+    final signature = visibleVersions.map((version) => version.id).join('|');
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(-0.12, 0),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          ),
+        );
+      },
+      child: SizedBox(
+        key: ValueKey<String>(signature),
+        width: width,
+        height: splashSize,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            for (var index = visibleVersions.length - 1; index >= 0; index--)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                left: (visibleVersions.length - 1 - index) * overlap,
+                top: 0,
+                child: Container(
+                  width: splashSize,
+                  height: splashSize,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: _onSurface(context, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _glassShadowColor(context),
+                        blurRadius: 18,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: Image(
+                      image: ResizeImage(
+                        _libraryCoverImage(visibleVersions[index]),
+                        width: 240,
+                      ),
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Image.asset(
+                          'assets/images/library_cover.png',
+                          fit: BoxFit.cover,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTrackedShare(int trackedSeconds, int totalTrackedSeconds) {
+    if (trackedSeconds <= 0 || totalTrackedSeconds <= 0) return '0%';
+    final share = (trackedSeconds / totalTrackedSeconds).clamp(0.0, 1.0);
+    final percent = share * 100;
+    if (percent >= 10) return '${percent.toStringAsFixed(0)}%';
+    return '${percent.toStringAsFixed(1)}%';
+  }
+
+  Widget _statsVersionInsightPanel({
+    required VersionEntry entry,
+    required int trackedSeconds,
+    required int totalTrackedSeconds,
+    required bool active,
+  }) {
+    final share = totalTrackedSeconds <= 0
+        ? 0.0
+        : (trackedSeconds / totalTrackedSeconds).clamp(0.0, 1.0);
+    final accent = active
+        ? const Color(0xFF3DDC97)
+        : Theme.of(context).colorScheme.secondary.withValues(alpha: 0.9);
+    final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.06, lightAlpha: 0.12),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            'Percentage Of Total Time',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.66),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _formatTrackedShare(trackedSeconds, totalTrackedSeconds),
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w800,
+              color: _onSurface(context, 0.96),
+            ),
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: share,
+              minHeight: 8,
+              backgroundColor: _onSurface(context, 0.08),
+              valueColor: AlwaysStoppedAnimation<Color>(accent),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _statsMetaChip(
+                icon: Icons.tag_rounded,
+                label: versionPill == '?' ? 'Unknown version' : versionPill,
+              ),
+              _statsMetaChip(
+                icon: active ? null : Icons.history_rounded,
+                leading: active
+                    ? _statsStatusDot(color: accent, size: 8)
+                    : null,
+                label: _formatVersionLastPlayed(entry),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsVersionCard(
+    VersionEntry entry, {
+    required int totalTrackedSeconds,
+  }) {
+    final active = _activeVersionPlaySessions.containsKey(entry.id);
+    final trackedSeconds = _effectiveVersionPlaySeconds(entry);
+    final imageProvider = ResizeImage(_libraryCoverImage(entry), width: 320);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
+        border: Border.all(color: _onSurface(context, 0.08)),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 620;
+          final showInsightPanel = constraints.maxWidth >= 900;
+          const cardContentPadding = 16.0;
+          const sectionSpacing = 18.0;
+          const summarySpacing = 12.0;
+          final mediaSize = compact ? min(136.0, constraints.maxWidth) : 128.0;
+          final titleStyle = TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w800,
+            color: _onSurface(context, 0.96),
+          );
+          final timeStyle = TextStyle(
+            fontSize: showInsightPanel ? 42 : 34,
+            fontWeight: FontWeight.w800,
+            color: _onSurface(context, 0.98),
+          );
+
+          double measureTextWidth(String text, TextStyle style) {
+            final painter = TextPainter(
+              text: TextSpan(text: text, style: style),
+              textDirection: Directionality.of(context),
+              textScaler: MediaQuery.textScalerOf(context),
+              maxLines: 1,
+            )..layout();
+            return painter.width;
+          }
+
+          const minInsightPanelWidth = 320.0;
+          final summaryEquivalentWidth =
+              constraints.maxWidth + (cardContentPadding * 2);
+          final summaryColumns = summaryEquivalentWidth >= 1120
+              ? 3
+              : summaryEquivalentWidth >= 720
+              ? 2
+              : 1;
+          final summaryCardWidth = summaryColumns == 1
+              ? summaryEquivalentWidth
+              : (summaryEquivalentWidth -
+                        ((summaryColumns - 1) * summarySpacing)) /
+                    summaryColumns;
+          final alignedInsightPanelStart = summaryColumns == 1
+              ? null
+              : summaryCardWidth + summarySpacing - cardContentPadding;
+          final alignedDetailsWidth = alignedInsightPanelStart == null
+              ? null
+              : alignedInsightPanelStart - mediaSize - (sectionSpacing * 2);
+          final measuredTimeWidth = measureTextWidth(
+            _formatTrackedPlaytime(trackedSeconds),
+            timeStyle,
+          );
+          final minDetailsWidth = max(196.0, measuredTimeWidth + 12);
+          final maxDetailsWidth = showInsightPanel
+              ? constraints.maxWidth -
+                    mediaSize -
+                    (sectionSpacing * 2) -
+                    minInsightPanelWidth
+              : null;
+          final detailsColumnWidth = showInsightPanel
+              ? max(
+                  alignedDetailsWidth ?? minDetailsWidth,
+                  minDetailsWidth,
+                ).clamp(196.0, maxDetailsWidth!).toDouble()
+              : null;
+
+          final media = Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: _onSurface(context, 0.08)),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Image(
+                image: imageProvider,
+                width: mediaSize,
+                height: mediaSize,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Image.asset(
+                    'assets/images/library_cover.png',
+                    width: mediaSize,
+                    height: mediaSize,
+                    fit: BoxFit.cover,
+                  );
+                },
+              ),
+            ),
+          );
+
+          final details = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      entry.name,
+                      maxLines: compact ? 2 : 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: titleStyle,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(_formatTrackedPlaytime(trackedSeconds), style: timeStyle),
+            ],
+          );
+
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [media, const SizedBox(height: 16), details],
+            );
+          }
+
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              media,
+              const SizedBox(width: sectionSpacing),
+              Expanded(
+                child: showInsightPanel
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(width: detailsColumnWidth, child: details),
+                          const SizedBox(width: sectionSpacing),
+                          Expanded(
+                            child: _statsVersionInsightPanel(
+                              entry: entry,
+                              trackedSeconds: trackedSeconds,
+                              totalTrackedSeconds: totalTrackedSeconds,
+                              active: active,
+                            ),
+                          ),
+                        ],
+                      )
+                    : details,
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statsTab() {
+    final activeTrackedVersions = _activeTrackedVersions();
+    final liveTrackingActive = activeTrackedVersions.isNotEmpty;
+    final liveTicker = liveTrackingActive
+        ? Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick)
+        : null;
+
+    return StreamBuilder<int>(
+      stream: liveTicker,
+      initialData: 0,
+      builder: (context, _) {
+        final importedVersions = List<VersionEntry>.from(_settings.versions)
+          ..sort((a, b) {
+            final byPlay = _effectiveVersionPlaySeconds(
+              b,
+            ).compareTo(_effectiveVersionPlaySeconds(a));
+            if (byPlay != 0) return byPlay;
+            final byVersion = _compareVersionStrings(
+              b.gameVersion,
+              a.gameVersion,
+            );
+            if (byVersion != 0) return byVersion;
+            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          });
+        final totalTrackedSeconds = _effectiveTotalAtlasPlaySeconds();
+        final trackedVersions = importedVersions
+            .where(_hasTrackedPlaytime)
+            .toList();
+        final statsSearchQuery = _statsSearchQuery.trim().toLowerCase();
+        final filteredTrackedVersions = statsSearchQuery.isEmpty
+            ? trackedVersions
+            : trackedVersions
+                  .where(
+                    (entry) =>
+                        entry.name.toLowerCase().contains(statsSearchQuery),
+                  )
+                  .toList();
+
+        VersionEntry? mostPlayedVersion;
+        for (final version in importedVersions) {
+          if (_effectiveVersionPlaySeconds(version) > 0 ||
+              _activeVersionPlaySessions.containsKey(version.id)) {
+            mostPlayedVersion = version;
+            break;
+          }
+        }
+
+        final topPanel = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 0,
+          child: _glass(
+            radius: 28,
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact = constraints.maxWidth < 860;
+                  const summaryStripSpacing = 12.0;
+                  final visibleSplashCount = min(
+                    activeTrackedVersions.length,
+                    3,
+                  );
+                  final inlineSplashSize = constraints.maxWidth >= 1180
+                      ? 126.0
+                      : 112.0;
+                  final inlineSplashOverlap = inlineSplashSize * 0.34;
+                  final inlineSplashWidth = liveTrackingActive
+                      ? inlineSplashSize +
+                            (max(visibleSplashCount - 1, 0) *
+                                inlineSplashOverlap)
+                      : 0.0;
+                  final summaryEquivalentWidth = constraints.maxWidth + 12;
+                  final summaryColumns = summaryEquivalentWidth >= 1120
+                      ? 3
+                      : summaryEquivalentWidth >= 720
+                      ? 2
+                      : 1;
+                  final summaryCardWidth = summaryColumns == 1
+                      ? summaryEquivalentWidth
+                      : (summaryEquivalentWidth -
+                                ((summaryColumns - 1) * summaryStripSpacing)) /
+                            summaryColumns;
+                  final alignedLivePanelCardWidth = summaryColumns == 3
+                      ? summaryCardWidth - 6
+                      : null;
+                  final livePanelCardWidth =
+                      alignedLivePanelCardWidth ??
+                      min(420.0, max(304.0, (constraints.maxWidth - 12) / 3));
+                  final desktopLivePanelWidth =
+                      livePanelCardWidth +
+                      (liveTrackingActive ? 14 + inlineSplashWidth : 0);
+                  final statusLabel = liveTrackingActive
+                      ? 'Tracking your current session live.'
+                      : trackedVersions.isEmpty
+                      ? 'Playtime starts tracking the next time you launch an imported build.'
+                      : 'Total tracked time across every imported ATLAS build.';
+
+                  final summary = Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'TOTAL TIME ON ATLAS',
+                        style: TextStyle(
+                          fontSize: 13,
+                          letterSpacing: 1.1,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(context, 0.68),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        _formatTrackedPlaytime(totalTrackedSeconds),
+                        style: TextStyle(
+                          fontSize: compact ? 46 : 60,
+                          height: 0.98,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(context, 0.98),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        statusLabel,
+                        style: TextStyle(
+                          fontSize: 14,
+                          height: 1.35,
+                          fontWeight: FontWeight.w600,
+                          color: _onSurface(context, 0.7),
+                        ),
+                      ),
+                    ],
+                  );
+
+                  final livePanelCard = Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(22),
+                      color: _adaptiveScrimColor(
+                        context,
+                        darkAlpha: 0.08,
+                        lightAlpha: 0.16,
+                      ),
+                      border: Border.all(color: _onSurface(context, 0.08)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Live Tracking',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(context, 0.68),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        RichText(
+                          text: TextSpan(
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                              color: _onSurface(context, 0.96),
+                            ),
+                            children: [
+                              TextSpan(
+                                text: liveTrackingActive ? 'Active' : 'Idle',
+                              ),
+                              WidgetSpan(
+                                alignment: PlaceholderAlignment.middle,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 10),
+                                  child: _statsStatusDot(
+                                    color: liveTrackingActive
+                                        ? const Color(0xFF3DDC97)
+                                        : const Color(0xFFFFA94D),
+                                    size: 10,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          activeTrackedVersions.isEmpty
+                              ? 'No imported builds are running right now.'
+                              : '${activeTrackedVersions.length} imported '
+                                    'build${activeTrackedVersions.length == 1 ? '' : 's'} '
+                                    'currently being tracked.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.3,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(context, 0.7),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+
+                  final livePanel = LayoutBuilder(
+                    builder: (context, constraints) {
+                      final showSplashInline =
+                          liveTrackingActive && constraints.maxWidth >= 290;
+                      if (!showSplashInline) return livePanelCard;
+
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: compact ? null : livePanelCardWidth,
+                            child: livePanelCard,
+                          ),
+                          const SizedBox(width: 14),
+                          _liveTrackingSplashStack(
+                            activeTrackedVersions,
+                            splashSize: inlineSplashSize,
+                            overlap: inlineSplashOverlap,
+                          ),
+                        ],
+                      );
+                    },
+                  );
+
+                  if (compact) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        summary,
+                        const SizedBox(height: 16),
+                        livePanel,
+                      ],
+                    );
+                  }
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: summary),
+                      const SizedBox(width: 16),
+                      SizedBox(width: desktopLivePanelWidth, child: livePanel),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        final summaryStrip = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 1,
+          child: _glass(
+            radius: 24,
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final columns = constraints.maxWidth >= 1120
+                      ? 3
+                      : constraints.maxWidth >= 720
+                      ? 2
+                      : 1;
+                  const spacing = 12.0;
+                  final cardWidth = columns == 1
+                      ? constraints.maxWidth
+                      : (constraints.maxWidth - ((columns - 1) * spacing)) /
+                            columns;
+
+                  final cards = <Widget>[
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.inventory_2_rounded,
+                        label: 'Imported Builds',
+                        value: '${importedVersions.length}',
+                        subtitle: importedVersions.isEmpty
+                            ? 'Nothing imported yet.'
+                            : 'Builds currently listed in your library.',
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.schedule_rounded,
+                        label: 'Tracked Builds',
+                        value: '${trackedVersions.length}',
+                        subtitle: trackedVersions.isEmpty
+                            ? 'No completed sessions yet.'
+                            : 'Builds with tracked ATLAS time.',
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _statsSummaryCard(
+                        icon: Icons.emoji_events_rounded,
+                        label: 'Most Played',
+                        value: mostPlayedVersion?.name ?? 'None yet',
+                        subtitle: mostPlayedVersion == null
+                            ? 'Launch a build to start tracking.'
+                            : _formatTrackedPlaytime(
+                                _effectiveVersionPlaySeconds(mostPlayedVersion),
+                              ),
+                      ),
+                    ),
+                  ];
+
+                  return Wrap(
+                    spacing: spacing,
+                    runSpacing: spacing,
+                    children: cards.reversed.toList(growable: false),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        final versionsPanel = _menuItemEntrance(
+          menuKey: LauncherTab.stats,
+          index: 2,
+          child: _glass(
+            radius: 24,
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final searchInput = TextField(
+                    controller: _statsSearchController,
+                    onChanged: (value) =>
+                        setState(() => _statsSearchQuery = value),
+                    decoration:
+                        _backendFieldDecoration(
+                          hintText: 'Search by name',
+                        ).copyWith(
+                          prefixIcon: Icon(
+                            Icons.search_rounded,
+                            size: 18,
+                            color: _onSurface(context, 0.75),
+                          ),
+                          suffixIconConstraints: const BoxConstraints.tightFor(
+                            width: 40,
+                            height: 40,
+                          ),
+                          suffixIcon: _statsSearchQuery.trim().isEmpty
+                              ? null
+                              : SizedBox(
+                                  width: 40,
+                                  height: 40,
+                                  child: IconButton(
+                                    tooltip: 'Clear search',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 40,
+                                      height: 40,
+                                    ),
+                                    onPressed: () {
+                                      _statsSearchController.clear();
+                                      setState(() => _statsSearchQuery = '');
+                                    },
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      size: 18,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                  );
+                  final clearTimeButton = _versionCardAction(
+                    icon: Icons.delete_sweep_rounded,
+                    tooltip: 'Clear all tracked time',
+                    onTap: () => unawaited(_clearAllTrackedTime()),
+                  );
+                  final compactHeader = constraints.maxWidth < 880;
+                  final searchClusterWidth = compactHeader
+                      ? min(420.0, constraints.maxWidth)
+                      : min(380.0, max(320.0, constraints.maxWidth * 0.28));
+                  final searchCluster = SizedBox(
+                    width: searchClusterWidth,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(child: searchInput),
+                        const SizedBox(width: 8),
+                        clearTimeButton,
+                      ],
+                    ),
+                  );
+                  final header = compactHeader
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Per-Version Time',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                                color: _onSurface(context, 0.96),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              trackedVersions.isEmpty
+                                  ? 'Only builds with tracked time show up here.'
+                                  : 'Only builds with tracked time appear here, with live time shown while they are running.',
+                              style: TextStyle(
+                                fontSize: 14,
+                                height: 1.35,
+                                fontWeight: FontWeight.w600,
+                                color: _onSurface(context, 0.7),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: searchCluster,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Per-Version Time',
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      color: _onSurface(context, 0.96),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    trackedVersions.isEmpty
+                                        ? 'Only builds with tracked time show up here.'
+                                        : 'Only builds with tracked time appear here, with live time shown while they are running.',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      height: 1.35,
+                                      fontWeight: FontWeight.w600,
+                                      color: _onSurface(context, 0.7),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 18),
+                            searchCluster,
+                          ],
+                        );
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      header,
+                      const SizedBox(height: 14),
+                      if (trackedVersions.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.bar_chart_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      importedVersions.isEmpty
+                                          ? 'No Imported Versions Yet'
+                                          : 'No Tracked Time Yet',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      importedVersions.isEmpty
+                                          ? 'Import an existing build in Library, then launch it from Link to start tracking stats here.'
+                                          : 'Launch an imported build and its tracked playtime will start showing up here.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (filteredTrackedVersions.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.search_off_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'No tracked builds match "$_statsSearchQuery".',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Try a different build name or clear the search to see every tracked version again.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else
+                        for (
+                          var i = 0;
+                          i < filteredTrackedVersions.length;
+                          i++
+                        ) ...[
+                          if (i > 0) const SizedBox(height: 12),
+                          _statsVersionCard(
+                            filteredTrackedVersions[i],
+                            totalTrackedSeconds: totalTrackedSeconds,
+                          ),
+                        ],
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        return ListView(
+          children: [
+            topPanel,
+            const SizedBox(height: 14),
+            summaryStrip,
+            const SizedBox(height: 14),
+            versionsPanel,
+          ],
+        );
+      },
     );
   }
 
@@ -14051,6 +16627,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         final thumbCache = (72 * dpr).round().clamp(1, 1024);
         final bgProvider = ResizeImage(splashImage, width: bgCacheWidth);
         final thumbProvider = ResizeImage(splashImage, width: thumbCache);
+
+        final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
 
         return _HoverScale(
           scale: 1.01,
@@ -14218,7 +16796,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                     ),
                                   ),
                                   child: Text(
-                                    entry.gameVersion,
+                                    versionPill == '?'
+                                        ? 'Unknown'
+                                        : versionPill,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
@@ -14328,300 +16908,291 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       });
     }
 
-    return _menuItemEntrance(
-      menuKey: LauncherTab.backend,
-      index: 0,
-      child: _glass(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: onSurface.withValues(alpha: 0.06),
-                  border: Border.all(color: onSurface.withValues(alpha: 0.12)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: _backendOnline
-                            ? const Color(0xFF16C47F)
-                            : const Color(0xFFDC3545),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      _backendOnline
-                          ? 'Backend reachable'
-                          : 'Backend not detected',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: onSurface.withValues(alpha: 0.92),
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      statusLabel,
-                      style: TextStyle(
-                        color: onSurface.withValues(alpha: 0.74),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+    final shouldShrinkBackendPanel =
+        _settings.backendConnectionType == BackendConnectionType.local;
+    final backendPanel = _glass(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: shouldShrinkBackendPanel
+              ? MainAxisSize.min
+              : MainAxisSize.max,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: onSurface.withValues(alpha: 0.06),
+                border: Border.all(color: onSurface.withValues(alpha: 0.12)),
               ),
-              if (_showBackendConnectionTip) ...[
-                const SizedBox(height: 12),
-                _backendConnectionTipCard(),
-              ],
-              const SizedBox(height: 14),
-              _backendSettingTile(
-                icon: Icons.settings_ethernet_rounded,
-                title: 'Type',
-                subtitle:
-                    'Choose Local for a local backend or Remote for another host',
-                trailing: _tipPulseGlowIf(
-                  DropdownButtonFormField<BackendConnectionType>(
-                    initialValue: _settings.backendConnectionType,
-                    decoration: _backendFieldDecoration(),
-                    items: BackendConnectionType.values.map((type) {
-                      return DropdownMenuItem<BackendConnectionType>(
-                        value: type,
-                        child: Text(type.label),
-                      );
-                    }).toList(),
-                    onChanged: (type) {
-                      if (type == null) return;
-                      unawaited(_setBackendConnectionType(type));
-                    },
+              child: Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _backendOnline
+                          ? const Color(0xFF16C47F)
+                          : const Color(0xFFDC3545),
+                    ),
                   ),
-                  enabled:
-                      _showBackendConnectionTip && _backendQuickTipStep < 2,
-                ),
+                  const SizedBox(width: 10),
+                  Text(
+                    _backendOnline
+                        ? 'Backend reachable'
+                        : 'Backend not detected',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: onSurface.withValues(alpha: 0.92),
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    statusLabel,
+                    style: TextStyle(
+                      color: onSurface.withValues(alpha: 0.74),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote)
-                const SizedBox(height: 8),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote)
-                _backendSettingTile(
-                  icon: Icons.language_rounded,
-                  title: 'Host',
-                  subtitle: 'The hostname of the backend',
-                  trailing: TextField(
-                    controller: _backendHostController,
-                    keyboardType: TextInputType.url,
-                    decoration:
-                        _backendFieldDecoration(
-                          hintText: 'Enter IP Here',
-                        ).copyWith(
-                          suffixIconConstraints: const BoxConstraints.tightFor(
+            ),
+            if (_showBackendConnectionTip) ...[
+              const SizedBox(height: 12),
+              _backendConnectionTipCard(),
+            ],
+            const SizedBox(height: 14),
+            _backendSettingTile(
+              icon: Icons.settings_ethernet_rounded,
+              title: 'Type',
+              subtitle:
+                  'Choose Local for a local backend or Remote for another host',
+              trailing: _tipPulseGlowIf(
+                DropdownButtonFormField<BackendConnectionType>(
+                  initialValue: _settings.backendConnectionType,
+                  decoration: _backendFieldDecoration(),
+                  items: BackendConnectionType.values.map((type) {
+                    return DropdownMenuItem<BackendConnectionType>(
+                      value: type,
+                      child: Text(type.label),
+                    );
+                  }).toList(),
+                  onChanged: (type) {
+                    if (type == null) return;
+                    unawaited(_setBackendConnectionType(type));
+                  },
+                ),
+                enabled: _showBackendConnectionTip && _backendQuickTipStep < 2,
+              ),
+            ),
+            if (_settings.backendConnectionType == BackendConnectionType.remote)
+              const SizedBox(height: 8),
+            if (_settings.backendConnectionType == BackendConnectionType.remote)
+              _backendSettingTile(
+                icon: Icons.language_rounded,
+                title: 'Host',
+                subtitle: 'The hostname of the backend',
+                trailing: TextField(
+                  controller: _backendHostController,
+                  keyboardType: TextInputType.url,
+                  decoration: _backendFieldDecoration(hintText: 'Enter IP Here')
+                      .copyWith(
+                        suffixIconConstraints: const BoxConstraints.tightFor(
+                          width: 40,
+                          height: 40,
+                        ),
+                        suffixIcon: _tipPulseGlowIf(
+                          SizedBox(
                             width: 40,
                             height: 40,
-                          ),
-                          suffixIcon: _tipPulseGlowIf(
-                            SizedBox(
-                              width: 40,
-                              height: 40,
-                              child: IconButton(
-                                tooltip: 'Save backend',
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints.tightFor(
-                                  width: 40,
-                                  height: 40,
-                                ),
-                                onPressed: () =>
-                                    unawaited(_saveCurrentRemoteBackend()),
-                                icon: const Icon(
-                                  Icons.bookmark_add_rounded,
-                                  size: 18,
-                                ),
+                            child: IconButton(
+                              tooltip: 'Save backend',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 40,
+                                height: 40,
+                              ),
+                              onPressed: () =>
+                                  unawaited(_saveCurrentRemoteBackend()),
+                              icon: const Icon(
+                                Icons.bookmark_add_rounded,
+                                size: 18,
                               ),
                             ),
-                            enabled:
-                                _showBackendConnectionTip &&
-                                _backendQuickTipStep == 2,
                           ),
+                          enabled:
+                              _showBackendConnectionTip &&
+                              _backendQuickTipStep == 2,
                         ),
-                    onChanged: (value) {
-                      final trimmed = value.trim();
-                      if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
-                        setState(() {
-                          _settings = _settings.copyWith(backendHost: '');
-                        });
-                        if (_backendHostController.text.isNotEmpty) {
-                          _backendHostController.value = const TextEditingValue(
-                            text: '',
-                          );
-                        }
-                        unawaited(_saveSettings(toast: false));
-                        unawaited(_refreshRuntime());
-                        if (mounted) {
-                          _toast(
-                            'Remote backend host cannot be localhost. Use an external host or IP',
-                          );
-                        }
-                        return;
-                      }
+                      ),
+                  onChanged: (value) {
+                    final trimmed = value.trim();
+                    if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
                       setState(() {
-                        _settings = _settings.copyWith(backendHost: trimmed);
+                        _settings = _settings.copyWith(backendHost: '');
                       });
+                      if (_backendHostController.text.isNotEmpty) {
+                        _backendHostController.value = const TextEditingValue(
+                          text: '',
+                        );
+                      }
                       unawaited(_saveSettings(toast: false));
                       unawaited(_refreshRuntime());
-                    },
-                  ),
-                ),
-              const SizedBox(height: 8),
-              _backendSettingTile(
-                icon: Icons.numbers_rounded,
-                title: 'Port',
-                subtitle: 'The port of the backend',
-                trailing: TextField(
-                  controller: _backendPortController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: _backendFieldDecoration(hintText: '3551'),
-                  onChanged: (value) {
-                    final parsed = int.tryParse(value);
-                    if (parsed == null || parsed <= 0) return;
+                      if (mounted) {
+                        _toast(
+                          'Remote backend host cannot be localhost. Use an external host or IP',
+                        );
+                      }
+                      return;
+                    }
                     setState(() {
-                      _settings = _settings.copyWith(backendPort: parsed);
+                      _settings = _settings.copyWith(backendHost: trimmed);
                     });
                     unawaited(_saveSettings(toast: false));
                     unawaited(_refreshRuntime());
                   },
                 ),
               ),
-              const SizedBox(height: 12),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final compactActions = constraints.maxWidth < 980;
-                  final backendLaunchEnabled =
-                      _settings.backendConnectionType ==
-                          BackendConnectionType.local &&
-                      !_atlasBackendActionBusy &&
-                      _atlasBackendProcess == null &&
-                      !_backendOnline;
-                  const buttonTextStyle = TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                  );
-
-                  final launchButton = FilledButton.icon(
-                    onPressed: backendLaunchEnabled
-                        ? _launchManagedAtlasBackend
-                        : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: secondary.withValues(alpha: 0.92),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: onSurface.withValues(
-                        alpha: 0.15,
-                      ),
-                      disabledForegroundColor: onSurface.withValues(
-                        alpha: 0.58,
-                      ),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                      elevation: 0,
-                    ),
-                    icon: Icon(
-                      _atlasBackendProcess != null
-                          ? Icons.check_circle_rounded
-                          : Icons.play_arrow_rounded,
-                    ),
-                    label: Text(backendLaunchLabel),
-                  );
-
-                  final checkButton = FilledButton.tonalIcon(
-                    onPressed: _checkBackendNow,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: secondary.withValues(alpha: 0.92),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: onSurface.withValues(
-                        alpha: 0.15,
-                      ),
-                      disabledForegroundColor: onSurface.withValues(
-                        alpha: 0.58,
-                      ),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                      elevation: 0,
-                    ),
-                    icon: const Icon(Icons.network_check_rounded, size: 18),
-                    label: const Text('Check backend'),
-                  );
-
-                  final resetButton = OutlinedButton.icon(
-                    onPressed: _resetBackendPreferences,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: onSurface.withValues(alpha: 0.9),
-                      side: BorderSide(
-                        color: onSurface.withValues(alpha: 0.22),
-                      ),
-                      backgroundColor: onSurface.withValues(alpha: 0.03),
-                      minimumSize: const Size.fromHeight(48),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: const StadiumBorder(),
-                      textStyle: buttonTextStyle,
-                    ),
-                    icon: const Icon(Icons.restart_alt_rounded, size: 18),
-                    label: const Text('Reset'),
-                  );
-
-                  if (compactActions) {
-                    return Column(
-                      children: [
-                        launchButton,
-                        const SizedBox(height: 10),
-                        Row(
-                          children: [
-                            Expanded(child: checkButton),
-                            const SizedBox(width: 10),
-                            Expanded(child: resetButton),
-                          ],
-                        ),
-                      ],
-                    );
-                  }
-
-                  return Row(
-                    children: [
-                      Expanded(flex: 2, child: launchButton),
-                      const SizedBox(width: 10),
-                      Expanded(child: checkButton),
-                      const SizedBox(width: 10),
-                      Expanded(child: resetButton),
-                    ],
-                  );
+            const SizedBox(height: 8),
+            _backendSettingTile(
+              icon: Icons.numbers_rounded,
+              title: 'Port',
+              subtitle: 'The port of the backend',
+              trailing: TextField(
+                controller: _backendPortController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: _backendFieldDecoration(hintText: '3551'),
+                onChanged: (value) {
+                  final parsed = int.tryParse(value);
+                  if (parsed == null || parsed <= 0) return;
+                  setState(() {
+                    _settings = _settings.copyWith(backendPort: parsed);
+                  });
+                  unawaited(_saveSettings(toast: false));
+                  unawaited(_refreshRuntime());
                 },
               ),
-              if (_settings.backendConnectionType ==
-                  BackendConnectionType.remote) ...[
-                const SizedBox(height: 14),
-                if (_settings.savedBackends.isEmpty)
-                  _savedBackendsPanel()
-                else
-                  Expanded(child: _savedBackendsPanel()),
-              ],
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compactActions = constraints.maxWidth < 980;
+                final backendLaunchEnabled =
+                    _settings.backendConnectionType ==
+                        BackendConnectionType.local &&
+                    !_atlasBackendActionBusy &&
+                    _atlasBackendProcess == null &&
+                    !_backendOnline;
+                const buttonTextStyle = TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                );
+
+                final launchButton = FilledButton.icon(
+                  onPressed: backendLaunchEnabled
+                      ? _launchManagedAtlasBackend
+                      : null,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: secondary.withValues(alpha: 0.92),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: onSurface.withValues(alpha: 0.15),
+                    disabledForegroundColor: onSurface.withValues(alpha: 0.58),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                    elevation: 0,
+                  ),
+                  icon: Icon(
+                    _atlasBackendProcess != null
+                        ? Icons.check_circle_rounded
+                        : Icons.play_arrow_rounded,
+                  ),
+                  label: Text(backendLaunchLabel),
+                );
+
+                final checkButton = FilledButton.tonalIcon(
+                  onPressed: _checkBackendNow,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: secondary.withValues(alpha: 0.92),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: onSurface.withValues(alpha: 0.15),
+                    disabledForegroundColor: onSurface.withValues(alpha: 0.58),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.network_check_rounded, size: 18),
+                  label: const Text('Check backend'),
+                );
+
+                final resetButton = OutlinedButton.icon(
+                  onPressed: _resetBackendPreferences,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: onSurface.withValues(alpha: 0.9),
+                    side: BorderSide(color: onSurface.withValues(alpha: 0.22)),
+                    backgroundColor: onSurface.withValues(alpha: 0.03),
+                    minimumSize: const Size.fromHeight(48),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: const StadiumBorder(),
+                    textStyle: buttonTextStyle,
+                  ),
+                  icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                  label: const Text('Reset'),
+                );
+
+                if (compactActions) {
+                  return Column(
+                    children: [
+                      launchButton,
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(child: checkButton),
+                          const SizedBox(width: 10),
+                          Expanded(child: resetButton),
+                        ],
+                      ),
+                    ],
+                  );
+                }
+
+                return Row(
+                  children: [
+                    Expanded(flex: 2, child: launchButton),
+                    const SizedBox(width: 10),
+                    Expanded(child: checkButton),
+                    const SizedBox(width: 10),
+                    Expanded(child: resetButton),
+                  ],
+                );
+              },
+            ),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.remote) ...[
+              const SizedBox(height: 14),
+              if (_settings.savedBackends.isEmpty)
+                _savedBackendsPanel()
+              else
+                Expanded(child: _savedBackendsPanel()),
             ],
-          ),
+          ],
         ),
       ),
+    );
+
+    return _menuItemEntrance(
+      menuKey: LauncherTab.backend,
+      index: 0,
+      child: shouldShrinkBackendPanel
+          ? Align(alignment: Alignment.topCenter, child: backendPanel)
+          : backendPanel,
     );
   }
 
@@ -14929,8 +17500,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ? '.msi'
           : initialLowerPath.endsWith('.exe')
           ? '.exe'
-          // Prefer MSI if the URL has no usable extension (common with redirects).
-          : '.msi';
+          : '.exe';
       var installerFile = File(
         _joinPath([tempDir.path, 'atlas-backend-installer$extension']),
       );
@@ -15429,63 +17999,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       ..connectionTimeout = const Duration(seconds: 8)
       ..userAgent = 'ATLAS-Link';
     try {
-      String? pickInstallerFromAssets(dynamic assets) {
-        if (assets is! List) return null;
-        String? atlasInstallerMsi;
-        String? installerMsi;
-        String? atlasMsi;
-        String? firstMsi;
-        String? atlasSetupExe;
-        String? setupExe;
-        String? atlasExe;
-        String? firstExe;
-        for (final asset in assets) {
-          if (asset is! Map<String, dynamic>) continue;
-          final name = (asset['name'] ?? '').toString().toLowerCase();
-          final url = (asset['browser_download_url'] ?? '').toString().trim();
-          if (url.isEmpty) continue;
-
-          final isAtlasAsset =
-              name.contains('atlas') || name.contains('backend');
-          final isInstaller =
-              name.contains('setup') ||
-              name.contains('installer') ||
-              name.contains('install');
-          if (name.endsWith('.msi')) {
-            if (isInstaller && isAtlasAsset) {
-              atlasInstallerMsi ??= url;
-            } else if (isInstaller) {
-              installerMsi ??= url;
-            } else if (isAtlasAsset) {
-              atlasMsi ??= url;
-            } else {
-              firstMsi ??= url;
-            }
-            continue;
-          }
-          if (name.endsWith('.exe')) {
-            if (isInstaller && isAtlasAsset) {
-              atlasSetupExe ??= url;
-            } else if (isInstaller) {
-              setupExe ??= url;
-            } else if (isAtlasAsset) {
-              atlasExe ??= url;
-            } else {
-              firstExe ??= url;
-            }
-          }
-        }
-        // Prefer MSI now that backend is distributed as an MSI again.
-        return atlasInstallerMsi ??
-            installerMsi ??
-            atlasMsi ??
-            firstMsi ??
-            atlasSetupExe ??
-            setupExe ??
-            atlasExe ??
-            firstExe;
-      }
-
       Future<dynamic> fetchGitHubJson(String url) async {
         final request = await client.getUrl(Uri.parse(url));
         request.followRedirects = true;
@@ -15514,7 +18027,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       final latest = await fetchGitHubJson(_atlasBackendLatestReleaseApi);
       if (latest is Map<String, dynamic>) {
-        final picked = pickInstallerFromAssets(latest['assets']);
+        final picked = AtlasBackendInstallSupport.selectInstallerUrl(
+          latest['assets'],
+        );
         if (picked != null) return picked;
       }
 
@@ -15530,7 +18045,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           if (release is! Map<String, dynamic>) continue;
           if (release['draft'] == true) continue;
           if (!includePrerelease && release['prerelease'] == true) continue;
-          final picked = pickInstallerFromAssets(release['assets']);
+          final picked = AtlasBackendInstallSupport.selectInstallerUrl(
+            release['assets'],
+          );
           if (picked != null) return picked;
         }
         return null;
@@ -15632,9 +18149,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final candidates = <String>[];
     void addWithNames(String? dirPath) {
       if (dirPath == null || dirPath.trim().isEmpty) return;
-      candidates.add(_joinPath([dirPath, 'ATLAS Backend.exe']));
-      candidates.add(_joinPath([dirPath, 'ATLAS-Backend.exe']));
-      candidates.add(_joinPath([dirPath, 'ATLAS.exe']));
+      candidates.addAll(
+        AtlasBackendInstallSupport.executableCandidatesForRoot(dirPath),
+      );
     }
 
     final configuredPath = _settings.backendWorkingDirectory.trim();
@@ -17225,7 +19742,7 @@ foreach ($app in $appPaths) {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            'Default login: ${_buildRebootLoginUsername(_usernameController.text)}',
+                            'Default login: ${_buildAtlasLoginUsername(_usernameController.text)}',
                             style: TextStyle(
                               color: Theme.of(
                                 context,
@@ -17252,6 +19769,9 @@ foreach ($app in $appPaths) {
                             ),
                             FilledButton.icon(
                               onPressed: _saveProfileSettings,
+                              style: FilledButton.styleFrom(
+                                foregroundColor: Colors.white,
+                              ),
                               icon: const Icon(Icons.save_rounded),
                               label: const Text('Save'),
                             ),
@@ -17779,10 +20299,52 @@ foreach ($app in $appPaths) {
             ),
           ),
         );
+      case SettingsSection.credits:
       case SettingsSection.support:
+        const credits = <_CreditProfileData>[
+          _CreditProfileData(
+            name: 'Auties',
+            handle: '@Auties00',
+            role: 'Launcher Foundation',
+            githubUrl: 'https://github.com/Auties00',
+            discordUrl: 'https://discord.gg/u9tYQJ6x7M',
+            discordLabel: 'Join Reboot',
+            avatarUrl: 'https://github.com/Auties00.png?size=240',
+            description:
+                'Built Reboot Launcher, the base that ATLAS Link was developed from. Reboot has given us the structure and workflow gave this project its starting point.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Reboot Launcher',
+                url: 'https://github.com/Auties00/Reboot-Launcher',
+              ),
+            ],
+          ),
+          _CreditProfileData(
+            name: 'sarah',
+            handle: '@plooshi',
+            role: 'Console, Auth & Gameserver Foundation',
+            githubUrl: 'https://github.com/plooshi',
+            discordUrl: 'https://discord.gg/vWdKfkbaAj',
+            discordLabel: 'Join Erbium',
+            avatarUrl: 'https://github.com/plooshi.png?size=240',
+            description:
+                'Created Erbium, the base behind Magnesium and the console DLL, and built Tellurium, the authentication patcher that gives the launcher\'s backend redirect.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Erbium',
+                url: 'https://github.com/plooshi/Erbium',
+              ),
+              _CreditProjectLink(
+                label: 'Tellurium',
+                url: 'https://github.com/plooshi/Tellurium',
+              ),
+            ],
+          ),
+        ];
         body = _glass(
           radius: 24,
-          child: Padding(
+          child: SingleChildScrollView(
+            primary: false,
             padding: const EdgeInsets.all(24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -17798,13 +20360,50 @@ foreach ($app in $appPaths) {
                 OutlinedButton.icon(
                   onPressed: () => _openUrl('https://discord.gg'),
                   icon: const Icon(Icons.discord_rounded),
-                  label: const Text('Open Discord'),
+                  label: const Text('Join Discord'),
                 ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: _openLogs,
                   icon: const Icon(Icons.article_rounded),
                   label: const Text('Open Launcher Logs'),
+                ),
+                const SizedBox(height: 24),
+                Text('Credits', style: sectionTitleStyle),
+                const SizedBox(height: 12),
+                Text(
+                  'ATLAS Link was developed through open-source work. These people and projects provided core foundations for the launcher, dlls, etc.',
+                  style: TextStyle(
+                    color: _onSurface(context, 0.78),
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final cards = credits
+                        .map((credit) => _creditProfileCard(credit))
+                        .toList(growable: false);
+                    if (constraints.maxWidth < 940) {
+                      return Column(
+                        children: [
+                          for (var i = 0; i < cards.length; i++) ...[
+                            if (i > 0) const SizedBox(height: 16),
+                            cards[i],
+                          ],
+                        ],
+                      );
+                    }
+
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: cards[0]),
+                        const SizedBox(width: 16),
+                        Expanded(child: cards[1]),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
@@ -18075,6 +20674,355 @@ foreach ($app in $appPaths) {
     );
   }
 
+  Widget _creditProfileCard(_CreditProfileData credit) {
+    final dark = _isDarkTheme(context);
+    final secondary = Theme.of(context).colorScheme.secondary;
+    final cardTop = dark
+        ? const Color(0xFF0E1728).withValues(alpha: 0.92)
+        : Colors.white.withValues(alpha: 0.92);
+    final cardBottom = dark
+        ? secondary.withValues(alpha: 0.12)
+        : secondary.withValues(alpha: 0.10);
+    final accent = dark
+        ? secondary.withValues(alpha: 0.88)
+        : const Color(0xFF1565C0);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [cardTop, cardBottom],
+        ),
+        border: Border.all(color: _onSurface(context, 0.10)),
+        boxShadow: [
+          BoxShadow(
+            color: _glassShadowColor(
+              context,
+            ).withValues(alpha: dark ? 0.18 : 0.10),
+            blurRadius: 26,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _creditAvatar(avatarUrl: credit.avatarUrl),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        color: accent.withValues(alpha: dark ? 0.18 : 0.12),
+                        border: Border.all(
+                          color: accent.withValues(alpha: dark ? 0.36 : 0.24),
+                        ),
+                      ),
+                      child: Text(
+                        credit.role,
+                        style: TextStyle(
+                          color: _onSurface(context, 0.92),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      credit.name,
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(context, 0.96),
+                        height: 1.0,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      credit.handle,
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.66),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            credit.description,
+            style: TextStyle(
+              color: _onSurface(context, 0.82),
+              height: 1.5,
+              fontSize: 14.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'Projects',
+            style: TextStyle(
+              color: _onSurface(context, 0.92),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final project in credit.projects)
+                ActionChip(
+                  onPressed: () => unawaited(_openUrl(project.url)),
+                  backgroundColor: _onSurface(context, 0.06),
+                  side: BorderSide(color: _onSurface(context, 0.12)),
+                  avatar: Icon(
+                    Icons.open_in_new_rounded,
+                    size: 15,
+                    color: _onSurface(context, 0.82),
+                  ),
+                  label: Text(project.label),
+                  labelStyle: TextStyle(
+                    color: _onSurface(context, 0.90),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              FilledButton.icon(
+                onPressed: () => unawaited(_openUrl(credit.githubUrl)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: dark
+                      ? const Color(0xFF0A0F18)
+                      : const Color(0xFF111827),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+                label: Text('View ${credit.handle}'),
+              ),
+              FilledButton.icon(
+                onPressed: () => unawaited(_openUrl(credit.discordUrl)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF5865F2),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const Icon(Icons.discord_rounded, size: 18),
+                label: Text(credit.discordLabel),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _aboutCreatorCard(
+    BuildContext dialogContext,
+    _AboutCreatorProfile creator,
+  ) {
+    final dark = _isDarkTheme(dialogContext);
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    final cardTop = dark
+        ? const Color(0xFF0D1628).withValues(alpha: 0.94)
+        : Colors.white.withValues(alpha: 0.94);
+    final cardBottom = dark
+        ? secondary.withValues(alpha: 0.10)
+        : secondary.withValues(alpha: 0.08);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [cardTop, cardBottom],
+        ),
+        border: Border.all(color: _onSurface(dialogContext, 0.10)),
+        boxShadow: [
+          BoxShadow(
+            color: _glassShadowColor(
+              dialogContext,
+            ).withValues(alpha: dark ? 0.16 : 0.10),
+            blurRadius: 24,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _creditAvatar(avatarUrl: creator.avatarUrl),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        color: secondary.withValues(alpha: dark ? 0.18 : 0.12),
+                        border: Border.all(
+                          color: secondary.withValues(
+                            alpha: dark ? 0.36 : 0.24,
+                          ),
+                        ),
+                      ),
+                      child: Text(
+                        creator.role,
+                        style: TextStyle(
+                          color: _onSurface(dialogContext, 0.92),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      creator.name,
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(dialogContext, 0.96),
+                        height: 1.0,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      creator.handle,
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(dialogContext, 0.66),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            creator.description,
+            style: TextStyle(
+              color: _onSurface(dialogContext, 0.82),
+              height: 1.5,
+              fontSize: 14.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: () => unawaited(_openUrl(creator.githubUrl)),
+            style: FilledButton.styleFrom(
+              backgroundColor: dark
+                  ? const Color(0xFF0A0F18)
+                  : const Color(0xFF111827),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: const StadiumBorder(),
+            ),
+            icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+            label: Text('View ${creator.handle}'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _creditAvatar({required String avatarUrl}) {
+    final dark = _isDarkTheme(context);
+    final secondary = Theme.of(context).colorScheme.secondary;
+
+    return Container(
+      width: 86,
+      height: 86,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: SweepGradient(
+          colors: [
+            secondary.withValues(alpha: 0.92),
+            Colors.white.withValues(alpha: dark ? 0.55 : 0.90),
+            secondary.withValues(alpha: 0.50),
+            secondary.withValues(alpha: 0.92),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: secondary.withValues(alpha: dark ? 0.24 : 0.14),
+            blurRadius: 22,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: (dark ? const Color(0xFF07111F) : Colors.white).withValues(
+            alpha: dark ? 0.92 : 0.96,
+          ),
+        ),
+        child: ClipOval(
+          child: FadeInImage.assetNetwork(
+            placeholder: 'assets/images/default_pfp.png',
+            image: avatarUrl,
+            width: 80,
+            height: 80,
+            fit: BoxFit.cover,
+            fadeInDuration: const Duration(milliseconds: 260),
+            fadeOutDuration: const Duration(milliseconds: 140),
+            imageErrorBuilder: (context, error, stackTrace) {
+              return Image.asset(
+                'assets/images/default_pfp.png',
+                width: 80,
+                height: 80,
+                fit: BoxFit.cover,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _input({
     required String label,
     required TextEditingController controller,
@@ -18193,13 +21141,6 @@ foreach ($app in $appPaths) {
       }
       return null;
     });
-  }
-
-  String _deriveVersion(String path) {
-    final match = RegExp(
-      r'(\d+\.\d+(?:\.\d+)?)',
-    ).firstMatch(path.replaceAll('\\', '/'));
-    return match?.group(1) ?? 'Unknown';
   }
 
   String _basename(String path) {
@@ -18921,6 +21862,55 @@ Color _adaptiveScrimColor(
   return base.withValues(alpha: dark ? darkAlpha : lightAlpha);
 }
 
+class _CreditProjectLink {
+  const _CreditProjectLink({required this.label, required this.url});
+
+  final String label;
+  final String url;
+}
+
+class _AboutCreatorProfile {
+  const _AboutCreatorProfile({
+    required this.name,
+    required this.handle,
+    required this.role,
+    required this.githubUrl,
+    required this.avatarUrl,
+    required this.description,
+  });
+
+  final String name;
+  final String handle;
+  final String role;
+  final String githubUrl;
+  final String avatarUrl;
+  final String description;
+}
+
+class _CreditProfileData {
+  const _CreditProfileData({
+    required this.name,
+    required this.handle,
+    required this.role,
+    required this.githubUrl,
+    required this.discordUrl,
+    required this.discordLabel,
+    required this.avatarUrl,
+    required this.description,
+    required this.projects,
+  });
+
+  final String name;
+  final String handle;
+  final String role;
+  final String githubUrl;
+  final String discordUrl;
+  final String discordLabel;
+  final String avatarUrl;
+  final String description;
+  final List<_CreditProjectLink> projects;
+}
+
 class _ToastOverlayHost extends StatefulWidget {
   const _ToastOverlayHost({super.key, required this.onEmpty});
 
@@ -19209,6 +22199,14 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       ),
     );
   }
+}
+
+class _ImportProgress {
+  const _ImportProgress(this.message, this.progress);
+  final String message;
+
+  /// Null means indeterminate (pulsing bar).
+  final double? progress;
 }
 
 class _BuildImportRequest {
@@ -19668,6 +22666,7 @@ class LauncherSettings {
     required this.largePakPatcherFilePath,
     required this.savedBackends,
     required this.savedBackendsByProfile,
+    required this.totalAtlasPlaySeconds,
     required this.versions,
     required this.selectedVersionId,
   });
@@ -19710,6 +22709,7 @@ class LauncherSettings {
   final String largePakPatcherFilePath;
   final List<SavedBackend> savedBackends;
   final Map<String, List<SavedBackend>> savedBackendsByProfile;
+  final int totalAtlasPlaySeconds;
   final List<VersionEntry> versions;
   final String selectedVersionId;
 
@@ -19765,6 +22765,7 @@ class LauncherSettings {
     String? largePakPatcherFilePath,
     List<SavedBackend>? savedBackends,
     Map<String, List<SavedBackend>>? savedBackendsByProfile,
+    int? totalAtlasPlaySeconds,
     List<VersionEntry>? versions,
     String? selectedVersionId,
   }) {
@@ -19825,6 +22826,8 @@ class LauncherSettings {
       savedBackends: savedBackends ?? this.savedBackends,
       savedBackendsByProfile:
           savedBackendsByProfile ?? this.savedBackendsByProfile,
+      totalAtlasPlaySeconds:
+          totalAtlasPlaySeconds ?? this.totalAtlasPlaySeconds,
       versions: versions ?? this.versions,
       selectedVersionId: selectedVersionId ?? this.selectedVersionId,
     );
@@ -19870,6 +22873,7 @@ class LauncherSettings {
       largePakPatcherFilePath: '',
       savedBackends: <SavedBackend>[],
       savedBackendsByProfile: <String, List<SavedBackend>>{},
+      totalAtlasPlaySeconds: 0,
       versions: <VersionEntry>[],
       selectedVersionId: '',
     );
@@ -20119,6 +23123,10 @@ class LauncherSettings {
               .toString(),
       savedBackends: resolvedSavedBackends,
       savedBackendsByProfile: parsedSavedBackendsByProfile,
+      totalAtlasPlaySeconds: asInt(
+        json['totalAtlasPlaySeconds'] ?? json['atlasPlaySeconds'],
+        0,
+      ),
       versions: parsedVersions,
       selectedVersionId: selected,
     );
@@ -20169,6 +23177,7 @@ class LauncherSettings {
           profileSavedBackends.map((entry) => entry.toJson()).toList(),
         ),
       ),
+      'totalAtlasPlaySeconds': totalAtlasPlaySeconds,
       'versions': versions.map((entry) => entry.toJson()).toList(),
       'selectedVersionId': selectedVersionId,
     };
@@ -20214,6 +23223,8 @@ class VersionEntry {
     required this.location,
     required this.executablePath,
     this.splashImagePath = '',
+    this.playTimeSeconds = 0,
+    this.lastPlayedAtEpochMs = 0,
   });
 
   final String id;
@@ -20222,6 +23233,8 @@ class VersionEntry {
   final String location;
   final String executablePath;
   final String splashImagePath;
+  final int playTimeSeconds;
+  final int lastPlayedAtEpochMs;
 
   VersionEntry copyWith({
     String? id,
@@ -20230,6 +23243,8 @@ class VersionEntry {
     String? location,
     String? executablePath,
     String? splashImagePath,
+    int? playTimeSeconds,
+    int? lastPlayedAtEpochMs,
   }) {
     return VersionEntry(
       id: id ?? this.id,
@@ -20238,10 +23253,19 @@ class VersionEntry {
       location: location ?? this.location,
       executablePath: executablePath ?? this.executablePath,
       splashImagePath: splashImagePath ?? this.splashImagePath,
+      playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
+      lastPlayedAtEpochMs: lastPlayedAtEpochMs ?? this.lastPlayedAtEpochMs,
     );
   }
 
   factory VersionEntry.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
     return VersionEntry(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
@@ -20250,6 +23274,14 @@ class VersionEntry {
       executablePath: (json['executablePath'] ?? '').toString(),
       splashImagePath: (json['splashImagePath'] ?? json['coverImagePath'] ?? '')
           .toString(),
+      playTimeSeconds: asInt(
+        json['playTimeSeconds'] ?? json['trackedPlaySeconds'],
+        0,
+      ),
+      lastPlayedAtEpochMs: asInt(
+        json['lastPlayedAtEpochMs'] ?? json['lastPlayedAt'],
+        0,
+      ),
     );
   }
 
@@ -20261,6 +23293,8 @@ class VersionEntry {
       'location': location,
       'executablePath': executablePath,
       'splashImagePath': splashImagePath,
+      'playTimeSeconds': playTimeSeconds,
+      'lastPlayedAtEpochMs': lastPlayedAtEpochMs,
     };
   }
 }

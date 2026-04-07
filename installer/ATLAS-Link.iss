@@ -43,6 +43,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={localappdata}\ATLAS Link
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+UsePreviousTasks=no
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma
@@ -55,6 +56,7 @@ UninstallDisplayIcon={app}\{#ExecutableName}
 CloseApplications=yes
 CloseApplicationsFilter={#ExecutableName},atlas_link_flutter.exe
 RestartApplications=no
+DisableReadyMemo=yes
 #if SetupIconFile != ""
 SetupIconFile={#SetupIconFile}
 #endif
@@ -62,9 +64,15 @@ SetupIconFile={#SetupIconFile}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+SelectTasksDesc=Which ATLAS Link setup options should be performed?
+SelectTasksLabel2=Select the options you would like Setup to perform while installing ATLAS Link, then click Next.
+ReadyLabel1=Setup is now ready to install ATLAS Link on your computer.
+ReadyLabel2a=Click Install to continue with the installation, or click Back if you want to review any ATLAS Link setup options.
+ReadyLabel2b=Click Install to continue with the installation.
+
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "defenderexclusions"; Description: "Add {#MyAppName} DLL folder to Windows Defender exclusions (Recommended)"; GroupDescription: "Security:"
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -80,9 +88,15 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#ExecutableName}"; Tasks: 
 #if VcRedistPath != ""
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Check: NeedsVCRedist; Flags: runhidden waituntilterminated
 #endif
-Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  DefenderOptionsPage: TWizardPage;
+  DefenderIntroLabel: TNewStaticText;
+  DefenderDetailsLabel: TNewStaticText;
+  DefenderExclusionsCheckBox: TNewCheckBox;
+
 function IsVCRedistInstalled: Boolean;
 var
   Installed: Cardinal;
@@ -114,6 +128,57 @@ function PowerShellQuoted(const Value: string): string;
 begin
   Result := Value;
   StringChangeEx(Result, '''', '''''', True);
+end;
+
+function ShouldApplyDefenderExclusions: Boolean;
+begin
+  Result :=
+    Assigned(DefenderExclusionsCheckBox) and
+    DefenderExclusionsCheckBox.Checked;
+end;
+
+procedure InitializeWizard;
+begin
+  DefenderOptionsPage := CreateCustomPage(
+    wpSelectDir,
+    'Allow bundled DLL support',
+    'ATLAS Link can add its helper DLL folder to Windows Defender exclusions.'
+  );
+
+  DefenderIntroLabel := TNewStaticText.Create(DefenderOptionsPage);
+  DefenderIntroLabel.Parent := DefenderOptionsPage.Surface;
+  DefenderIntroLabel.Left := 0;
+  DefenderIntroLabel.Top := 0;
+  DefenderIntroLabel.Width := DefenderOptionsPage.SurfaceWidth;
+  DefenderIntroLabel.AutoSize := False;
+  DefenderIntroLabel.WordWrap := True;
+  DefenderIntroLabel.Font.Style := [fsBold];
+  DefenderIntroLabel.Caption :=
+    'ATLAS Link can use bundled DLLs for overall compatibility on ATLAS supported versions.';
+  WizardForm.AdjustLabelHeight(DefenderIntroLabel);
+
+  DefenderDetailsLabel := TNewStaticText.Create(DefenderOptionsPage);
+  DefenderDetailsLabel.Parent := DefenderOptionsPage.Surface;
+  DefenderDetailsLabel.Left := 0;
+  DefenderDetailsLabel.Top :=
+    DefenderIntroLabel.Top + DefenderIntroLabel.Height + ScaleY(12);
+  DefenderDetailsLabel.Width := DefenderOptionsPage.SurfaceWidth;
+  DefenderDetailsLabel.AutoSize := False;
+  DefenderDetailsLabel.WordWrap := True;
+  DefenderDetailsLabel.Caption :=
+    'Selecting the option below will add ATLAS Link''s bundled DLL folder to the Windows Defender exclusions list. This can help prevent Windows Security from quarantining required files during install or launch. If another antivirus is active, you may still need to add the exclusion there manually. Only enable this if you trust ATLAS Link. You can review the source code at https://github.com/cipherfps/ATLAS-Link and manage exclusions yourself later if you prefer.';
+  WizardForm.AdjustLabelHeight(DefenderDetailsLabel);
+
+  DefenderExclusionsCheckBox := TNewCheckBox.Create(DefenderOptionsPage);
+  DefenderExclusionsCheckBox.Parent := DefenderOptionsPage.Surface;
+  DefenderExclusionsCheckBox.Left := 0;
+  DefenderExclusionsCheckBox.Top :=
+    DefenderDetailsLabel.Top + DefenderDetailsLabel.Height + ScaleY(16);
+  DefenderExclusionsCheckBox.Width := DefenderOptionsPage.SurfaceWidth;
+  DefenderExclusionsCheckBox.Height := ScaleY(24);
+  DefenderExclusionsCheckBox.Checked := True;
+  DefenderExclusionsCheckBox.Caption :=
+    'Add ATLAS Link''s bundled DLL folder to Windows Defender exclusions';
 end;
 
 procedure ApplyDefenderExclusions;
@@ -235,7 +300,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   // Apply before extracting files so Defender doesn't quarantine DLLs during install.
-  if (CurStep = ssInstall) and WizardIsTaskSelected('defenderexclusions') then
+  if (CurStep = ssInstall) and ShouldApplyDefenderExclusions then
     ApplyDefenderExclusions;
 end;
 
