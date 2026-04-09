@@ -1,4 +1,4 @@
-<!-- version: 1.2.2 -->
+<!-- version: 1.2.3 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,7 +15,13 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Improved Headless Host Stability
-- Moved Credits to Support
+- Changed Visual for Profile Settings and Selection
+- Added Start Up Menu in Settings
+- Auto Updates for Bundled/Default DLLs when selected as path
+- Toggle for Auto Updating DLLS
+- Toggle for Launcher Update Prompts
+- Updated Magnesium
+# Fixes
+- Removed and Fixed Users skipping Quick Tips
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

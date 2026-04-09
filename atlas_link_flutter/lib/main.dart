@@ -436,7 +436,14 @@ class _SmoothScrollPhysics extends ScrollPhysics {
 
 enum LauncherTab { home, library, stats, backend, general }
 
-enum SettingsSection { profile, appearance, dataManagement, credits, support }
+enum SettingsSection {
+  profile,
+  appearance,
+  dataManagement,
+  startup,
+  credits,
+  support,
+}
 
 enum GameServerInjectType { custom }
 
@@ -641,8 +648,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.2';
-  static const String _launcherBuildLabel = 'Stable 1.2.2';
+  static const String _launcherVersion = '1.2.3';
+  static const String _launcherBuildLabel = 'Stable 1.2.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -821,6 +828,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _backendOnline = false;
   DateTime? _lastBackendUndetectedToastAt;
   DateTime? _lastBackendCheckingToastAt;
+  Map<String, dynamic> _settingsRawFileData = <String, dynamic>{};
+  int _pendingBundledDllLaunchToastCount = 0;
+  bool _bundledDllLaunchToastQueued = false;
+  bool _bundledDllAutoUpdateOnLaunchQueued = false;
+  bool _bundledDllAutoUpdateOnLaunchStarted = false;
   bool _checkingLauncherUpdate = false;
   bool _checkingBundledDllDefaultsUpdate = false;
   bool _bundledDllDefaultsUpdateAvailable = false;
@@ -842,6 +854,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _profileSetupDialogVisible = false;
   bool _profileSetupDialogQueued = false;
   bool _showProfileAuthPassword = false;
+  bool _profilePfpHovered = false;
   bool _profileAuthValidationAttempted = false;
   bool _profileAuthQuickTipManualVisible = false;
   bool _libraryImportTipFadingOut = false;
@@ -1036,7 +1049,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       _syncControllers();
       await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
       await _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle();
-      unawaited(_checkForBundledDllDefaultUpdates(silent: true));
+      unawaited(
+        _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+      );
       if (currentLauncherVersion.isNotEmpty &&
           _installState.lastSeenLauncherVersion != currentLauncherVersion) {
         _installState = _installState.copyWith(
@@ -1063,6 +1078,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       unawaited(_cleanupAtlasBackendInstallerIfBackendDetected());
       if (!_showStartup) {
         _startRuntimeRefreshLoopIfNeeded();
+        _queueBundledDllAutoUpdateOnLaunch();
       }
 
       _queueFirstRunProfileSetup();
@@ -1144,9 +1160,83 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
     _shellEntranceController.forward(from: 0);
     _startRuntimeRefreshLoopIfNeeded();
+    _queueBundledDllAutoUpdateOnLaunch();
     _queueFirstRunProfileSetup();
     _queueLauncherAutoUpdateCheckOnLaunch();
     _queueLibraryWarmup();
+  }
+
+  void _queueBundledDllAutoUpdateOnLaunch() {
+    if (!_settings.updateDefaultDllsOnLaunchEnabled) return;
+    if (_bundledDllAutoUpdateOnLaunchStarted) return;
+    if (_bundledDllAutoUpdateOnLaunchQueued) return;
+    _bundledDllAutoUpdateOnLaunchQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bundledDllAutoUpdateOnLaunchQueued = false;
+      unawaited(_runBundledDllAutoUpdateOnLaunch());
+    });
+  }
+
+  Future<void> _runBundledDllAutoUpdateOnLaunch() async {
+    if (!mounted) return;
+    if (!_settings.updateDefaultDllsOnLaunchEnabled) return;
+    if (_bundledDllAutoUpdateOnLaunchStarted) return;
+    if (_showStartup) {
+      _queueBundledDllAutoUpdateOnLaunch();
+      return;
+    }
+
+    _bundledDllAutoUpdateOnLaunchStarted = true;
+    try {
+      final updatedDefaultDllCount = await _maybeAutoUpdateBundledDllAssetsOnLaunch(
+        showProgressUi: true,
+      );
+      _queueBundledDllLaunchUpdateToast(updatedDefaultDllCount);
+      unawaited(
+        _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: true),
+      );
+    } catch (error) {
+      _log(
+        'settings',
+        'Failed to auto-update bundled default DLLs after launch: $error',
+      );
+    }
+  }
+
+  void _queueBundledDllLaunchUpdateToast(int updatedCount) {
+    if (updatedCount <= 0) return;
+    _pendingBundledDllLaunchToastCount += updatedCount;
+    if (_bundledDllLaunchToastQueued) return;
+    _bundledDllLaunchToastQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _schedulePendingBundledDllLaunchToastAttempt();
+    });
+  }
+
+  void _schedulePendingBundledDllLaunchToastAttempt() {
+    Future<void>.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        _bundledDllLaunchToastQueued = false;
+        return;
+      }
+      if (_showStartup) {
+        _schedulePendingBundledDllLaunchToastAttempt();
+        return;
+      }
+      _tryShowPendingBundledDllLaunchToast();
+    });
+  }
+
+  void _tryShowPendingBundledDllLaunchToast() {
+    if (!mounted) return;
+    if (_showStartup) return;
+    final updatedCount = _pendingBundledDllLaunchToastCount;
+    _pendingBundledDllLaunchToastCount = 0;
+    _bundledDllLaunchToastQueued = false;
+    if (updatedCount <= 0) return;
+    _toast(
+      'Updated $updatedCount Default DLL${updatedCount == 1 ? '' : 's'} on Launch',
+    );
   }
 
   void _queueLibraryWarmup() {
@@ -1253,6 +1343,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   void _queueLauncherAutoUpdateCheckOnLaunch() {
+    if (!_settings.launcherUpdateChecksEnabled) return;
     if (_launcherUpdateAutoChecked) return;
     if (_launcherUpdateAutoCheckQueued) return;
     _launcherUpdateAutoCheckQueued = true;
@@ -1271,6 +1362,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _maybeAutoCheckForLauncherUpdatesOnLaunch() async {
     if (!mounted) return;
     if (_launcherUpdateAutoChecked) return;
+    if (!_settings.launcherUpdateChecksEnabled) return;
     if (!_startupConfigResolved) return;
     if (_showStartup) return;
     if (_launcherUpdateDialogVisible) return;
@@ -2242,6 +2334,14 @@ class _LauncherScreenState extends State<LauncherScreen>
     return null;
   }
 
+  bool _isConfiguredBundledDefaultDllSelected(_BundledDllSpec spec) {
+    final configuredPath = _configuredDllPathForSpec(spec).trim();
+    if (configuredPath.isEmpty) return false;
+    if (!configuredPath.toLowerCase().endsWith('.dll')) return false;
+    return _isManagedBundledDllPath(configuredPath, spec.fileName) ||
+        _looksLikeBundledAssetDllPath(configuredPath, spec.fileName);
+  }
+
   String _configuredDllPathForSpec(_BundledDllSpec spec) {
     switch (spec.fileNameLower) {
       case 'console.dll':
@@ -2362,10 +2462,18 @@ class _LauncherScreenState extends State<LauncherScreen>
 
       final updatedFiles = <String>{};
       for (final spec in _bundledDllSpecs) {
+        if (!_isConfiguredBundledDefaultDllSelected(spec)) {
+          continue;
+        }
+
         final remote = remoteAssets[spec.fileNameLower];
         if (remote == null) continue;
 
-        final localPath = _resolveCurrentBundledDefaultDllPath(spec);
+        final configuredPath = _configuredDllPathForSpec(spec).trim();
+        final localPath =
+            configuredPath.isNotEmpty && File(configuredPath).existsSync()
+                ? configuredPath
+                : _resolveCurrentBundledDefaultDllPath(spec);
         if (localPath == null || localPath.trim().isEmpty) {
           updatedFiles.add(spec.fileNameLower);
           continue;
@@ -2406,6 +2514,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<String?> _downloadLatestBundledDllFromGitHub({
     required _BundledDllSpec spec,
     Map<String, _BundledDllRemoteAsset>? remoteAssets,
+    bool showProgressUi = true,
+    String? outputPathOverride,
   }) async {
     final resolvedRemoteAssets =
         remoteAssets ?? await _fetchBundledDllRemoteAssets(forceRefresh: true);
@@ -2416,18 +2526,21 @@ class _LauncherScreenState extends State<LauncherScreen>
         ? remote!.downloadUrl.trim()
         : fallbackUrl;
 
-    final dllDir = Directory(_joinPath([_dataDir.path, 'dlls']));
-    final outputPath = _joinPath([dllDir.path, spec.fileName]);
+    final outputPath =
+        outputPathOverride?.trim().isNotEmpty == true
+            ? outputPathOverride!.trim()
+            : _joinPath([_dataDir.path, 'dlls', spec.fileName]);
     final outputFile = File(outputPath);
+    final outputDir = outputFile.parent;
     final tmp = File('$outputPath.tmp');
     try {
-      await dllDir.create(recursive: true);
+      await outputDir.create(recursive: true);
       if (await tmp.exists()) {
         await tmp.delete();
       }
 
       final progressMessage = 'Updating ${spec.fileName}...';
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgress(progressMessage, progress: null, indeterminate: true);
       }
 
@@ -2435,7 +2548,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         downloadUrl,
         tmp,
         onProgress: (receivedBytes, totalBytes) {
-          if (!mounted) return;
+          if (!showProgressUi || !mounted) return;
           if (totalBytes == null || totalBytes <= 0) {
             _toastProgress(
               progressMessage,
@@ -2469,7 +2582,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         }
       }
 
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgressDismiss();
       }
       return outputPath;
@@ -2478,7 +2591,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         'settings',
         'Failed to download latest ${spec.label} DLL from GitHub ($downloadUrl): $error',
       );
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgressDismiss();
       }
       try {
@@ -2498,17 +2611,19 @@ class _LauncherScreenState extends State<LauncherScreen>
     required TextEditingController controller,
     bool checkForUpdatesAfter = true,
     Map<String, _BundledDllRemoteAsset>? remoteAssets,
+    bool showFeedback = true,
   }) async {
     var nextPath = await _downloadLatestBundledDllFromGitHub(
       spec: spec,
       remoteAssets: remoteAssets,
+      showProgressUi: showFeedback,
     );
     if (nextPath == null || nextPath.trim().isEmpty) {
       _log(
         'settings',
         'Falling back to packaged ${spec.label} DLL after GitHub refresh failed.',
       );
-      if (mounted) {
+      if (showFeedback && mounted) {
         _toast('Updating ${spec.fileName}...');
       }
       nextPath = await _ensureBundledDll(
@@ -2516,6 +2631,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         bundledFileName: spec.fileName,
         label: spec.label,
         overwriteFallbackCopy: true,
+        showFeedback: showFeedback,
       );
     }
 
@@ -2539,6 +2655,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     required String bundledAssetPath,
     required File outputFile,
     required String label,
+    bool showProgressUi = true,
   }) async {
     final normalized = bundledAssetPath
         .trim()
@@ -2561,14 +2678,14 @@ class _LauncherScreenState extends State<LauncherScreen>
         'Bundled $label DLL missing. Downloading from GitHub...',
       );
       final progressMessage = 'Updating ${_basename(outputFile.path)}...';
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgress(progressMessage, progress: null, indeterminate: true);
       }
       await _downloadToFile(
         url,
         tmp,
         onProgress: (receivedBytes, totalBytes) {
-          if (!mounted) return;
+          if (!showProgressUi || !mounted) return;
           if (totalBytes == null || totalBytes <= 0) {
             _toastProgress(
               progressMessage,
@@ -2594,7 +2711,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         await outputFile.delete();
       }
       await tmp.rename(outputFile.path);
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgressDismiss();
       }
       return true;
@@ -2603,7 +2720,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         'settings',
         'Failed to download default $label DLL from GitHub ($url): $error',
       );
-      if (mounted) {
+      if (showProgressUi && mounted) {
         _toastProgressDismiss();
       }
       try {
@@ -2622,6 +2739,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     required String bundledFileName,
     required String label,
     bool overwriteFallbackCopy = false,
+    bool showFeedback = true,
   }) async {
     final installedPath = _resolveBundledAssetFilePath(bundledAssetPath);
     if (installedPath != null) return installedPath;
@@ -2632,7 +2750,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       final outputPath = _joinPath([dllDir.path, bundledFileName]);
       final outputFile = File(outputPath);
       if (overwriteFallbackCopy || !outputFile.existsSync()) {
-        if (mounted && overwriteFallbackCopy) {
+        if (showFeedback && mounted && overwriteFallbackCopy) {
           _toast('Updating $bundledFileName...');
         }
         try {
@@ -2652,6 +2770,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             bundledAssetPath: bundledAssetPath,
             outputFile: outputFile,
             label: label,
+            showProgressUi: showFeedback,
           );
           if (!downloaded) rethrow;
         }
@@ -2664,6 +2783,80 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       return null;
     }
+  }
+
+  Future<int> _maybeAutoUpdateBundledDllAssetsOnLaunch({
+    bool showProgressUi = false,
+  }) async {
+    var updatedCount = 0;
+    try {
+      final remoteAssets = await _fetchBundledDllRemoteAssets(forceRefresh: true);
+      if (remoteAssets.isEmpty) {
+        return 0;
+      }
+
+      for (final spec in _bundledDllSpecs) {
+        final remote = remoteAssets[spec.fileNameLower];
+        if (remote == null) {
+          continue;
+        }
+
+        final localDefaultPath = _resolveCurrentBundledDefaultDllPath(spec);
+        final localDefaultSha =
+            localDefaultPath == null || localDefaultPath.trim().isEmpty
+                ? null
+                : await _computeGitBlobShaForFile(File(localDefaultPath));
+        final needsRefresh =
+            localDefaultSha == null || localDefaultSha != remote.sha;
+
+        if (localDefaultPath == null || localDefaultPath.trim().isEmpty) {
+          continue;
+        }
+
+        if (needsRefresh) {
+          _log(
+            'settings',
+            'Bundled default ${spec.fileName} is outdated on launch. Refreshing local default copy.',
+          );
+          var refreshedPath = await _downloadLatestBundledDllFromGitHub(
+            spec: spec,
+            remoteAssets: remoteAssets,
+            showProgressUi: showProgressUi,
+            outputPathOverride: localDefaultPath,
+          );
+          if (refreshedPath == null || refreshedPath.trim().isEmpty) {
+            _log(
+              'settings',
+              'Falling back to packaged ${spec.fileName} after silent launch refresh failed.',
+            );
+            refreshedPath = await _ensureBundledDll(
+              bundledAssetPath: spec.assetPath,
+              bundledFileName: spec.fileName,
+              label: spec.label,
+              overwriteFallbackCopy: true,
+              showFeedback: showProgressUi,
+            );
+          }
+          if (refreshedPath != null &&
+              refreshedPath.trim().isNotEmpty &&
+              _normalizePath(refreshedPath) != _normalizePath(localDefaultPath)) {
+            _log(
+              'settings',
+              'Launch refresh wrote ${spec.fileName} to a fallback path because the active default path could not be updated in place.',
+            );
+          }
+          if (refreshedPath != null && refreshedPath.trim().isNotEmpty) {
+            updatedCount += 1;
+          }
+        }
+      }
+    } catch (error) {
+      _log(
+        'settings',
+        'Failed to auto-refresh bundled default DLL assets on launch: $error',
+      );
+    }
+    return updatedCount;
   }
 
   Future<void> _applyBundledDllDefaults({
@@ -2960,6 +3153,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _loadSettings() async {
     if (!await _settingsFile.exists()) {
+      _settingsRawFileData = <String, dynamic>{};
       _settings = LauncherSettings.defaults();
       await _migrateAppearanceSettingsFileIfNeeded();
       return;
@@ -2968,19 +3162,40 @@ class _LauncherScreenState extends State<LauncherScreen>
       final raw = await _settingsFile.readAsString();
       final decoded = jsonDecode(raw);
       if (decoded is Map<String, dynamic>) {
+        _settingsRawFileData = Map<String, dynamic>.from(decoded);
         _settings = LauncherSettings.fromJson(decoded);
       } else if (decoded is Map) {
+        _settingsRawFileData = decoded.cast<String, dynamic>();
         _settings = LauncherSettings.fromJson(decoded.cast<String, dynamic>());
       } else {
+        _settingsRawFileData = <String, dynamic>{};
         _settings = LauncherSettings.defaults();
       }
       _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
       await _migrateAppearanceSettingsFileIfNeeded();
+      await _mergeSettingsSchemaIntoExistingFileIfNeeded();
     } catch (error) {
+      _settingsRawFileData = <String, dynamic>{};
       _settings = LauncherSettings.defaults();
       _log('settings', 'Invalid settings file. Loaded defaults. $error');
       await _migrateAppearanceSettingsFileIfNeeded();
     }
+  }
+
+  Future<void> _mergeSettingsSchemaIntoExistingFileIfNeeded() async {
+    if (!_storageReady) return;
+    if (_settingsRawFileData.isEmpty) return;
+    final mergedPayload = _buildMergedSettingsPayload();
+    if (_jsonDeepEquals(_settingsRawFileData, mergedPayload)) {
+      return;
+    }
+    final pretty = const JsonEncoder.withIndent('  ').convert(mergedPayload);
+    await _settingsFile.writeAsString(pretty, flush: true);
+    _settingsRawFileData = Map<String, dynamic>.from(mergedPayload);
+    _log(
+      'settings',
+      'Merged current settings schema into existing settings.json while preserving user data.',
+    );
   }
 
   Future<void> _migrateAppearanceSettingsFileIfNeeded() async {
@@ -3047,10 +3262,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
       _settings = merged;
 
-      final pretty = const JsonEncoder.withIndent(
-        '  ',
-      ).convert(_settings.toJson());
-      await _settingsFile.writeAsString(pretty, flush: true);
+      await _saveSettingsSnapshot();
 
       try {
         await legacyAppearanceSettingsFile.delete();
@@ -3374,26 +3586,57 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (toast) _toast('Settings saved');
   }
 
-  String _buildSettingsSnapshotJson() {
-    _syncSavedBackendsForActiveProfile();
-    _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
-    return const JsonEncoder.withIndent('  ').convert(_settings.toJson());
+  Map<String, dynamic> _buildMergedSettingsPayload() {
+    final payload = <String, dynamic>{}..addAll(_settingsRawFileData);
+    payload.removeWhere(
+      (key, _) => LauncherSettings.recognizedJsonKeys.contains(key),
+    );
+    payload.addAll(_settings.toJson());
+    return payload;
   }
 
   Future<void> _saveSettingsSnapshot() async {
     if (!_storageReady) return;
-    final pretty = _buildSettingsSnapshotJson();
+    _syncSavedBackendsForActiveProfile();
+    _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
+    final payload = _buildMergedSettingsPayload();
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
     await _settingsFile.writeAsString(pretty, flush: true);
+    _settingsRawFileData = Map<String, dynamic>.from(payload);
   }
 
   void _saveSettingsSnapshotSync() {
     if (!_storageReady) return;
-    final pretty = _buildSettingsSnapshotJson();
+    _syncSavedBackendsForActiveProfile();
+    _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
+    final payload = _buildMergedSettingsPayload();
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
     try {
       _settingsFile.writeAsStringSync(pretty, flush: true);
+      _settingsRawFileData = Map<String, dynamic>.from(payload);
     } catch (_) {
       // Ignore shutdown save failures.
     }
+  }
+
+  bool _jsonDeepEquals(dynamic left, dynamic right) {
+    if (identical(left, right)) return true;
+    if (left is Map && right is Map) {
+      if (left.length != right.length) return false;
+      for (final key in left.keys) {
+        if (!right.containsKey(key)) return false;
+        if (!_jsonDeepEquals(left[key], right[key])) return false;
+      }
+      return true;
+    }
+    if (left is List && right is List) {
+      if (left.length != right.length) return false;
+      for (var index = 0; index < left.length; index++) {
+        if (!_jsonDeepEquals(left[index], right[index])) return false;
+      }
+      return true;
+    }
+    return left == right;
   }
 
   Map<String, List<SavedBackend>> _cloneSavedBackendsByProfile({
@@ -4194,7 +4437,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _handleRefreshPressed() async {
     await _refreshRuntime();
     await _loadLauncherContent(forceRefresh: true, silent: false);
-    await _checkForLauncherUpdates(silent: false);
+    if (_settings.launcherUpdateChecksEnabled) {
+      await _checkForLauncherUpdates(silent: false);
+    }
     await _checkForBundledDllDefaultUpdates(silent: false);
   }
 
@@ -4286,6 +4531,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<void> _checkForLauncherUpdates({required bool silent}) async {
+    if (!_settings.launcherUpdateChecksEnabled) return;
     if (_checkingLauncherUpdate) return;
     if (_launcherUpdateDialogVisible) return;
     _checkingLauncherUpdate = true;
@@ -12121,11 +12367,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _saveSettings(toast: false);
   }
 
-  Future<void> _clearAvatar() async {
-    setState(() => _settings = _settings.copyWith(profileAvatarPath: ''));
-    await _saveSettings(toast: false);
-  }
-
   Future<void> _openPath(String target) async {
     if (target.trim().isEmpty) return;
     if (!Platform.isWindows) return;
@@ -13107,20 +13348,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                   padding: const EdgeInsets.all(4),
                                 ),
                               ),
-                              InkWell(
-                                borderRadius: BorderRadius.circular(999),
-                                onTap: () {
-                                  unawaited(_dismissLibraryImportTip());
-                                },
-                                child: Padding(
-                                  padding: const EdgeInsets.all(2),
-                                  child: Icon(
-                                    Icons.close_rounded,
-                                    size: 16,
-                                    color: _onSurface(context, 0.62),
-                                  ),
-                                ),
-                              ),
                             ],
                           ),
                           const SizedBox(height: 8),
@@ -13958,18 +14185,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   padding: const EdgeInsets.all(4),
                 ),
               ),
-              InkWell(
-                borderRadius: BorderRadius.circular(999),
-                onTap: _completeBackendConnectionTip,
-                child: Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: Icon(
-                    Icons.close_rounded,
-                    size: 16,
-                    color: _onSurface(context, 0.62),
-                  ),
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -14043,18 +14258,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 style: IconButton.styleFrom(
                   minimumSize: const Size(26, 26),
                   padding: const EdgeInsets.all(4),
-                ),
-              ),
-              InkWell(
-                borderRadius: BorderRadius.circular(999),
-                onTap: _completeProfileAuthQuickTip,
-                child: Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: Icon(
-                    Icons.close_rounded,
-                    size: 16,
-                    color: _onSurface(context, 0.62),
-                  ),
                 ),
               ),
             ],
@@ -19575,9 +19778,6 @@ foreach ($app in $appPaths) {
   }
 
   Widget _generalTab() {
-    final username = _settings.username.trim().isEmpty
-        ? 'Player'
-        : _settings.username.trim();
     final rawProfileAuthValidationError = _profileAuthValidationError(
       useEmailPassword: _settings.profileUseEmailPasswordAuth,
       email: _profileAuthEmailController.text.trim(),
@@ -19610,13 +19810,70 @@ foreach ($app in $appPaths) {
                       height: 1.0,
                     );
 
-                    final avatar = ClipRRect(
-                      borderRadius: BorderRadius.circular(18),
-                      child: Image(
-                        image: _profileImage(),
-                        width: avatarSize,
-                        height: avatarSize,
-                        fit: BoxFit.cover,
+                    final avatar = MouseRegion(
+                      onEnter: (_) => setState(() => _profilePfpHovered = true),
+                      onExit: (_) => setState(() => _profilePfpHovered = false),
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: _pickAvatar,
+                        child: SizedBox(
+                          width: avatarSize,
+                          height: avatarSize,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              AnimatedOpacity(
+                                opacity: _profilePfpHovered ? 0.5 : 1.0,
+                                duration: const Duration(milliseconds: 180),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(18),
+                                  child: Image(
+                                    image: _profileImage(),
+                                    width: avatarSize,
+                                    height: avatarSize,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(
+                                child: AnimatedOpacity(
+                                  opacity: _profilePfpHovered ? 1.0 : 0.0,
+                                  duration: const Duration(milliseconds: 180),
+                                  child: Center(
+                                    child: Container(
+                                      width: 38,
+                                      height: 38,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: _adaptiveScrimColor(
+                                          context,
+                                          darkAlpha: 0.55,
+                                          lightAlpha: 0.45,
+                                        ),
+                                        border: Border.all(
+                                          color: _onSurface(context, 0.16),
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: _dialogShadowColor(context)
+                                                .withValues(alpha: 0.45),
+                                            blurRadius: 14,
+                                            offset: const Offset(0, 8),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Icon(
+                                        Icons.edit_rounded,
+                                        size: 18,
+                                        color: _onSurface(context, 0.9),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     );
 
@@ -19673,7 +19930,9 @@ foreach ($app in $appPaths) {
                             Flexible(
                               fit: FlexFit.loose,
                               child: Text(
-                                username,
+                                _settings.username.trim().isEmpty
+                                    ? 'Player'
+                                    : _settings.username.trim(),
                                 style: nameStyle,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
@@ -19742,7 +20001,7 @@ foreach ($app in $appPaths) {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            'Default login: ${_buildAtlasLoginUsername(_usernameController.text)}',
+                            'Default login: ${_buildAtlasLoginUsername(_settings.username)}',
                             style: TextStyle(
                               color: Theme.of(
                                 context,
@@ -19756,16 +20015,24 @@ foreach ($app in $appPaths) {
                           runSpacing: 8,
                           children: [
                             OutlinedButton.icon(
-                              onPressed: _pickAvatar,
-                              icon: const Icon(Icons.image_rounded),
-                              label: const Text('Change PFP'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: _settings.profileAvatarPath.isEmpty
-                                  ? null
-                                  : _clearAvatar,
+                              onPressed:
+                                  (_settings.profileAvatarPath.isEmpty &&
+                                          _settings.username == 'Player')
+                                      ? null
+                                      : () async {
+                                          setState(() {
+                                            _setActiveSettingsUsername('Player');
+                                            _usernameController.text = '';
+                                            _settings = _settings.copyWith(
+                                              profileAvatarPath: '',
+                                            );
+                                          });
+                                          await _saveSettings(
+                                            applyControllers: false,
+                                          );
+                                        },
                               icon: const Icon(Icons.restore_rounded),
-                              label: const Text('Default'),
+                              label: const Text('Reset'),
                             ),
                             FilledButton.icon(
                               onPressed: _saveProfileSettings,
@@ -19989,6 +20256,52 @@ foreach ($app in $appPaths) {
             ),
           ),
         );
+      case SettingsSection.startup:
+        body = _glass(
+          radius: 24,
+          child: SingleChildScrollView(
+            primary: false,
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Startup', style: sectionTitleStyle),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  value: _settings.updateDefaultDllsOnLaunchEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        updateDefaultDllsOnLaunchEnabled: value,
+                      );
+                    });
+                    unawaited(_saveSettings(toast: false));
+                  },
+                  title: const Text('Update Default DLLs on Launch'),
+                  subtitle: const Text(
+                    'Refresh launcher-managed default DLLs when Link opens. Custom DLL paths are never changed.',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SwitchListTile(
+                  value: !_settings.launcherUpdateChecksEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        launcherUpdateChecksEnabled: !value,
+                      );
+                    });
+                    unawaited(_saveSettings(toast: false));
+                  },
+                  title: const Text('Disable Update Checks'),
+                  subtitle: const Text(
+                    'Skip update checks when launching Link.',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
       case SettingsSection.dataManagement:
         body = _glass(
           radius: 24,
@@ -20142,7 +20455,7 @@ foreach ($app in $appPaths) {
                       ),
                     ),
                     child: Text(
-                      '${_bundledDllUpdatedFileNames.length} default DLL update(s) available on GitHub. Use each row\'s reset button to apply latest.',
+                      '${_bundledDllUpdatedFileNames.length} Default DLL update(s) available on GitHub. Click Update Default DLLs to get the latest version(s).',
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
@@ -20611,6 +20924,11 @@ foreach ($app in $appPaths) {
               section: SettingsSection.dataManagement,
               icon: Icons.storage_rounded,
               title: 'Data Management',
+            ),
+            tile(
+              section: SettingsSection.startup,
+              icon: Icons.power_settings_new_rounded,
+              title: 'Startup',
             ),
             tile(
               section: SettingsSection.support,
@@ -22643,6 +22961,8 @@ class LauncherSettings {
     required this.backgroundBlur,
     required this.backgroundParticlesOpacity,
     required this.startupAnimationEnabled,
+    required this.updateDefaultDllsOnLaunchEnabled,
+    required this.launcherUpdateChecksEnabled,
     required this.backendWorkingDirectory,
     required this.backendStartCommand,
     required this.backendConnectionType,
@@ -22686,6 +23006,8 @@ class LauncherSettings {
   final double backgroundBlur;
   final double backgroundParticlesOpacity;
   final bool startupAnimationEnabled;
+  final bool updateDefaultDllsOnLaunchEnabled;
+  final bool launcherUpdateChecksEnabled;
   final String backendWorkingDirectory;
   final String backendStartCommand;
   final BackendConnectionType backendConnectionType;
@@ -22726,6 +23048,57 @@ class LauncherSettings {
     return normalized.replaceAll(RegExp(r'\s+'), ' ');
   }
 
+  static final Set<String> legacyJsonKeys = Set<String>.unmodifiable(
+    const <String>{
+      'profileEmailPasswordAuth',
+      'ProfileUseEmailPasswordAuth',
+      'profileEmail',
+      'accountEmail',
+      'accountPassword',
+      'ProfileAuthQuickTipComplete',
+      'ProfileSetupComplete',
+      'darkMode',
+      'DarkMode',
+      'popupBackgroundBlur',
+      'PopupBackgroundBlur',
+      'BackgroundImagePath',
+      'BackgroundBlur',
+      'BackgroundParticlesOpacity',
+      'StartupAnimationEnabled',
+      'UpdateDefaultDllsOnLaunchEnabled',
+      'LauncherUpdateChecksEnabled',
+      'disableLauncherUpdateChecks',
+      'DisableLauncherUpdateChecks',
+      'disableLauncherUpdateCheck',
+      'DisableLauncherUpdateCheck',
+      'backendType',
+      'BackendConnectionType',
+      'BackendType',
+      'launchBackend',
+      'largePakPatcher',
+      'multiClientLaunching',
+      'hostHeadless',
+      'hostAutoRestart',
+      'deleteGfeSdkOnHostLaunch',
+      'deleteGfeSdkOnLaunch',
+      'gameServerPort',
+      'UnrealEnginePatcherPath',
+      'AuthenticationPatcherPath',
+      'MemoryPatcherPath',
+      'GameServerFilePath',
+      'LargePakPatcherFilePath',
+      'SavedBackends',
+      'SavedBackendsByProfile',
+      'savedBackendsByUser',
+      'SavedBackendsByUser',
+      'atlasPlaySeconds',
+    },
+  );
+
+  static final Set<String> recognizedJsonKeys = Set<String>.unmodifiable(
+    <String>{...LauncherSettings.defaults().toJson().keys, ...legacyJsonKeys},
+  );
+
   LauncherSettings copyWith({
     String? username,
     bool? profileUseEmailPasswordAuth,
@@ -22742,6 +23115,8 @@ class LauncherSettings {
     double? backgroundBlur,
     double? backgroundParticlesOpacity,
     bool? startupAnimationEnabled,
+    bool? updateDefaultDllsOnLaunchEnabled,
+    bool? launcherUpdateChecksEnabled,
     String? backendWorkingDirectory,
     String? backendStartCommand,
     BackendConnectionType? backendConnectionType,
@@ -22792,6 +23167,11 @@ class LauncherSettings {
           backgroundParticlesOpacity ?? this.backgroundParticlesOpacity,
       startupAnimationEnabled:
           startupAnimationEnabled ?? this.startupAnimationEnabled,
+      updateDefaultDllsOnLaunchEnabled:
+          updateDefaultDllsOnLaunchEnabled ??
+          this.updateDefaultDllsOnLaunchEnabled,
+      launcherUpdateChecksEnabled:
+          launcherUpdateChecksEnabled ?? this.launcherUpdateChecksEnabled,
       backendWorkingDirectory:
           backendWorkingDirectory ?? this.backendWorkingDirectory,
       backendStartCommand: backendStartCommand ?? this.backendStartCommand,
@@ -22850,6 +23230,8 @@ class LauncherSettings {
       backgroundBlur: 15,
       backgroundParticlesOpacity: 1.0,
       startupAnimationEnabled: true,
+      updateDefaultDllsOnLaunchEnabled: true,
+      launcherUpdateChecksEnabled: true,
       backendWorkingDirectory: '',
       backendStartCommand: 'npm run start',
       backendConnectionType: BackendConnectionType.local,
@@ -23048,6 +23430,29 @@ class LauncherSettings {
         json['startupAnimationEnabled'] ?? json['StartupAnimationEnabled'],
         true,
       ),
+      updateDefaultDllsOnLaunchEnabled: asBool(
+        json['updateDefaultDllsOnLaunchEnabled'] ??
+            json['UpdateDefaultDllsOnLaunchEnabled'],
+        true,
+      ),
+      launcherUpdateChecksEnabled: json.containsKey(
+            'disableLauncherUpdateChecks',
+          ) ||
+          json.containsKey('DisableLauncherUpdateChecks') ||
+          json.containsKey('disableLauncherUpdateCheck') ||
+          json.containsKey('DisableLauncherUpdateCheck')
+          ? !asBool(
+              json['disableLauncherUpdateChecks'] ??
+                  json['DisableLauncherUpdateChecks'] ??
+                  json['disableLauncherUpdateCheck'] ??
+                  json['DisableLauncherUpdateCheck'],
+              false,
+            )
+          : asBool(
+              json['launcherUpdateChecksEnabled'] ??
+                  json['LauncherUpdateChecksEnabled'],
+              true,
+            ),
       backendWorkingDirectory: (json['backendWorkingDirectory'] ?? '')
           .toString(),
       backendStartCommand: (json['backendStartCommand'] ?? 'npm run start')
@@ -23149,6 +23554,8 @@ class LauncherSettings {
       'backgroundBlur': backgroundBlur,
       'backgroundParticlesOpacity': backgroundParticlesOpacity,
       'startupAnimationEnabled': startupAnimationEnabled,
+      'updateDefaultDllsOnLaunchEnabled': updateDefaultDllsOnLaunchEnabled,
+      'launcherUpdateChecksEnabled': launcherUpdateChecksEnabled,
       'backendWorkingDirectory': backendWorkingDirectory,
       'backendStartCommand': backendStartCommand,
       'backendConnectionType': backendConnectionType.name,
