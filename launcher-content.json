@@ -16,7 +16,7 @@
         "buttonUrl": "https://www.youtube.com/watch?v=a9ohl7o3c7U"
       },
       {
-        "image": "https://github.com/cipherfps/ATLAS-Link/blob/main/atlas_link_flutter/assets/images/spotlight/rev.png",
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/rev.png",
         "imageFit": "contain",
         "category": "SPOTLIGHT SUBMISSION",
         "title": "Featured Video",
