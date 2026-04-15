@@ -648,8 +648,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.3';
-  static const String _launcherBuildLabel = 'Stable 1.2.3';
+  static const String _launcherVersion = '1.2.4';
+  static const String _launcherBuildLabel = 'Stable 1.2.4';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1188,9 +1188,8 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _bundledDllAutoUpdateOnLaunchStarted = true;
     try {
-      final updatedDefaultDllCount = await _maybeAutoUpdateBundledDllAssetsOnLaunch(
-        showProgressUi: true,
-      );
+      final updatedDefaultDllCount =
+          await _maybeAutoUpdateBundledDllAssetsOnLaunch(showProgressUi: true);
       _queueBundledDllLaunchUpdateToast(updatedDefaultDllCount);
       unawaited(
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: true),
@@ -2472,8 +2471,8 @@ class _LauncherScreenState extends State<LauncherScreen>
         final configuredPath = _configuredDllPathForSpec(spec).trim();
         final localPath =
             configuredPath.isNotEmpty && File(configuredPath).existsSync()
-                ? configuredPath
-                : _resolveCurrentBundledDefaultDllPath(spec);
+            ? configuredPath
+            : _resolveCurrentBundledDefaultDllPath(spec);
         if (localPath == null || localPath.trim().isEmpty) {
           updatedFiles.add(spec.fileNameLower);
           continue;
@@ -2526,10 +2525,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         ? remote!.downloadUrl.trim()
         : fallbackUrl;
 
-    final outputPath =
-        outputPathOverride?.trim().isNotEmpty == true
-            ? outputPathOverride!.trim()
-            : _joinPath([_dataDir.path, 'dlls', spec.fileName]);
+    final outputPath = outputPathOverride?.trim().isNotEmpty == true
+        ? outputPathOverride!.trim()
+        : _joinPath([_dataDir.path, 'dlls', spec.fileName]);
     final outputFile = File(outputPath);
     final outputDir = outputFile.parent;
     final tmp = File('$outputPath.tmp');
@@ -2790,7 +2788,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   }) async {
     var updatedCount = 0;
     try {
-      final remoteAssets = await _fetchBundledDllRemoteAssets(forceRefresh: true);
+      final remoteAssets = await _fetchBundledDllRemoteAssets(
+        forceRefresh: true,
+      );
       if (remoteAssets.isEmpty) {
         return 0;
       }
@@ -2804,8 +2804,8 @@ class _LauncherScreenState extends State<LauncherScreen>
         final localDefaultPath = _resolveCurrentBundledDefaultDllPath(spec);
         final localDefaultSha =
             localDefaultPath == null || localDefaultPath.trim().isEmpty
-                ? null
-                : await _computeGitBlobShaForFile(File(localDefaultPath));
+            ? null
+            : await _computeGitBlobShaForFile(File(localDefaultPath));
         final needsRefresh =
             localDefaultSha == null || localDefaultSha != remote.sha;
 
@@ -2839,7 +2839,8 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
           if (refreshedPath != null &&
               refreshedPath.trim().isNotEmpty &&
-              _normalizePath(refreshedPath) != _normalizePath(localDefaultPath)) {
+              _normalizePath(refreshedPath) !=
+                  _normalizePath(localDefaultPath)) {
             _log(
               'settings',
               'Launch refresh wrote ${spec.fileName} to a fallback path because the active default path could not be updated in place.',
@@ -3241,6 +3242,10 @@ class _LauncherScreenState extends State<LauncherScreen>
               data['popupBackgroundBlur'] ??
               data['PopupBackgroundBlur'],
           _settings.popupBackgroundBlurEnabled,
+        ),
+        discordRpcEnabled: asBool(
+          data['discordRpcEnabled'] ?? data['DiscordRpcEnabled'],
+          _settings.discordRpcEnabled,
         ),
         backgroundImagePath:
             (data['backgroundImagePath'] ?? data['BackgroundImagePath'] ?? '')
@@ -9458,6 +9463,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Future<void> _syncCustomDiscordRpcDllForBuild(
     VersionEntry launchVersion,
   ) async {
+    if (!_settings.discordRpcEnabled) {
+      _log(
+        'discord',
+        'Skipping Discord RPC replacement. Discord RPC is disabled in settings.',
+      );
+      return;
+    }
+
     final buildRoot = launchVersion.location.trim();
     if (buildRoot.isEmpty || !_isBuildRootValid(buildRoot)) {
       _log(
@@ -13564,8 +13577,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           _titleActionButton(Icons.download_rounded, () {
             unawaited(
               _dismissLibraryImportTip(
-                onDismissedAction: () =>
-                    _openUrl('https://builds.fortforge.dev/builds'),
+                onDismissedAction: () => _openUrl(
+                  'https://github.com/Helix-Dev-Q/fortnite-builds-archive',
+                ),
               ),
             );
           }),
@@ -14699,14 +14713,22 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return 'Logged in as: $username';
   }
 
+  void _clearLauncherDiscordPresence() {
+    if (_launcherDiscordPresenceCleared) return;
+    _launcherDiscordRpc.clearActivity();
+    _launcherDiscordPresenceSignature = null;
+    _launcherDiscordPresenceCleared = true;
+  }
+
   void _syncLauncherDiscordPresence() {
     if (!Platform.isWindows) return;
+    if (!_settings.discordRpcEnabled) {
+      _clearLauncherDiscordPresence();
+      return;
+    }
 
     if (_gameDiscordPresenceHasPriority) {
-      if (_launcherDiscordPresenceCleared) return;
-      _launcherDiscordRpc.clearActivity();
-      _launcherDiscordPresenceSignature = null;
-      _launcherDiscordPresenceCleared = true;
+      _clearLauncherDiscordPresence();
       return;
     }
 
@@ -19855,8 +19877,9 @@ foreach ($app in $appPaths) {
                                         ),
                                         boxShadow: [
                                           BoxShadow(
-                                            color: _dialogShadowColor(context)
-                                                .withValues(alpha: 0.45),
+                                            color: _dialogShadowColor(
+                                              context,
+                                            ).withValues(alpha: 0.45),
                                             blurRadius: 14,
                                             offset: const Offset(0, 8),
                                           ),
@@ -20017,20 +20040,20 @@ foreach ($app in $appPaths) {
                             OutlinedButton.icon(
                               onPressed:
                                   (_settings.profileAvatarPath.isEmpty &&
-                                          _settings.username == 'Player')
-                                      ? null
-                                      : () async {
-                                          setState(() {
-                                            _setActiveSettingsUsername('Player');
-                                            _usernameController.text = '';
-                                            _settings = _settings.copyWith(
-                                              profileAvatarPath: '',
-                                            );
-                                          });
-                                          await _saveSettings(
-                                            applyControllers: false,
-                                          );
-                                        },
+                                      _settings.username == 'Player')
+                                  ? null
+                                  : () async {
+                                      setState(() {
+                                        _setActiveSettingsUsername('Player');
+                                        _usernameController.text = '';
+                                        _settings = _settings.copyWith(
+                                          profileAvatarPath: '',
+                                        );
+                                      });
+                                      await _saveSettings(
+                                        applyControllers: false,
+                                      );
+                                    },
                               icon: const Icon(Icons.restore_rounded),
                               label: const Text('Reset'),
                             ),
@@ -20107,6 +20130,26 @@ foreach ($app in $appPaths) {
                   },
                   title: const Text('Popup background blur'),
                   subtitle: const Text('Blur the background behind popups.'),
+                ),
+                const SizedBox(height: 8),
+                SwitchListTile(
+                  value: _settings.discordRpcEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      _settings = _settings.copyWith(discordRpcEnabled: value);
+                    });
+                    _syncLauncherDiscordPresence();
+                    if (!value) {
+                      unawaited(
+                        _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle(),
+                      );
+                    }
+                    unawaited(_saveSettings(toast: false));
+                  },
+                  title: const Text('Discord Rich Presence'),
+                  subtitle: const Text(
+                    'Display your status for ATLAS on Discord.',
+                  ),
                 ),
                 const SizedBox(height: 8),
                 SwitchListTile(
@@ -22957,6 +23000,7 @@ class LauncherSettings {
     required this.backendConnectionTipComplete,
     required this.darkModeEnabled,
     required this.popupBackgroundBlurEnabled,
+    required this.discordRpcEnabled,
     required this.backgroundImagePath,
     required this.backgroundBlur,
     required this.backgroundParticlesOpacity,
@@ -23002,6 +23046,7 @@ class LauncherSettings {
   final bool backendConnectionTipComplete;
   final bool darkModeEnabled;
   final bool popupBackgroundBlurEnabled;
+  final bool discordRpcEnabled;
   final String backgroundImagePath;
   final double backgroundBlur;
   final double backgroundParticlesOpacity;
@@ -23048,52 +23093,52 @@ class LauncherSettings {
     return normalized.replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  static final Set<String> legacyJsonKeys = Set<String>.unmodifiable(
-    const <String>{
-      'profileEmailPasswordAuth',
-      'ProfileUseEmailPasswordAuth',
-      'profileEmail',
-      'accountEmail',
-      'accountPassword',
-      'ProfileAuthQuickTipComplete',
-      'ProfileSetupComplete',
-      'darkMode',
-      'DarkMode',
-      'popupBackgroundBlur',
-      'PopupBackgroundBlur',
-      'BackgroundImagePath',
-      'BackgroundBlur',
-      'BackgroundParticlesOpacity',
-      'StartupAnimationEnabled',
-      'UpdateDefaultDllsOnLaunchEnabled',
-      'LauncherUpdateChecksEnabled',
-      'disableLauncherUpdateChecks',
-      'DisableLauncherUpdateChecks',
-      'disableLauncherUpdateCheck',
-      'DisableLauncherUpdateCheck',
-      'backendType',
-      'BackendConnectionType',
-      'BackendType',
-      'launchBackend',
-      'largePakPatcher',
-      'multiClientLaunching',
-      'hostHeadless',
-      'hostAutoRestart',
-      'deleteGfeSdkOnHostLaunch',
-      'deleteGfeSdkOnLaunch',
-      'gameServerPort',
-      'UnrealEnginePatcherPath',
-      'AuthenticationPatcherPath',
-      'MemoryPatcherPath',
-      'GameServerFilePath',
-      'LargePakPatcherFilePath',
-      'SavedBackends',
-      'SavedBackendsByProfile',
-      'savedBackendsByUser',
-      'SavedBackendsByUser',
-      'atlasPlaySeconds',
-    },
-  );
+  static final Set<String> legacyJsonKeys =
+      Set<String>.unmodifiable(const <String>{
+        'profileEmailPasswordAuth',
+        'ProfileUseEmailPasswordAuth',
+        'profileEmail',
+        'accountEmail',
+        'accountPassword',
+        'ProfileAuthQuickTipComplete',
+        'ProfileSetupComplete',
+        'darkMode',
+        'DarkMode',
+        'popupBackgroundBlur',
+        'PopupBackgroundBlur',
+        'DiscordRpcEnabled',
+        'BackgroundImagePath',
+        'BackgroundBlur',
+        'BackgroundParticlesOpacity',
+        'StartupAnimationEnabled',
+        'UpdateDefaultDllsOnLaunchEnabled',
+        'LauncherUpdateChecksEnabled',
+        'disableLauncherUpdateChecks',
+        'DisableLauncherUpdateChecks',
+        'disableLauncherUpdateCheck',
+        'DisableLauncherUpdateCheck',
+        'backendType',
+        'BackendConnectionType',
+        'BackendType',
+        'launchBackend',
+        'largePakPatcher',
+        'multiClientLaunching',
+        'hostHeadless',
+        'hostAutoRestart',
+        'deleteGfeSdkOnHostLaunch',
+        'deleteGfeSdkOnLaunch',
+        'gameServerPort',
+        'UnrealEnginePatcherPath',
+        'AuthenticationPatcherPath',
+        'MemoryPatcherPath',
+        'GameServerFilePath',
+        'LargePakPatcherFilePath',
+        'SavedBackends',
+        'SavedBackendsByProfile',
+        'savedBackendsByUser',
+        'SavedBackendsByUser',
+        'atlasPlaySeconds',
+      });
 
   static final Set<String> recognizedJsonKeys = Set<String>.unmodifiable(
     <String>{...LauncherSettings.defaults().toJson().keys, ...legacyJsonKeys},
@@ -23111,6 +23156,7 @@ class LauncherSettings {
     bool? backendConnectionTipComplete,
     bool? darkModeEnabled,
     bool? popupBackgroundBlurEnabled,
+    bool? discordRpcEnabled,
     String? backgroundImagePath,
     double? backgroundBlur,
     double? backgroundParticlesOpacity,
@@ -23161,6 +23207,7 @@ class LauncherSettings {
       darkModeEnabled: darkModeEnabled ?? this.darkModeEnabled,
       popupBackgroundBlurEnabled:
           popupBackgroundBlurEnabled ?? this.popupBackgroundBlurEnabled,
+      discordRpcEnabled: discordRpcEnabled ?? this.discordRpcEnabled,
       backgroundImagePath: backgroundImagePath ?? this.backgroundImagePath,
       backgroundBlur: backgroundBlur ?? this.backgroundBlur,
       backgroundParticlesOpacity:
@@ -23226,6 +23273,7 @@ class LauncherSettings {
       backendConnectionTipComplete: false,
       darkModeEnabled: true,
       popupBackgroundBlurEnabled: true,
+      discordRpcEnabled: true,
       backgroundImagePath: '',
       backgroundBlur: 15,
       backgroundParticlesOpacity: 1.0,
@@ -23414,6 +23462,10 @@ class LauncherSettings {
             json['PopupBackgroundBlur'],
         true,
       ),
+      discordRpcEnabled: asBool(
+        json['discordRpcEnabled'] ?? json['DiscordRpcEnabled'],
+        true,
+      ),
       backgroundImagePath:
           (json['backgroundImagePath'] ?? json['BackgroundImagePath'] ?? '')
               .toString(),
@@ -23435,12 +23487,11 @@ class LauncherSettings {
             json['UpdateDefaultDllsOnLaunchEnabled'],
         true,
       ),
-      launcherUpdateChecksEnabled: json.containsKey(
-            'disableLauncherUpdateChecks',
-          ) ||
-          json.containsKey('DisableLauncherUpdateChecks') ||
-          json.containsKey('disableLauncherUpdateCheck') ||
-          json.containsKey('DisableLauncherUpdateCheck')
+      launcherUpdateChecksEnabled:
+          json.containsKey('disableLauncherUpdateChecks') ||
+              json.containsKey('DisableLauncherUpdateChecks') ||
+              json.containsKey('disableLauncherUpdateCheck') ||
+              json.containsKey('DisableLauncherUpdateCheck')
           ? !asBool(
               json['disableLauncherUpdateChecks'] ??
                   json['DisableLauncherUpdateChecks'] ??
@@ -23550,6 +23601,7 @@ class LauncherSettings {
       'backendConnectionTipComplete': backendConnectionTipComplete,
       'darkModeEnabled': darkModeEnabled,
       'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
+      'discordRpcEnabled': discordRpcEnabled,
       'backgroundImagePath': backgroundImagePath,
       'backgroundBlur': backgroundBlur,
       'backgroundParticlesOpacity': backgroundParticlesOpacity,

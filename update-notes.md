@@ -1,4 +1,4 @@
-<!-- version: 1.2.3 -->
+<!-- version: 1.2.4 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,13 +15,8 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Changed Visual for Profile Settings and Selection
-- Added Start Up Menu in Settings
-- Auto Updates for Bundled/Default DLLs when selected as path
-- Toggle for Auto Updating DLLS
-- Toggle for Launcher Update Prompts
+- Added Discord RPC toggle in settings
+- Removed Some Files
 - Updated Magnesium
-# Fixes
-- Removed and Fixed Users skipping Quick Tips
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
