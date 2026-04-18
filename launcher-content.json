@@ -6,15 +6,6 @@
     "greetingEnabled": true,
     "heroRotationSeconds": 5,
     "slides": [
-      //{
-        //"image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/atlas_apps.png",
-        //"imageFit": "contain",
-        //"category": "SPOTLIGHT SUBMISSION",
-        //"title": "ATLAS Tutorial",
-        //"description": "Watch this YouTube tutorial to learn how to use ATLAS, made by Nova (@someth9ng)!",
-        //"buttonLabel": "Watch Video",
-        //"buttonUrl": "https://www.youtube.com/watch?v=a9ohl7o3c7U"
-      //},
       {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/rev.png",
         "imageFit": "contain",
