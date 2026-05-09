@@ -1,4 +1,4 @@
-<!-- version: 1.2.4 -->
+<!-- version: 1.2.5 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,8 +15,8 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added Discord RPC toggle in settings
-- Removed Some Files
+- Added DLL Presets to Settings
+- Provided 2 New DLLs in Presets
 - Updated Magnesium
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

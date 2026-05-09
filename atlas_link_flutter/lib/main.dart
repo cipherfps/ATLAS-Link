@@ -648,8 +648,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.4';
-  static const String _launcherBuildLabel = 'Stable 1.2.4';
+  static const String _launcherVersion = '1.2.5';
+  static const String _launcherBuildLabel = 'Stable 1.2.5';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -714,6 +714,12 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
+  static const int _bundledDllPresetSeedVersion = 2;
+  static const String _rebootUltimateDefaultPresetName =
+      'Reboot Ultimate GS Preset';
+  static const String _legacyRebootUltimateDefaultPresetName =
+      'Reboot Ultimate V1 Gameserver';
+  static const String _retracPakDefaultPresetName = 'Retrac Pak Authentication';
   static const List<_BundledDllSpec> _bundledDllSpecs = <_BundledDllSpec>[
     _BundledDllSpec(
       assetPath: 'assets/dlls/Magnesium.dll',
@@ -934,8 +940,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _settingsFile;
   late File _installStateFile;
   late File _launcherContentCacheFile;
+  late File _dllPresetsFile;
   late File _logFile;
   bool _storageReady = false;
+  List<_DllPreset> _dllPresets = <_DllPreset>[];
+  int _dllPresetSeedVersion = 0;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
 
@@ -1022,6 +1031,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       unawaited(_cleanupLauncherUpdateInstallerCacheOnLaunch());
       await _loadInstallState();
       await _loadSettings();
+      await _loadDllPresets();
       await _loadLauncherContent();
       await _reconcileInstallState();
       final priorLauncherVersion = _installState.lastSeenLauncherVersion.trim();
@@ -1048,6 +1058,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       _syncControllers();
       await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
+      await _ensureBundledDllPresetSeeds();
       await _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle();
       unawaited(
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
@@ -1339,6 +1350,47 @@ class _LauncherScreenState extends State<LauncherScreen>
         }),
       );
     });
+  }
+
+  Widget _dialogPopupTransition(
+    BuildContext dialogContext,
+    Animation<double> animation,
+    Animation<double> _,
+    Widget child, {
+    double blurSigma = 3.2,
+    double beginScale = 0.985,
+  }) {
+    final curved = CurvedAnimation(
+      parent: animation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: _settings.popupBackgroundBlurEnabled
+              ? BackdropFilter(
+                  filter: ImageFilter.blur(
+                    sigmaX: blurSigma * curved.value,
+                    sigmaY: blurSigma * curved.value,
+                  ),
+                  child: Container(
+                    color: _dialogBarrierColor(dialogContext, curved.value),
+                  ),
+                )
+              : Container(
+                  color: _dialogBarrierColor(dialogContext, curved.value),
+                ),
+        ),
+        FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: beginScale, end: 1.0).animate(curved),
+            child: child,
+          ),
+        ),
+      ],
+    );
   }
 
   void _queueLauncherAutoUpdateCheckOnLaunch() {
@@ -2171,6 +2223,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _launcherContentCacheFile = File(
       _joinPath([_dataDir.path, 'launcher_content_cache.json']),
     );
+    _dllPresetsFile = File(_joinPath([_dataDir.path, 'dll_presets.json']));
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
     // Reset launcher logs on every app start so each run has a clean log.
     // If truncation fails (locked, permissions), keep going.
@@ -3181,6 +3234,201 @@ class _LauncherScreenState extends State<LauncherScreen>
       _log('settings', 'Invalid settings file. Loaded defaults. $error');
       await _migrateAppearanceSettingsFileIfNeeded();
     }
+  }
+
+  Future<void> _loadDllPresets() async {
+    if (!_storageReady) return;
+    if (!await _dllPresetsFile.exists()) {
+      _dllPresets = <_DllPreset>[];
+      _dllPresetSeedVersion = 0;
+      return;
+    }
+
+    try {
+      int asInt(dynamic value, int fallback) {
+        if (value is int) return value;
+        if (value is num) return value.toInt();
+        if (value is String) return int.tryParse(value) ?? fallback;
+        return fallback;
+      }
+
+      final raw = await _dllPresetsFile.readAsString();
+      final decoded = jsonDecode(raw);
+      _dllPresetSeedVersion = decoded is Map
+          ? asInt(
+              decoded['bundledDllPresetSeedVersion'] ??
+                  decoded['dllPresetSeedVersion'],
+              0,
+            )
+          : 0;
+      final presetsRaw = decoded is Map
+          ? decoded['presets']
+          : decoded is List
+          ? decoded
+          : null;
+      if (presetsRaw is! List) {
+        _dllPresets = <_DllPreset>[];
+        return;
+      }
+
+      final parsed = <_DllPreset>[];
+      for (final item in presetsRaw) {
+        if (item is Map<String, dynamic>) {
+          final preset = _DllPreset.fromJson(item);
+          if (preset.name.trim().isNotEmpty) parsed.add(preset);
+        } else if (item is Map) {
+          final preset = _DllPreset.fromJson(item.cast<String, dynamic>());
+          if (preset.name.trim().isNotEmpty) parsed.add(preset);
+        }
+      }
+      _dllPresets = _normalizedDllPresets(parsed);
+    } catch (error) {
+      _dllPresets = <_DllPreset>[];
+      _dllPresetSeedVersion = 0;
+      _log('settings', 'Invalid DLL presets file. Loaded no presets. $error');
+    }
+  }
+
+  List<_DllPreset> _normalizedDllPresets(Iterable<_DllPreset> presets) {
+    final byName = <String, _DllPreset>{};
+    for (final preset in presets) {
+      final name = preset.name.trim();
+      if (name.isEmpty) continue;
+      byName[name.toLowerCase()] = preset.copyWith(name: name);
+    }
+    final normalized = byName.values.toList()
+      ..sort(
+        (left, right) =>
+            right.updatedAtEpochMs.compareTo(left.updatedAtEpochMs),
+      );
+    return normalized;
+  }
+
+  Future<void> _saveDllPresets(List<_DllPreset> presets) async {
+    if (!_storageReady) return;
+    final normalized = _normalizedDllPresets(presets);
+    final payload = <String, dynamic>{
+      'version': 1,
+      'bundledDllPresetSeedVersion': _dllPresetSeedVersion,
+      'updatedAtEpochMs': DateTime.now().millisecondsSinceEpoch,
+      'presets': normalized.map((preset) => preset.toJson()).toList(),
+    };
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
+    await _dllPresetsFile.writeAsString(pretty, flush: true);
+    _dllPresets = normalized;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _ensureBundledDllPresetSeeds() async {
+    if (!_storageReady) return;
+    if (_dllPresetSeedVersion >= _bundledDllPresetSeedVersion) return;
+
+    try {
+      final seededPresets = await _buildBundledDllPresetSeeds();
+      final nextPresets = List<_DllPreset>.from(_dllPresets);
+
+      for (final preset in seededPresets) {
+        final aliases = _bundledDefaultDllPresetAliases(preset.name);
+        final existing = nextPresets
+            .where((item) => aliases.contains(item.name.trim().toLowerCase()))
+            .toList();
+        nextPresets.removeWhere(
+          (item) => aliases.contains(item.name.trim().toLowerCase()),
+        );
+        nextPresets.add(
+          preset.copyWith(
+            createdAtEpochMs: existing.isEmpty
+                ? preset.createdAtEpochMs
+                : existing.first.createdAtEpochMs,
+          ),
+        );
+      }
+
+      _dllPresetSeedVersion = _bundledDllPresetSeedVersion;
+      await _saveDllPresets(nextPresets);
+    } catch (error) {
+      _log('settings', 'Failed to seed bundled DLL presets: $error');
+    }
+  }
+
+  Future<List<_DllPreset>> _buildBundledDllPresetSeeds() async {
+    Future<String> bundledPath(String fileName, String label) async {
+      final path = await _ensureBundledDll(
+        bundledAssetPath: 'assets/dlls/$fileName',
+        bundledFileName: fileName,
+        label: label,
+        showFeedback: false,
+      );
+      return path?.trim() ?? '';
+    }
+
+    final consolePath = await bundledPath(
+      'console.dll',
+      'unreal engine patcher',
+    );
+    final retracAuthPath = await bundledPath(
+      'Retrac 14.40 Authenticator.dll',
+      'Retrac authentication patcher',
+    );
+    final memoryPath = await bundledPath('memory.dll', 'memory patcher');
+    final magnesiumPath = await bundledPath('Magnesium.dll', 'game server');
+    final rebootGameServerPath = await bundledPath(
+      'Reboot Ultimate V1 Gameserver.dll',
+      'Reboot Ultimate V1 game server',
+    );
+    final largePakPath = await bundledPath(
+      'LargePakPatch.dll',
+      'large pak patcher',
+    );
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    return <_DllPreset>[
+      _DllPreset(
+        name: _rebootUltimateDefaultPresetName,
+        createdAtEpochMs: now,
+        updatedAtEpochMs: now + 1,
+        unrealEnginePatcherPath: consolePath,
+        authenticationPatcherPath: retracAuthPath,
+        memoryPatcherPath: memoryPath,
+        gameServerFilePath: rebootGameServerPath,
+        largePakPatcherFilePath: largePakPath,
+      ),
+      _DllPreset(
+        name: _retracPakDefaultPresetName,
+        createdAtEpochMs: now,
+        updatedAtEpochMs: now,
+        unrealEnginePatcherPath: consolePath,
+        authenticationPatcherPath: retracAuthPath,
+        memoryPatcherPath: memoryPath,
+        gameServerFilePath: magnesiumPath,
+        largePakPatcherFilePath: largePakPath,
+      ),
+    ];
+  }
+
+  Set<String> _bundledDefaultDllPresetAliases(String name) {
+    final lowerName = name.trim().toLowerCase();
+    if (lowerName == _rebootUltimateDefaultPresetName.toLowerCase() ||
+        lowerName == _legacyRebootUltimateDefaultPresetName.toLowerCase()) {
+      return <String>{
+        _rebootUltimateDefaultPresetName.toLowerCase(),
+        _legacyRebootUltimateDefaultPresetName.toLowerCase(),
+      };
+    }
+    if (lowerName == _retracPakDefaultPresetName.toLowerCase()) {
+      return <String>{_retracPakDefaultPresetName.toLowerCase()};
+    }
+    return <String>{lowerName};
+  }
+
+  bool _isBundledDefaultDllPresetName(String name) {
+    final aliases = _bundledDefaultDllPresetAliases(name);
+    return aliases.contains(_rebootUltimateDefaultPresetName.toLowerCase()) ||
+        aliases.contains(_retracPakDefaultPresetName.toLowerCase());
+  }
+
+  bool _isBundledDefaultDllPreset(_DllPreset preset) {
+    return _isBundledDefaultDllPresetName(preset.name);
   }
 
   Future<void> _mergeSettingsSchemaIntoExistingFileIfNeeded() async {
@@ -7574,41 +7822,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             },
           );
         },
-        transitionBuilder: (dialogContext, animation, _, child) {
-          final curved = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          );
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: _settings.popupBackgroundBlurEnabled
-                    ? BackdropFilter(
-                        filter: ImageFilter.blur(
-                          sigmaX: 3 * curved.value,
-                          sigmaY: 3 * curved.value,
-                        ),
-                        child: Container(
-                          color: _dialogBarrierColor(
-                            dialogContext,
-                            curved.value,
-                          ),
-                        ),
-                      )
-                    : Container(
-                        color: _dialogBarrierColor(dialogContext, curved.value),
-                      ),
-              ),
-              FadeTransition(
-                opacity: curved,
-                child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.985, end: 1).animate(curved),
-                  child: child,
-                ),
-              ),
-            ],
-          );
-        },
+        transitionBuilder: _dialogPopupTransition,
       );
     } finally {
       await Future<void>.delayed(const Duration(milliseconds: 220));
@@ -8142,41 +8356,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ),
           );
         },
-        transitionBuilder: (dialogContext, animation, _, child) {
-          final curved = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          );
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: _settings.popupBackgroundBlurEnabled
-                    ? BackdropFilter(
-                        filter: ImageFilter.blur(
-                          sigmaX: 3 * curved.value,
-                          sigmaY: 3 * curved.value,
-                        ),
-                        child: Container(
-                          color: _dialogBarrierColor(
-                            dialogContext,
-                            curved.value,
-                          ),
-                        ),
-                      )
-                    : Container(
-                        color: _dialogBarrierColor(dialogContext, curved.value),
-                      ),
-              ),
-              FadeTransition(
-                opacity: curved,
-                child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.985, end: 1).animate(curved),
-                  child: child,
-                ),
-              ),
-            ],
-          );
-        },
+        transitionBuilder: _dialogPopupTransition,
       );
       if (shouldSave != true || !mounted) return;
 
@@ -10450,10 +10630,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       notifier.value = _ImportProgress(message, progress);
     }
 
-    showDialog<void>(
+    showGeneralDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (dialogContext) {
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
         return PopScope(
           canPop: false,
           child: Dialog(
@@ -10532,6 +10715,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ),
         );
       },
+      transitionBuilder: _dialogPopupTransition,
     );
 
     try {
@@ -12576,6 +12760,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
     await deleteFile(_installStateFile);
     await deleteFile(_settingsFile);
+    await deleteFile(_dllPresetsFile);
     await deleteFile(_logFile);
 
     _logs.clear();
@@ -12608,6 +12793,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _updatingDefaultDlls = false;
         _bundledDllUpdatedFileNames = <String>{};
         _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
+        _dllPresets = <_DllPreset>[];
+        _dllPresetSeedVersion = 0;
         _launcherUpdateDialogVisible = false;
         _launcherUpdateAutoCheckQueued = false;
         _launcherUpdateAutoChecked = false;
@@ -12656,6 +12843,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _updatingDefaultDlls = false;
       _bundledDllUpdatedFileNames = <String>{};
       _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
+      _dllPresets = <_DllPreset>[];
+      _dllPresetSeedVersion = 0;
       _launcherUpdateDialogVisible = false;
       _launcherUpdateAutoCheckQueued = false;
       _launcherUpdateAutoChecked = false;
@@ -12695,6 +12884,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     // Restore bundled DLL defaults (Magnesium/memory/Tellurium/console) after
     // clearing internal files.
     await _applyBundledDllDefaults();
+    await _ensureBundledDllPresetSeeds();
     await _saveSettings(toast: false);
     unawaited(_checkForBundledDllDefaultUpdates(silent: true));
 
@@ -12810,6 +13000,1319 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       } else {
         _updatingDefaultDlls = false;
       }
+    }
+  }
+
+  String _suggestDllPresetName([Iterable<_DllPreset>? presets]) {
+    final existing = (presets ?? _dllPresets)
+        .map((preset) => preset.name.trim().toLowerCase())
+        .where((name) => name.isNotEmpty)
+        .toSet();
+    var index = existing.length + 1;
+    while (true) {
+      final candidate = 'DLL Preset $index';
+      if (!existing.contains(candidate.toLowerCase())) return candidate;
+      index++;
+    }
+  }
+
+  _DllPreset _currentDllPreset(String name, {_DllPreset? replacing}) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return _DllPreset(
+      name: name.trim(),
+      createdAtEpochMs: replacing?.createdAtEpochMs ?? now,
+      updatedAtEpochMs: now,
+      unrealEnginePatcherPath: _unrealEnginePatcherController.text.trim(),
+      authenticationPatcherPath: _authenticationPatcherController.text.trim(),
+      memoryPatcherPath: _memoryPatcherController.text.trim(),
+      gameServerFilePath: _gameServerFileController.text.trim(),
+      largePakPatcherFilePath: _largePakPatcherController.text.trim(),
+    );
+  }
+
+  int _missingDllPresetPathCount(_DllPreset preset) {
+    var missing = 0;
+    for (final path in preset.configuredPaths) {
+      if (_configuredDllPathMissing(path)) missing++;
+    }
+    return missing;
+  }
+
+  Future<void> _applyDllPreset(_DllPreset preset) async {
+    if (!mounted) return;
+    final missingCount = _missingDllPresetPathCount(preset);
+    setState(() {
+      _settings = _settings.copyWith(
+        unrealEnginePatcherPath: preset.unrealEnginePatcherPath,
+        authenticationPatcherPath: preset.authenticationPatcherPath,
+        memoryPatcherPath: preset.memoryPatcherPath,
+        gameServerFilePath: preset.gameServerFilePath,
+        largePakPatcherFilePath: preset.largePakPatcherFilePath,
+      );
+      _unrealEnginePatcherController.text = preset.unrealEnginePatcherPath;
+      _authenticationPatcherController.text = preset.authenticationPatcherPath;
+      _memoryPatcherController.text = preset.memoryPatcherPath;
+      _gameServerFileController.text = preset.gameServerFilePath;
+      _largePakPatcherController.text = preset.largePakPatcherFilePath;
+    });
+    await _saveSettings(toast: false, applyControllers: false);
+    unawaited(
+      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
+    );
+    if (!mounted) return;
+    _toast(
+      missingCount > 0
+          ? 'Loaded DLL Preset ($missingCount missing file${missingCount == 1 ? '' : 's'})'
+          : 'Loaded DLL Preset',
+    );
+    _log('settings', 'Loaded DLL Preset "${preset.name}".');
+  }
+
+  Future<_DllPreset?> _showDllPresetEditDialog(
+    _DllPreset preset,
+    Iterable<_DllPreset> existingPresets,
+  ) async {
+    if (!mounted) return null;
+
+    final nameController = TextEditingController(text: preset.name);
+    final unrealController = TextEditingController(
+      text: preset.unrealEnginePatcherPath,
+    );
+    final authController = TextEditingController(
+      text: preset.authenticationPatcherPath,
+    );
+    final memoryController = TextEditingController(
+      text: preset.memoryPatcherPath,
+    );
+    final gameServerController = TextEditingController(
+      text: preset.gameServerFilePath,
+    );
+    final largePakController = TextEditingController(
+      text: preset.largePakPatcherFilePath,
+    );
+    var errorText = '';
+    var saving = false;
+
+    try {
+      return await showGeneralDialog<_DllPreset>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 220),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: StatefulBuilder(
+                    builder: (dialogContext, setDialogState) {
+                      final onSurface = Theme.of(
+                        dialogContext,
+                      ).colorScheme.onSurface;
+                      final secondary = Theme.of(
+                        dialogContext,
+                      ).colorScheme.secondary;
+                      final titleStyle = Theme.of(dialogContext)
+                          .textTheme
+                          .titleLarge
+                          ?.copyWith(fontWeight: FontWeight.w800);
+
+                      void clearError() {
+                        if (errorText.isEmpty) return;
+                        setDialogState(() => errorText = '');
+                      }
+
+                      Future<void> pickPresetFile(
+                        TextEditingController controller,
+                        String label,
+                      ) async {
+                        if (saving) return;
+                        final path = await _pickSingleFile(
+                          dialogTitle: 'Select $label',
+                          allowedExtensions: const ['dll'],
+                        );
+                        if (path == null) return;
+                        setDialogState(() {
+                          controller.text = path;
+                          errorText = '';
+                        });
+                      }
+
+                      void saveEditedPreset() {
+                        if (saving) return;
+                        final name = nameController.text.trim();
+                        if (name.isEmpty) {
+                          setDialogState(() {
+                            errorText = 'Enter a preset name';
+                          });
+                          return;
+                        }
+
+                        final originalLower = preset.name.trim().toLowerCase();
+                        final nextLower = name.toLowerCase();
+                        final duplicate = existingPresets.any((item) {
+                          final itemLower = item.name.trim().toLowerCase();
+                          return itemLower == nextLower &&
+                              itemLower != originalLower;
+                        });
+                        if (duplicate) {
+                          setDialogState(() {
+                            errorText = 'A DLL preset with that name exists';
+                          });
+                          return;
+                        }
+
+                        final edited = preset.copyWith(
+                          name: name,
+                          updatedAtEpochMs:
+                              DateTime.now().millisecondsSinceEpoch,
+                          unrealEnginePatcherPath: unrealController.text.trim(),
+                          authenticationPatcherPath: authController.text.trim(),
+                          memoryPatcherPath: memoryController.text.trim(),
+                          gameServerFilePath: gameServerController.text.trim(),
+                          largePakPatcherFilePath: largePakController.text
+                              .trim(),
+                        );
+                        if (!edited.hasAnyPath) {
+                          setDialogState(() {
+                            errorText =
+                                'Select at least one DLL path before saving';
+                          });
+                          return;
+                        }
+
+                        saving = true;
+                        Navigator.of(dialogContext).pop(edited);
+                      }
+
+                      Widget pathField({
+                        required String label,
+                        required TextEditingController controller,
+                      }) {
+                        final field = TextField(
+                          controller: controller,
+                          enabled: !saving,
+                          onChanged: (_) => clearError(),
+                          decoration: _backendFieldDecoration(
+                            hintText: 'No file selected',
+                          ),
+                          style: TextStyle(
+                            color: onSurface.withValues(alpha: 0.9),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        );
+
+                        final actions = Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Choose $label',
+                              onPressed: saving
+                                  ? null
+                                  : () => unawaited(
+                                      pickPresetFile(controller, label),
+                                    ),
+                              icon: const Icon(Icons.folder_open_rounded),
+                              style: IconButton.styleFrom(
+                                minimumSize: const Size(34, 34),
+                                padding: const EdgeInsets.all(7),
+                                foregroundColor: onSurface.withValues(
+                                  alpha: 0.9,
+                                ),
+                                backgroundColor: _adaptiveScrimColor(
+                                  dialogContext,
+                                  darkAlpha: 0.18,
+                                  lightAlpha: 0.18,
+                                ),
+                                side: BorderSide(
+                                  color: onSurface.withValues(alpha: 0.18),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            IconButton(
+                              tooltip: 'Clear $label',
+                              onPressed: saving
+                                  ? null
+                                  : () {
+                                      setDialogState(() {
+                                        controller.clear();
+                                        errorText = '';
+                                      });
+                                    },
+                              icon: const Icon(Icons.close_rounded),
+                              style: IconButton.styleFrom(
+                                minimumSize: const Size(34, 34),
+                                padding: const EdgeInsets.all(7),
+                                foregroundColor: onSurface.withValues(
+                                  alpha: 0.76,
+                                ),
+                                backgroundColor: _adaptiveScrimColor(
+                                  dialogContext,
+                                  darkAlpha: 0.12,
+                                  lightAlpha: 0.14,
+                                ),
+                                side: BorderSide(
+                                  color: onSurface.withValues(alpha: 0.14),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+
+                        return LayoutBuilder(
+                          builder: (context, constraints) {
+                            final compact = constraints.maxWidth < 560;
+                            final labelWidget = Text(
+                              label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                                color: onSurface.withValues(alpha: 0.62),
+                              ),
+                            );
+                            if (compact) {
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  labelWidget,
+                                  const SizedBox(height: 7),
+                                  Row(
+                                    children: [
+                                      Expanded(child: field),
+                                      const SizedBox(width: 8),
+                                      actions,
+                                    ],
+                                  ),
+                                ],
+                              );
+                            }
+
+                            return Row(
+                              children: [
+                                SizedBox(width: 164, child: labelWidget),
+                                const SizedBox(width: 10),
+                                Expanded(child: field),
+                                const SizedBox(width: 8),
+                                actions,
+                              ],
+                            );
+                          },
+                        );
+                      }
+
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: _dialogSurfaceColor(dialogContext),
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: _onSurface(dialogContext, 0.1),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _dialogShadowColor(dialogContext),
+                              blurRadius: 34,
+                              offset: const Offset(0, 18),
+                            ),
+                          ],
+                        ),
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.edit_rounded, color: secondary),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Edit DLL Preset',
+                                    style: titleStyle,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close',
+                                  onPressed: saving
+                                      ? null
+                                      : () => Navigator.of(
+                                          dialogContext,
+                                        ).maybePop(),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                            TextField(
+                              controller: nameController,
+                              enabled: !saving,
+                              onChanged: (_) => clearError(),
+                              decoration: _backendFieldDecoration(
+                                hintText: 'Preset name',
+                              ),
+                              style: TextStyle(
+                                color: onSurface.withValues(alpha: 0.92),
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 320),
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  children: [
+                                    pathField(
+                                      label: 'Unreal Engine Patcher',
+                                      controller: unrealController,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    pathField(
+                                      label: 'Authentication Patcher',
+                                      controller: authController,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    pathField(
+                                      label: 'Memory Patcher',
+                                      controller: memoryController,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    pathField(
+                                      label: 'Game Server',
+                                      controller: gameServerController,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    pathField(
+                                      label: 'Large Pak Patcher',
+                                      controller: largePakController,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (errorText.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Text(
+                                errorText,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    dialogContext,
+                                  ).colorScheme.error,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 16),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                TextButton(
+                                  onPressed: saving
+                                      ? null
+                                      : () => Navigator.of(
+                                          dialogContext,
+                                        ).maybePop(),
+                                  child: const Text('Cancel'),
+                                ),
+                                const SizedBox(width: 8),
+                                FilledButton.icon(
+                                  onPressed: saving ? null : saveEditedPreset,
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    shape: const StadiumBorder(),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 11,
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.save_rounded),
+                                  label: const Text('Save Changes'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: _dialogPopupTransition,
+      );
+    } finally {
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+      nameController.dispose();
+      unrealController.dispose();
+      authController.dispose();
+      memoryController.dispose();
+      gameServerController.dispose();
+      largePakController.dispose();
+    }
+  }
+
+  Future<void> _showDllPresetsDialog() async {
+    if (!mounted) return;
+    await _loadDllPresets();
+    await _ensureBundledDllPresetSeeds();
+    if (!mounted) return;
+
+    final nameController = TextEditingController(text: _suggestDllPresetName());
+    final nameFocusNode = FocusNode();
+    var dialogPresets = List<_DllPreset>.from(_dllPresets);
+    var errorText = '';
+    var busy = false;
+    var dialogClosed = false;
+
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 220),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 720),
+                  child: StatefulBuilder(
+                    builder: (dialogContext, setDialogState) {
+                      Future<void> saveCurrentPreset() async {
+                        if (busy) return;
+                        final name = nameController.text.trim();
+                        if (name.isEmpty) {
+                          setDialogState(() {
+                            errorText = 'Enter a preset name';
+                          });
+                          return;
+                        }
+                        if (_isBundledDefaultDllPresetName(name)) {
+                          setDialogState(() {
+                            errorText =
+                                'Default DLL presets cannot be overwritten';
+                          });
+                          return;
+                        }
+
+                        final lowerName = name.toLowerCase();
+                        _DllPreset? replacing;
+                        for (final preset in dialogPresets) {
+                          if (preset.name.trim().toLowerCase() == lowerName) {
+                            replacing = preset;
+                            break;
+                          }
+                        }
+                        final nextPreset = _currentDllPreset(
+                          name,
+                          replacing: replacing,
+                        );
+                        if (!nextPreset.hasAnyPath) {
+                          setDialogState(() {
+                            errorText =
+                                'Select at least one DLL path before saving';
+                          });
+                          return;
+                        }
+
+                        setDialogState(() {
+                          busy = true;
+                          errorText = '';
+                        });
+                        try {
+                          final nextPresets =
+                              dialogPresets
+                                  .where(
+                                    (preset) =>
+                                        preset.name.trim().toLowerCase() !=
+                                        lowerName,
+                                  )
+                                  .toList()
+                                ..add(nextPreset);
+                          await _saveDllPresets(nextPresets);
+                          if (dialogClosed || !mounted) return;
+                          dialogPresets = List<_DllPreset>.from(_dllPresets);
+                          setDialogState(() {
+                            busy = false;
+                            nameController.text = _suggestDllPresetName(
+                              dialogPresets,
+                            );
+                          });
+                          _toast('DLL preset saved');
+                          _log(
+                            'settings',
+                            'Saved DLL preset "${nextPreset.name}" to ${_dllPresetsFile.path}.',
+                          );
+                        } catch (error) {
+                          if (dialogClosed || !mounted) return;
+                          setDialogState(() {
+                            busy = false;
+                            errorText = 'Failed to save DLL preset';
+                          });
+                          _log('settings', 'Failed to save DLL preset: $error');
+                        }
+                      }
+
+                      Future<void> deletePreset(_DllPreset preset) async {
+                        if (busy) return;
+                        if (_isBundledDefaultDllPreset(preset)) {
+                          setDialogState(() {
+                            errorText = 'Default DLL presets cannot be deleted';
+                          });
+                          return;
+                        }
+                        setDialogState(() {
+                          busy = true;
+                          errorText = '';
+                        });
+                        try {
+                          final lowerName = preset.name.trim().toLowerCase();
+                          final nextPresets = dialogPresets
+                              .where(
+                                (item) =>
+                                    item.name.trim().toLowerCase() != lowerName,
+                              )
+                              .toList();
+                          await _saveDllPresets(nextPresets);
+                          if (dialogClosed || !mounted) return;
+                          dialogPresets = List<_DllPreset>.from(_dllPresets);
+                          setDialogState(() {
+                            busy = false;
+                            nameController.text = _suggestDllPresetName(
+                              dialogPresets,
+                            );
+                          });
+                          _toast('DLL preset deleted');
+                        } catch (error) {
+                          if (dialogClosed || !mounted) return;
+                          setDialogState(() {
+                            busy = false;
+                            errorText = 'Failed to delete DLL preset';
+                          });
+                          _log(
+                            'settings',
+                            'Failed to delete DLL preset: $error',
+                          );
+                        }
+                      }
+
+                      Future<void> editPreset(_DllPreset preset) async {
+                        if (busy) return;
+                        if (_isBundledDefaultDllPreset(preset)) {
+                          setDialogState(() {
+                            errorText = 'Default DLL presets cannot be edited';
+                          });
+                          return;
+                        }
+                        final edited = await _showDllPresetEditDialog(
+                          preset,
+                          dialogPresets,
+                        );
+                        if (edited == null || dialogClosed || !mounted) {
+                          return;
+                        }
+
+                        setDialogState(() {
+                          busy = true;
+                          errorText = '';
+                        });
+                        try {
+                          final originalLower = preset.name
+                              .trim()
+                              .toLowerCase();
+                          final editedLower = edited.name.trim().toLowerCase();
+                          final nextPresets = dialogPresets.where((item) {
+                            final lower = item.name.trim().toLowerCase();
+                            return lower != originalLower &&
+                                lower != editedLower;
+                          }).toList()..add(edited);
+                          await _saveDllPresets(nextPresets);
+                          if (dialogClosed || !mounted) return;
+                          dialogPresets = List<_DllPreset>.from(_dllPresets);
+                          setDialogState(() {
+                            busy = false;
+                            nameController.text = _suggestDllPresetName(
+                              dialogPresets,
+                            );
+                          });
+                          _toast('DLL preset updated');
+                          _log(
+                            'settings',
+                            'Updated DLL preset "${edited.name}" in ${_dllPresetsFile.path}.',
+                          );
+                        } catch (error) {
+                          if (dialogClosed || !mounted) return;
+                          setDialogState(() {
+                            busy = false;
+                            errorText = 'Failed to update DLL preset';
+                          });
+                          _log(
+                            'settings',
+                            'Failed to update DLL preset: $error',
+                          );
+                        }
+                      }
+
+                      void loadPreset(_DllPreset preset) {
+                        if (busy) return;
+                        Navigator.of(dialogContext).pop();
+                        unawaited(_applyDllPreset(preset));
+                      }
+
+                      final onSurface = Theme.of(
+                        dialogContext,
+                      ).colorScheme.onSurface;
+                      final secondary = Theme.of(
+                        dialogContext,
+                      ).colorScheme.secondary;
+                      final titleStyle = Theme.of(dialogContext)
+                          .textTheme
+                          .titleLarge
+                          ?.copyWith(fontWeight: FontWeight.w800);
+
+                      bool saveTargetLocked() {
+                        return _isBundledDefaultDllPresetName(
+                          nameController.text.trim(),
+                        );
+                      }
+
+                      Widget savePreview() {
+                        final targetName = nameController.text.trim();
+                        final targetLower = targetName.toLowerCase();
+                        final lockedTarget = saveTargetLocked();
+                        final updatesExisting =
+                            targetLower.isNotEmpty &&
+                            dialogPresets.any(
+                              (preset) =>
+                                  preset.name.trim().toLowerCase() ==
+                                  targetLower,
+                            );
+                        final savePathEntries = <MapEntry<String, String>>[
+                          MapEntry(
+                            'Unreal Engine Patcher',
+                            _unrealEnginePatcherController.text.trim(),
+                          ),
+                          MapEntry(
+                            'Authentication Patcher',
+                            _authenticationPatcherController.text.trim(),
+                          ),
+                          MapEntry(
+                            'Memory Patcher',
+                            _memoryPatcherController.text.trim(),
+                          ),
+                          MapEntry(
+                            'Game Server',
+                            _gameServerFileController.text.trim(),
+                          ),
+                          MapEntry(
+                            'Large Pak Patcher',
+                            _largePakPatcherController.text.trim(),
+                          ),
+                        ];
+                        final targetLabel = targetName.isEmpty
+                            ? 'Name this preset before saving'
+                            : lockedTarget
+                            ? '"$targetName" is a locked default preset'
+                            : updatesExisting
+                            ? 'Saving will update "$targetName"'
+                            : 'Saving will create "$targetName"';
+
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 11),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            color: _onSurface(dialogContext, 0.045),
+                            border: Border.all(
+                              color: _onSurface(dialogContext, 0.10),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                targetLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: lockedTarget
+                                      ? const Color(0xFF86EFAC)
+                                      : onSurface.withValues(alpha: 0.86),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              for (
+                                var i = 0;
+                                i < savePathEntries.length;
+                                i++
+                              ) ...[
+                                Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 148,
+                                      child: Text(
+                                        savePathEntries[i].key,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w900,
+                                          color: onSurface.withValues(
+                                            alpha: 0.58,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        savePathEntries[i].value.isEmpty
+                                            ? 'No file selected'
+                                            : _basename(
+                                                savePathEntries[i].value,
+                                              ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w800,
+                                          color: onSurface.withValues(
+                                            alpha:
+                                                savePathEntries[i].value.isEmpty
+                                                ? 0.52
+                                                : 0.9,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (i != savePathEntries.length - 1)
+                                  const SizedBox(height: 4),
+                              ],
+                            ],
+                          ),
+                        );
+                      }
+
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: _dialogSurfaceColor(dialogContext),
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: _onSurface(dialogContext, 0.1),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _dialogShadowColor(dialogContext),
+                              blurRadius: 34,
+                              offset: const Offset(0, 18),
+                            ),
+                          ],
+                        ),
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.tune_rounded,
+                                  color: Color(0xFFDEAF37),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text('DLL Presets', style: titleStyle),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close',
+                                  onPressed: busy
+                                      ? null
+                                      : () => Navigator.of(
+                                          dialogContext,
+                                        ).maybePop(),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final compact = constraints.maxWidth < 520;
+                                final nameField = TextField(
+                                  controller: nameController,
+                                  focusNode: nameFocusNode,
+                                  enabled: !busy,
+                                  onChanged: (_) {
+                                    setDialogState(() {
+                                      if (errorText.isNotEmpty) errorText = '';
+                                    });
+                                  },
+                                  decoration: _backendFieldDecoration(
+                                    hintText: 'Preset name',
+                                  ),
+                                  style: TextStyle(
+                                    color: onSurface.withValues(alpha: 0.9),
+                                  ),
+                                );
+                                final saveButton = FilledButton.icon(
+                                  onPressed: busy || saveTargetLocked()
+                                      ? null
+                                      : saveCurrentPreset,
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    shape: const StadiumBorder(),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 11,
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.save_rounded),
+                                  label: const Text('Save'),
+                                );
+                                if (compact) {
+                                  return Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      nameField,
+                                      const SizedBox(height: 10),
+                                      Align(
+                                        alignment: Alignment.centerRight,
+                                        child: saveButton,
+                                      ),
+                                    ],
+                                  );
+                                }
+                                return Row(
+                                  children: [
+                                    Expanded(child: nameField),
+                                    const SizedBox(width: 10),
+                                    saveButton,
+                                  ],
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            savePreview(),
+                            if (errorText.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                errorText,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    dialogContext,
+                                  ).colorScheme.error,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 14),
+                            Text(
+                              'Saved Presets',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                                color: onSurface.withValues(alpha: 0.72),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 300),
+                              child: dialogPresets.isEmpty
+                                  ? Container(
+                                      height: 90,
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(
+                                          color: _onSurface(
+                                            dialogContext,
+                                            0.12,
+                                          ),
+                                        ),
+                                        color: _onSurface(dialogContext, 0.05),
+                                      ),
+                                      child: Text(
+                                        'No DLL presets saved',
+                                        style: TextStyle(
+                                          color: onSurface.withValues(
+                                            alpha: 0.72,
+                                          ),
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    )
+                                  : ListView.separated(
+                                      shrinkWrap: true,
+                                      itemCount: dialogPresets.length,
+                                      separatorBuilder:
+                                          (context, separatorIndex) =>
+                                              const SizedBox(height: 8),
+                                      itemBuilder: (context, index) {
+                                        final preset = dialogPresets[index];
+                                        final pathEntries =
+                                            <MapEntry<String, String>>[
+                                              MapEntry(
+                                                'Unreal Engine Patcher',
+                                                preset.unrealEnginePatcherPath,
+                                              ),
+                                              MapEntry(
+                                                'Authentication Patcher',
+                                                preset
+                                                    .authenticationPatcherPath,
+                                              ),
+                                              MapEntry(
+                                                'Memory Patcher',
+                                                preset.memoryPatcherPath,
+                                              ),
+                                              MapEntry(
+                                                'Game Server',
+                                                preset.gameServerFilePath,
+                                              ),
+                                              MapEntry(
+                                                'Large Pak Patcher',
+                                                preset.largePakPatcherFilePath,
+                                              ),
+                                            ].where((entry) {
+                                              return entry.value
+                                                  .trim()
+                                                  .isNotEmpty;
+                                            }).toList();
+                                        final isDefaultPreset =
+                                            _isBundledDefaultDllPreset(preset);
+                                        final cardRadius =
+                                            BorderRadius.circular(16);
+                                        return _HoverScale(
+                                          scale: 1.006,
+                                          child: Material(
+                                            color: Colors.transparent,
+                                            borderRadius: cardRadius,
+                                            child: InkWell(
+                                              borderRadius: cardRadius,
+                                              onTap: busy
+                                                  ? null
+                                                  : () => loadPreset(preset),
+                                              child: AnimatedContainer(
+                                                duration: const Duration(
+                                                  milliseconds: 160,
+                                                ),
+                                                curve: Curves.easeOutCubic,
+                                                padding: const EdgeInsets.all(
+                                                  14,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  borderRadius: cardRadius,
+                                                  border: Border.all(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.14,
+                                                    ),
+                                                  ),
+                                                  color: _adaptiveScrimColor(
+                                                    dialogContext,
+                                                    darkAlpha: 0.08,
+                                                    lightAlpha: 0.14,
+                                                  ),
+                                                ),
+                                                child: Row(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.center,
+                                                  children: [
+                                                    Expanded(
+                                                      child: Column(
+                                                        crossAxisAlignment:
+                                                            CrossAxisAlignment
+                                                                .start,
+                                                        children: [
+                                                          LayoutBuilder(
+                                                            builder:
+                                                                (
+                                                                  context,
+                                                                  constraints,
+                                                                ) {
+                                                                  final nameStyle = TextStyle(
+                                                                    fontSize:
+                                                                        16,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w900,
+                                                                    color: onSurface
+                                                                        .withValues(
+                                                                          alpha:
+                                                                              0.96,
+                                                                        ),
+                                                                  );
+                                                                  final maxNameWidth =
+                                                                      constraints
+                                                                          .maxWidth
+                                                                          .isFinite
+                                                                      ? max(
+                                                                          0.0,
+                                                                          constraints.maxWidth -
+                                                                              (isDefaultPreset
+                                                                                  ? 82.0
+                                                                                  : 0.0),
+                                                                        )
+                                                                      : 320.0;
+                                                                  final painter =
+                                                                      TextPainter(
+                                                                        text: TextSpan(
+                                                                          text:
+                                                                              preset.name,
+                                                                          style:
+                                                                              nameStyle,
+                                                                        ),
+                                                                        textDirection:
+                                                                            Directionality.of(
+                                                                              context,
+                                                                            ),
+                                                                        textScaler:
+                                                                            MediaQuery.textScalerOf(
+                                                                              context,
+                                                                            ),
+                                                                        maxLines:
+                                                                            1,
+                                                                        ellipsis:
+                                                                            '...',
+                                                                      )..layout(
+                                                                        maxWidth:
+                                                                            maxNameWidth,
+                                                                      );
+                                                                  final dividerWidth = min(
+                                                                    painter
+                                                                        .width,
+                                                                    maxNameWidth,
+                                                                  );
+
+                                                                  return Column(
+                                                                    crossAxisAlignment:
+                                                                        CrossAxisAlignment
+                                                                            .start,
+                                                                    children: [
+                                                                      Row(
+                                                                        children: [
+                                                                          Flexible(
+                                                                            child: Text(
+                                                                              preset.name,
+                                                                              maxLines: 1,
+                                                                              overflow: TextOverflow.ellipsis,
+                                                                              style: nameStyle,
+                                                                            ),
+                                                                          ),
+                                                                          if (isDefaultPreset) ...[
+                                                                            const SizedBox(
+                                                                              width: 8,
+                                                                            ),
+                                                                            _dllPresetDefaultTag(
+                                                                              dialogContext,
+                                                                            ),
+                                                                          ],
+                                                                        ],
+                                                                      ),
+                                                                      const SizedBox(
+                                                                        height:
+                                                                            7,
+                                                                      ),
+                                                                      SizedBox(
+                                                                        width:
+                                                                            dividerWidth,
+                                                                        height:
+                                                                            1,
+                                                                        child: DecoratedBox(
+                                                                          decoration: BoxDecoration(
+                                                                            color: _onSurface(
+                                                                              dialogContext,
+                                                                              0.18,
+                                                                            ),
+                                                                          ),
+                                                                        ),
+                                                                      ),
+                                                                    ],
+                                                                  );
+                                                                },
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 8,
+                                                          ),
+                                                          if (pathEntries
+                                                              .isEmpty)
+                                                            Text(
+                                                              'No DLL paths saved',
+                                                              style: TextStyle(
+                                                                fontSize: 12.5,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w700,
+                                                                color: onSurface
+                                                                    .withValues(
+                                                                      alpha:
+                                                                          0.62,
+                                                                    ),
+                                                              ),
+                                                            )
+                                                          else
+                                                            Column(
+                                                              crossAxisAlignment:
+                                                                  CrossAxisAlignment
+                                                                      .start,
+                                                              children: [
+                                                                for (
+                                                                  var i = 0;
+                                                                  i <
+                                                                      pathEntries
+                                                                          .length;
+                                                                  i++
+                                                                ) ...[
+                                                                  Row(
+                                                                    children: [
+                                                                      SizedBox(
+                                                                        width:
+                                                                            148,
+                                                                        child: Text(
+                                                                          pathEntries[i]
+                                                                              .key,
+                                                                          maxLines:
+                                                                              1,
+                                                                          overflow:
+                                                                              TextOverflow.ellipsis,
+                                                                          style: TextStyle(
+                                                                            fontSize:
+                                                                                11,
+                                                                            fontWeight:
+                                                                                FontWeight.w900,
+                                                                            color: onSurface.withValues(
+                                                                              alpha: 0.58,
+                                                                            ),
+                                                                          ),
+                                                                        ),
+                                                                      ),
+                                                                      const SizedBox(
+                                                                        width:
+                                                                            8,
+                                                                      ),
+                                                                      Expanded(
+                                                                        child: Text(
+                                                                          _basename(
+                                                                            pathEntries[i].value,
+                                                                          ),
+                                                                          maxLines:
+                                                                              1,
+                                                                          overflow:
+                                                                              TextOverflow.ellipsis,
+                                                                          style: TextStyle(
+                                                                            fontSize:
+                                                                                12.5,
+                                                                            fontWeight:
+                                                                                FontWeight.w800,
+                                                                            color: onSurface.withValues(
+                                                                              alpha: 0.9,
+                                                                            ),
+                                                                          ),
+                                                                        ),
+                                                                      ),
+                                                                    ],
+                                                                  ),
+                                                                  if (i !=
+                                                                      pathEntries
+                                                                              .length -
+                                                                          1)
+                                                                    const SizedBox(
+                                                                      height: 4,
+                                                                    ),
+                                                                ],
+                                                              ],
+                                                            ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 12),
+                                                    if (!isDefaultPreset)
+                                                      Wrap(
+                                                        spacing: 6,
+                                                        runSpacing: 6,
+                                                        crossAxisAlignment:
+                                                            WrapCrossAlignment
+                                                                .center,
+                                                        children: [
+                                                          _versionCardAction(
+                                                            icon: Icons
+                                                                .edit_rounded,
+                                                            tooltip:
+                                                                'Edit preset',
+                                                            onTap: busy
+                                                                ? null
+                                                                : () => unawaited(
+                                                                    editPreset(
+                                                                      preset,
+                                                                    ),
+                                                                  ),
+                                                          ),
+                                                          _versionCardAction(
+                                                            icon: Icons
+                                                                .delete_outline_rounded,
+                                                            tooltip:
+                                                                'Delete preset',
+                                                            onTap: busy
+                                                                ? null
+                                                                : () => unawaited(
+                                                                    deletePreset(
+                                                                      preset,
+                                                                    ),
+                                                                  ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: _dialogPopupTransition,
+      );
+    } finally {
+      dialogClosed = true;
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+      nameFocusNode.dispose();
+      nameController.dispose();
     }
   }
 
@@ -13577,9 +15080,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           _titleActionButton(Icons.download_rounded, () {
             unawaited(
               _dismissLibraryImportTip(
-                onDismissedAction: () => _openUrl(
-                  'https://github.com/Helix-Dev-Q/fortnite-builds-archive',
-                ),
+                onDismissedAction: () =>
+                    _openUrl('https://fortforge.dev/builds'),
               ),
             );
           }),
@@ -17080,7 +18582,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Widget _versionCardAction({
     required IconData icon,
     required String tooltip,
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     return Tooltip(
@@ -17098,6 +18600,30 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             lightAlpha: 0.24,
           ),
           side: BorderSide(color: onSurface.withValues(alpha: 0.24)),
+        ),
+      ),
+    );
+  }
+
+  Widget _dllPresetDefaultTag(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF22C55E).withValues(alpha: dark ? 0.18 : 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: const Color(0xFF22C55E).withValues(alpha: 0.58),
+        ),
+      ),
+      child: Text(
+        'Default',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w900,
+          color: dark ? const Color(0xFF86EFAC) : const Color(0xFF166534),
         ),
       ),
     );
@@ -20404,6 +21930,20 @@ foreach ($app in $appPaths) {
                                 ),
                               ),
                               FilledButton.icon(
+                                onPressed: _showDllPresetsDialog,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFDEAF37),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 11,
+                                  ),
+                                ),
+                                icon: const Icon(Icons.tune_rounded),
+                                label: const Text('DLL Presets'),
+                              ),
+                              FilledButton.icon(
                                 onPressed: _resetLauncher,
                                 style: FilledButton.styleFrom(
                                   backgroundColor: const Color(0xFFB3261E),
@@ -20465,6 +22005,21 @@ foreach ($app in $appPaths) {
                                 ? 'Updating defaults...'
                                 : 'Update Default DLLs',
                           ),
+                        ),
+                        const SizedBox(width: 10),
+                        FilledButton.icon(
+                          onPressed: _showDllPresetsDialog,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFDEAF37),
+                            foregroundColor: Colors.white,
+                            shape: const StadiumBorder(),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 11,
+                            ),
+                          ),
+                          icon: const Icon(Icons.tune_rounded),
+                          label: const Text('DLL Presets'),
                         ),
                         const SizedBox(width: 10),
                         FilledButton.icon(
@@ -22983,6 +24538,115 @@ class LauncherInstallState {
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
       'backendConnectionTipComplete': backendConnectionTipComplete,
       'lastSeenLauncherVersion': lastSeenLauncherVersion,
+    };
+  }
+}
+
+class _DllPreset {
+  const _DllPreset({
+    required this.name,
+    required this.createdAtEpochMs,
+    required this.updatedAtEpochMs,
+    required this.unrealEnginePatcherPath,
+    required this.authenticationPatcherPath,
+    required this.memoryPatcherPath,
+    required this.gameServerFilePath,
+    required this.largePakPatcherFilePath,
+  });
+
+  final String name;
+  final int createdAtEpochMs;
+  final int updatedAtEpochMs;
+  final String unrealEnginePatcherPath;
+  final String authenticationPatcherPath;
+  final String memoryPatcherPath;
+  final String gameServerFilePath;
+  final String largePakPatcherFilePath;
+
+  Iterable<String> get configuredPaths sync* {
+    yield unrealEnginePatcherPath;
+    yield authenticationPatcherPath;
+    yield memoryPatcherPath;
+    yield gameServerFilePath;
+    yield largePakPatcherFilePath;
+  }
+
+  bool get hasAnyPath => configuredPaths.any((path) => path.trim().isNotEmpty);
+
+  _DllPreset copyWith({
+    String? name,
+    int? createdAtEpochMs,
+    int? updatedAtEpochMs,
+    String? unrealEnginePatcherPath,
+    String? authenticationPatcherPath,
+    String? memoryPatcherPath,
+    String? gameServerFilePath,
+    String? largePakPatcherFilePath,
+  }) {
+    return _DllPreset(
+      name: name ?? this.name,
+      createdAtEpochMs: createdAtEpochMs ?? this.createdAtEpochMs,
+      updatedAtEpochMs: updatedAtEpochMs ?? this.updatedAtEpochMs,
+      unrealEnginePatcherPath:
+          unrealEnginePatcherPath ?? this.unrealEnginePatcherPath,
+      authenticationPatcherPath:
+          authenticationPatcherPath ?? this.authenticationPatcherPath,
+      memoryPatcherPath: memoryPatcherPath ?? this.memoryPatcherPath,
+      gameServerFilePath: gameServerFilePath ?? this.gameServerFilePath,
+      largePakPatcherFilePath:
+          largePakPatcherFilePath ?? this.largePakPatcherFilePath,
+    );
+  }
+
+  factory _DllPreset.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
+    final createdAtEpochMs = asInt(json['createdAtEpochMs'], 0);
+    final updatedAtEpochMs = asInt(json['updatedAtEpochMs'], createdAtEpochMs);
+
+    return _DllPreset(
+      name: (json['name'] ?? '').toString().trim(),
+      createdAtEpochMs: createdAtEpochMs,
+      updatedAtEpochMs: updatedAtEpochMs,
+      unrealEnginePatcherPath:
+          (json['unrealEnginePatcherPath'] ??
+                  json['UnrealEnginePatcherPath'] ??
+                  '')
+              .toString(),
+      authenticationPatcherPath:
+          (json['authenticationPatcherPath'] ??
+                  json['AuthenticationPatcherPath'] ??
+                  '')
+              .toString(),
+      memoryPatcherPath:
+          (json['memoryPatcherPath'] ?? json['MemoryPatcherPath'] ?? '')
+              .toString(),
+      gameServerFilePath:
+          (json['gameServerFilePath'] ?? json['GameServerFilePath'] ?? '')
+              .toString(),
+      largePakPatcherFilePath:
+          (json['largePakPatcherFilePath'] ??
+                  json['LargePakPatcherFilePath'] ??
+                  '')
+              .toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'name': name,
+      'createdAtEpochMs': createdAtEpochMs,
+      'updatedAtEpochMs': updatedAtEpochMs,
+      'unrealEnginePatcherPath': unrealEnginePatcherPath,
+      'authenticationPatcherPath': authenticationPatcherPath,
+      'memoryPatcherPath': memoryPatcherPath,
+      'gameServerFilePath': gameServerFilePath,
+      'largePakPatcherFilePath': largePakPatcherFilePath,
     };
   }
 }

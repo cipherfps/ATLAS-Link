@@ -7,7 +7,7 @@
     "heroRotationSeconds": 5,
     "slides": [
       {
-        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/mineluke.png",
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/atlas_apps.png",
         "imageFit": "contain",
         "category": "SPOTLIGHT SUBMISSION",
         "title": "ATLAS Tutorial",
