@@ -714,7 +714,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
-  static const int _bundledDllPresetSeedVersion = 2;
+  static const int _bundledDllPresetSeedVersion = 3;
   static const String _rebootUltimateDefaultPresetName =
       'Reboot Ultimate GS Preset';
   static const String _legacyRebootUltimateDefaultPresetName =
@@ -3321,34 +3321,71 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _ensureBundledDllPresetSeeds() async {
     if (!_storageReady) return;
-    if (_dllPresetSeedVersion >= _bundledDllPresetSeedVersion) return;
 
     try {
       final seededPresets = await _buildBundledDllPresetSeeds();
       final nextPresets = List<_DllPreset>.from(_dllPresets);
+      var changed = _dllPresetSeedVersion < _bundledDllPresetSeedVersion;
 
       for (final preset in seededPresets) {
         final aliases = _bundledDefaultDllPresetAliases(preset.name);
         final existing = nextPresets
             .where((item) => aliases.contains(item.name.trim().toLowerCase()))
             .toList();
+        final existingPreset = existing.isEmpty ? null : existing.first;
+        final samePaths =
+            existingPreset != null &&
+            _dllPresetPathsMatch(existingPreset, preset);
+        final nextPreset = existingPreset == null
+            ? preset
+            : preset.copyWith(
+                createdAtEpochMs: existingPreset.createdAtEpochMs,
+                updatedAtEpochMs: samePaths
+                    ? existingPreset.updatedAtEpochMs
+                    : preset.updatedAtEpochMs,
+              );
+        final shouldReplace =
+            existing.length != 1 ||
+            existingPreset == null ||
+            existingPreset.name.trim() != preset.name ||
+            !samePaths;
+        if (!shouldReplace) continue;
+
         nextPresets.removeWhere(
           (item) => aliases.contains(item.name.trim().toLowerCase()),
         );
-        nextPresets.add(
-          preset.copyWith(
-            createdAtEpochMs: existing.isEmpty
-                ? preset.createdAtEpochMs
-                : existing.first.createdAtEpochMs,
-          ),
-        );
+        nextPresets.add(nextPreset);
+        changed = true;
       }
 
       _dllPresetSeedVersion = _bundledDllPresetSeedVersion;
-      await _saveDllPresets(nextPresets);
+      if (changed) await _saveDllPresets(nextPresets);
     } catch (error) {
       _log('settings', 'Failed to seed bundled DLL presets: $error');
     }
+  }
+
+  bool _dllPresetPathsMatch(_DllPreset left, _DllPreset right) {
+    bool samePath(String leftPath, String rightPath) {
+      final leftTrimmed = leftPath.trim();
+      final rightTrimmed = rightPath.trim();
+      if (leftTrimmed.isEmpty || rightTrimmed.isEmpty) {
+        return leftTrimmed == rightTrimmed;
+      }
+      return _normalizePath(leftTrimmed) == _normalizePath(rightTrimmed);
+    }
+
+    return samePath(
+          left.unrealEnginePatcherPath,
+          right.unrealEnginePatcherPath,
+        ) &&
+        samePath(
+          left.authenticationPatcherPath,
+          right.authenticationPatcherPath,
+        ) &&
+        samePath(left.memoryPatcherPath, right.memoryPatcherPath) &&
+        samePath(left.gameServerFilePath, right.gameServerFilePath) &&
+        samePath(left.largePakPatcherFilePath, right.largePakPatcherFilePath);
   }
 
   Future<List<_DllPreset>> _buildBundledDllPresetSeeds() async {
@@ -3365,6 +3402,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     final consolePath = await bundledPath(
       'console.dll',
       'unreal engine patcher',
+    );
+    final telluriumAuthPath = await bundledPath(
+      'Tellurium.dll',
+      'authentication patcher',
     );
     final retracAuthPath = await bundledPath(
       'Retrac 14.40 Authenticator.dll',
@@ -3388,7 +3429,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         createdAtEpochMs: now,
         updatedAtEpochMs: now + 1,
         unrealEnginePatcherPath: consolePath,
-        authenticationPatcherPath: retracAuthPath,
+        authenticationPatcherPath: telluriumAuthPath,
         memoryPatcherPath: memoryPath,
         gameServerFilePath: rebootGameServerPath,
         largePakPatcherFilePath: largePakPath,
