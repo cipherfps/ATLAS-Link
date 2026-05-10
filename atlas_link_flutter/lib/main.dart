@@ -648,8 +648,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.5';
-  static const String _launcherBuildLabel = 'Stable 1.2.5';
+  static const String _launcherVersion = '1.2.6';
+  static const String _launcherBuildLabel = 'Stable 1.2.6';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -714,12 +714,18 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
-  static const int _bundledDllPresetSeedVersion = 3;
+  static const int _bundledDllPresetSeedVersion = 4;
   static const String _rebootUltimateDefaultPresetName =
       'Reboot Ultimate GS Preset';
   static const String _legacyRebootUltimateDefaultPresetName =
       'Reboot Ultimate V1 Gameserver';
-  static const String _retracPakDefaultPresetName = 'Retrac Pak Authentication';
+  static const String _retracPakDefaultPresetName = '14.40 Pak Authenticator';
+  static const String _legacyRetracPakDefaultPresetName =
+      'Retrac Pak Authentication';
+  static const String _retracPakDefaultDllFileName =
+      '14.40 Pak Authenticator.dll';
+  static const String _legacyRetracPakDefaultDllFileName =
+      'Retrac 14.40 Authenticator.dll';
   static const List<_BundledDllSpec> _bundledDllSpecs = <_BundledDllSpec>[
     _BundledDllSpec(
       assetPath: 'assets/dlls/Magnesium.dll',
@@ -2411,6 +2417,18 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  bool _shouldMigrateLegacyRetracPakAuthPath(String configuredPath) {
+    final raw = configuredPath.trim();
+    if (raw.isEmpty) return false;
+    if (_basename(raw).toLowerCase() !=
+        _legacyRetracPakDefaultDllFileName.toLowerCase()) {
+      return false;
+    }
+    return !File(raw).existsSync() ||
+        _isManagedBundledDllPath(raw, _legacyRetracPakDefaultDllFileName) ||
+        _looksLikeBundledAssetDllPath(raw, _legacyRetracPakDefaultDllFileName);
+  }
+
   Future<String?> _computeGitBlobShaForFile(File file) async {
     try {
       if (!await file.exists()) return null;
@@ -3044,6 +3062,28 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
+    final configuredLegacyRetracAuth = nextSettings.authenticationPatcherPath
+        .trim();
+    if (_shouldMigrateLegacyRetracPakAuthPath(configuredLegacyRetracAuth)) {
+      final retracAuthPath = await _ensureBundledDll(
+        bundledAssetPath: 'assets/dlls/$_retracPakDefaultDllFileName',
+        bundledFileName: _retracPakDefaultDllFileName,
+        label: 'Pak authentication patcher',
+        overwriteFallbackCopy: forceResetBundledPaths,
+      );
+      if (retracAuthPath != null && retracAuthPath.trim().isNotEmpty) {
+        nextSettings = nextSettings.copyWith(
+          authenticationPatcherPath: retracAuthPath,
+        );
+        _authenticationPatcherController.text = retracAuthPath;
+        changed = true;
+        _log(
+          'settings',
+          'Migrated Retrac Pak authentication DLL path from $configuredLegacyRetracAuth to $retracAuthPath.',
+        );
+      }
+    }
+
     final bundledAuthPath = await _ensureBundledDll(
       bundledAssetPath: 'assets/dlls/Tellurium.dll',
       bundledFileName: 'Tellurium.dll',
@@ -3051,7 +3091,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledAuthPath != null && bundledAuthPath.trim().isNotEmpty) {
-      final configuredAuth = _settings.authenticationPatcherPath.trim();
+      final configuredAuth = nextSettings.authenticationPatcherPath.trim();
       final authExists =
           configuredAuth.isNotEmpty && File(configuredAuth).existsSync();
       final looksBundledAuth = _looksLikeBundledAssetDllPath(
@@ -3408,8 +3448,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       'authentication patcher',
     );
     final retracAuthPath = await bundledPath(
-      'Retrac 14.40 Authenticator.dll',
-      'Retrac authentication patcher',
+      _retracPakDefaultDllFileName,
+      'Pak authentication patcher',
     );
     final memoryPath = await bundledPath('memory.dll', 'memory patcher');
     final magnesiumPath = await bundledPath('Magnesium.dll', 'game server');
@@ -3456,8 +3496,12 @@ class _LauncherScreenState extends State<LauncherScreen>
         _legacyRebootUltimateDefaultPresetName.toLowerCase(),
       };
     }
-    if (lowerName == _retracPakDefaultPresetName.toLowerCase()) {
-      return <String>{_retracPakDefaultPresetName.toLowerCase()};
+    if (lowerName == _retracPakDefaultPresetName.toLowerCase() ||
+        lowerName == _legacyRetracPakDefaultPresetName.toLowerCase()) {
+      return <String>{
+        _retracPakDefaultPresetName.toLowerCase(),
+        _legacyRetracPakDefaultPresetName.toLowerCase(),
+      };
     }
     return <String>{lowerName};
   }
