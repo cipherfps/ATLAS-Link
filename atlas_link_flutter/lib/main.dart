@@ -648,8 +648,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.6';
-  static const String _launcherBuildLabel = 'Stable 1.2.6';
+  static const String _launcherVersion = '1.2.7';
+  static const String _launcherBuildLabel = 'Stable 1.2.7';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -714,7 +714,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
-  static const int _bundledDllPresetSeedVersion = 4;
+  static const int _bundledDllPresetSeedVersion = 5;
   static const String _rebootUltimateDefaultPresetName =
       'Reboot Ultimate GS Preset';
   static const String _legacyRebootUltimateDefaultPresetName =
@@ -2400,6 +2400,27 @@ class _LauncherScreenState extends State<LauncherScreen>
         _looksLikeBundledAssetDllPath(configuredPath, spec.fileName);
   }
 
+  Future<String> _bundledDefaultDllPresetPath(_BundledDllSpec spec) async {
+    final managedPath = _joinPath([_dataDir.path, 'dlls', spec.fileName]);
+    if (File(managedPath).existsSync()) return managedPath;
+
+    final configuredPath = _configuredDllPathForSpec(spec).trim();
+    if (configuredPath.isNotEmpty &&
+        File(configuredPath).existsSync() &&
+        (_isManagedBundledDllPath(configuredPath, spec.fileName) ||
+            _looksLikeBundledAssetDllPath(configuredPath, spec.fileName))) {
+      return configuredPath;
+    }
+
+    final path = await _ensureBundledDll(
+      bundledAssetPath: spec.assetPath,
+      bundledFileName: spec.fileName,
+      label: spec.label,
+      showFeedback: false,
+    );
+    return path?.trim() ?? '';
+  }
+
   String _configuredDllPathForSpec(_BundledDllSpec spec) {
     switch (spec.fileNameLower) {
       case 'console.dll':
@@ -2681,6 +2702,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     bool checkForUpdatesAfter = true,
     Map<String, _BundledDllRemoteAsset>? remoteAssets,
     bool showFeedback = true,
+    bool refreshPresetSeedsAfter = true,
   }) async {
     var nextPath = await _downloadLatestBundledDllFromGitHub(
       spec: spec,
@@ -2715,6 +2737,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       controller.text = normalized;
     }
     await _saveSettings(toast: false);
+    if (refreshPresetSeedsAfter) {
+      await _ensureBundledDllPresetSeeds();
+    }
     if (checkForUpdatesAfter) {
       unawaited(_checkForBundledDllDefaultUpdates(silent: true));
     }
@@ -2921,6 +2946,9 @@ class _LauncherScreenState extends State<LauncherScreen>
             updatedCount += 1;
           }
         }
+      }
+      if (updatedCount > 0) {
+        await _ensureBundledDllPresetSeeds();
       }
     } catch (error) {
       _log(
@@ -3429,6 +3457,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<List<_DllPreset>> _buildBundledDllPresetSeeds() async {
+    Future<String> defaultDllPath(String fileName) {
+      return _bundledDefaultDllPresetPath(_bundledDllSpecByFileName(fileName));
+    }
+
     Future<String> bundledPath(String fileName, String label) async {
       final path = await _ensureBundledDll(
         bundledAssetPath: 'assets/dlls/$fileName',
@@ -3439,28 +3471,19 @@ class _LauncherScreenState extends State<LauncherScreen>
       return path?.trim() ?? '';
     }
 
-    final consolePath = await bundledPath(
-      'console.dll',
-      'unreal engine patcher',
-    );
-    final telluriumAuthPath = await bundledPath(
-      'Tellurium.dll',
-      'authentication patcher',
-    );
+    final consolePath = await defaultDllPath('console.dll');
+    final telluriumAuthPath = await defaultDllPath('Tellurium.dll');
     final retracAuthPath = await bundledPath(
       _retracPakDefaultDllFileName,
       'Pak authentication patcher',
     );
-    final memoryPath = await bundledPath('memory.dll', 'memory patcher');
-    final magnesiumPath = await bundledPath('Magnesium.dll', 'game server');
+    final memoryPath = await defaultDllPath('memory.dll');
+    final magnesiumPath = await defaultDllPath('Magnesium.dll');
     final rebootGameServerPath = await bundledPath(
       'Reboot Ultimate V1 Gameserver.dll',
       'Reboot Ultimate V1 game server',
     );
-    final largePakPath = await bundledPath(
-      'LargePakPatch.dll',
-      'large pak patcher',
-    );
+    final largePakPath = await defaultDllPath('LargePakPatch.dll');
     final now = DateTime.now().millisecondsSinceEpoch;
 
     return <_DllPreset>[
@@ -13034,6 +13057,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         controller: _unrealEnginePatcherController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
+        refreshPresetSeedsAfter: false,
       );
       await _resetBundledDllPathToLatest(
         spec: _bundledDllSpecByFileName('Tellurium.dll'),
@@ -13042,6 +13066,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         controller: _authenticationPatcherController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
+        refreshPresetSeedsAfter: false,
       );
       await _resetBundledDllPathToLatest(
         spec: _bundledDllSpecByFileName('memory.dll'),
@@ -13050,6 +13075,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         controller: _memoryPatcherController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
+        refreshPresetSeedsAfter: false,
       );
       await _resetBundledDllPathToLatest(
         spec: _bundledDllSpecByFileName('Magnesium.dll'),
@@ -13058,6 +13084,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         controller: _gameServerFileController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
+        refreshPresetSeedsAfter: false,
       );
       await _resetBundledDllPathToLatest(
         spec: _bundledDllSpecByFileName('LargePakPatch.dll'),
@@ -13066,8 +13093,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         controller: _largePakPatcherController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
+        refreshPresetSeedsAfter: false,
       );
 
+      await _ensureBundledDllPresetSeeds();
       await _checkForBundledDllDefaultUpdates(silent: true);
       if (mounted) {
         _toast('Default DLL update completed');
@@ -13123,24 +13152,49 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return missing;
   }
 
+  Future<_DllPreset> _resolveDllPresetForApply(_DllPreset preset) async {
+    if (!_isBundledDefaultDllPreset(preset)) return preset;
+
+    final aliases = _bundledDefaultDllPresetAliases(preset.name);
+    final seededPresets = await _buildBundledDllPresetSeeds();
+    for (final seededPreset in seededPresets) {
+      if (!aliases.contains(seededPreset.name.trim().toLowerCase())) {
+        continue;
+      }
+      return seededPreset.copyWith(
+        name: preset.name.trim().isEmpty ? seededPreset.name : preset.name,
+        createdAtEpochMs: preset.createdAtEpochMs,
+        updatedAtEpochMs: preset.updatedAtEpochMs,
+      );
+    }
+    return preset;
+  }
+
   Future<void> _applyDllPreset(_DllPreset preset) async {
     if (!mounted) return;
-    final missingCount = _missingDllPresetPathCount(preset);
+    final resolvedPreset = await _resolveDllPresetForApply(preset);
+    if (!mounted) return;
+    final missingCount = _missingDllPresetPathCount(resolvedPreset);
     setState(() {
       _settings = _settings.copyWith(
-        unrealEnginePatcherPath: preset.unrealEnginePatcherPath,
-        authenticationPatcherPath: preset.authenticationPatcherPath,
-        memoryPatcherPath: preset.memoryPatcherPath,
-        gameServerFilePath: preset.gameServerFilePath,
-        largePakPatcherFilePath: preset.largePakPatcherFilePath,
+        unrealEnginePatcherPath: resolvedPreset.unrealEnginePatcherPath,
+        authenticationPatcherPath: resolvedPreset.authenticationPatcherPath,
+        memoryPatcherPath: resolvedPreset.memoryPatcherPath,
+        gameServerFilePath: resolvedPreset.gameServerFilePath,
+        largePakPatcherFilePath: resolvedPreset.largePakPatcherFilePath,
       );
-      _unrealEnginePatcherController.text = preset.unrealEnginePatcherPath;
-      _authenticationPatcherController.text = preset.authenticationPatcherPath;
-      _memoryPatcherController.text = preset.memoryPatcherPath;
-      _gameServerFileController.text = preset.gameServerFilePath;
-      _largePakPatcherController.text = preset.largePakPatcherFilePath;
+      _unrealEnginePatcherController.text =
+          resolvedPreset.unrealEnginePatcherPath;
+      _authenticationPatcherController.text =
+          resolvedPreset.authenticationPatcherPath;
+      _memoryPatcherController.text = resolvedPreset.memoryPatcherPath;
+      _gameServerFileController.text = resolvedPreset.gameServerFilePath;
+      _largePakPatcherController.text = resolvedPreset.largePakPatcherFilePath;
     });
     await _saveSettings(toast: false, applyControllers: false);
+    if (_isBundledDefaultDllPreset(preset)) {
+      unawaited(_ensureBundledDllPresetSeeds());
+    }
     unawaited(
       _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
     );

@@ -1,4 +1,4 @@
-<!-- version: 1.2.6 -->
+<!-- version: 1.2.7 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -14,8 +14,8 @@ Markdown Quick Key
 
 ---
 
-# Improvements
-- Fixed Name for Default DLL Preset
+# Fixes
 - Updated Magnesium
+- Fixed Default DLL Presets reverting refreshed Default DLL paths
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
