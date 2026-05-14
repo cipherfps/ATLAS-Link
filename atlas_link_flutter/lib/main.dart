@@ -28,6 +28,34 @@ String _joinAtlasBackendInstallPath(List<String> pieces) {
 }
 
 class AtlasBackendInstallSupport {
+  static bool looksLikeAtlasBackendPath(String path) {
+    final normalized = path.trim().replaceAll('\\', '/').toLowerCase();
+    if (normalized.isEmpty) return false;
+    final parts = normalized.split('/').where((part) => part.isNotEmpty);
+    if (parts.isEmpty) return false;
+    final name = parts.last;
+
+    if (name == 'atlas backend.exe' ||
+        name == 'atlas-backend.exe' ||
+        name == 'atlas_gui_flutter.exe') {
+      return true;
+    }
+    if (name.endsWith('.exe') &&
+        name.contains('atlas') &&
+        name.contains('backend')) {
+      return true;
+    }
+    if (name == 'atlas.exe' &&
+        (normalized.contains('/atlas backend/') ||
+            normalized.contains('/atlas-backend/'))) {
+      return true;
+    }
+
+    return normalized.contains('/atlas backend') ||
+        normalized.contains('/atlas-backend') ||
+        normalized.endsWith('/atlas');
+  }
+
   static String? selectInstallerUrl(dynamic assetsRaw) {
     if (assetsRaw is! List) return null;
 
@@ -96,6 +124,7 @@ class AtlasBackendInstallSupport {
       'ATLAS Backend.exe',
       'ATLAS-Backend.exe',
       'ATLAS.exe',
+      'atlas_gui_flutter.exe',
     ]) {
       yield _joinAtlasBackendInstallPath([trimmed, executableName]);
     }
@@ -486,11 +515,9 @@ class _FortniteProcessState {
   bool killed = false;
   bool exited = false;
   bool postLoginInjected = false;
-  bool postLoginInferredFromFallback = false;
   bool largePakInjected = false;
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
-  bool gameServerInjectionScheduled = false;
   bool sawContinueLoggingIn = false;
   bool sawAnyCompletedLoginLine = false;
   bool sawEnglishCompletedLoginLine = false;
@@ -648,8 +675,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.7';
-  static const String _launcherBuildLabel = 'Stable 1.2.7';
+  static const String _launcherVersion = '1.2.8';
+  static const String _launcherBuildLabel = 'Stable 1.2.8';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -675,11 +702,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const Duration _playtimeCheckpointInterval = Duration(seconds: 15);
   // Reduced post-login delay for faster injection start on low-end PCs
   static const int _postLoginInjectionDelayMs = 300;
-  static const int _headlessPostLoginInjectionDelayMs = 900;
-  static const int _headlessGameServerInjectionSettleDelayMs = 3000;
-  static const int _headlessGameServerInjectionUiDelayMs = 240;
   static const int _headlessFallbackPostLoginDelaySeconds = 16;
-  static const int _headlessFallbackGameServerInjectionDelaySeconds = 28;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
   static const String _defaultEpicAuthPassword = 'AtlasDefault';
@@ -5932,14 +5955,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     void Function(String line, bool isError)? onLine,
   }) {
     process.stdout
-        .transform(utf8.decoder)
+        .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .listen((line) {
           _log(source, line);
           onLine?.call(line, false);
         });
     process.stderr
-        .transform(utf8.decoder)
+        .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .listen((line) {
           _log(source, line);
@@ -6625,12 +6648,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   String? _loginCompleteSignalReason(String line) {
     final lower = line.toLowerCase();
+    final continueLoggingInSeen = lower.contains(
+      _loginContinueMarker.toLowerCase(),
+    );
+    final completedSeen = lower.contains(_loginCompletedMarker.toLowerCase());
 
-    // Most reliable marker across builds.
-    if (lower.contains(_loginContinueMarker.toLowerCase()) &&
-        lower.contains(_loginCompleteStepMarker.toLowerCase()) &&
-        lower.contains(_loginCompletedMarker.toLowerCase())) {
-      return 'continue_logging_in_completed_en';
+    if (continueLoggingInSeen && completedSeen) {
+      return lower.contains(_loginCompleteStepMarker.toLowerCase())
+          ? 'continue_logging_in_completed_en'
+          : 'continue_logging_in_completed';
     }
 
     // Fallback marker some builds emit immediately after finishing login.
@@ -6772,33 +6798,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     'Engine',
   ];
 
-  static const List<String> _hostGameServerReadyMarkers = [
-    'ui.state.startup.subgameselect',
-    'ui.state.athena.frontend',
-    'ui.state.lobby',
-    'lobbyui',
-  ];
-
-  String? _hostGameServerReadySignalReason(String line) {
-    final lower = line.toLowerCase();
-    if (lower.contains('states from: login to subgameselect')) {
-      return 'login_to_subgameselect';
-    }
-    if (lower.contains('states from: subgameselect to frontend')) {
-      return 'subgameselect_to_frontend';
-    }
-    for (final marker in _hostGameServerReadyMarkers) {
-      if (lower.contains(marker)) {
-        return marker;
-      }
-    }
-
-    // Headless hosts are much more sensitive to early injection. Avoid broad
-    // client markers like "Engine" here and fall back to the delayed path
-    // instead when a stronger UI signal never arrives.
-    return null;
-  }
-
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
     if (state.killed || state.exited) return;
     _recordReadinessDiagnostics(state, line);
@@ -6818,7 +6817,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!state.postLoginInjected && loginCompleteSignalReason != null) {
       state.launched = true;
       state.postLoginInjected = true;
-      state.postLoginInferredFromFallback = false;
       _log(
         state.host ? 'gameserver' : 'game',
         'Login complete detected via $loginCompleteSignalReason. Scheduling post-login injections...',
@@ -6842,25 +6840,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('game', 'Client fully loaded. Scheduling large pak injection...');
       unawaited(_performDeferredLargePakInjection(state));
     }
-
-    // For hosting, wait for a stronger frontend-ready signal before injecting
-    // the game server DLL. This is especially important for headless hosts.
-    final hostReadySignalReason =
-        state.host &&
-            state.postLoginInjected &&
-            state.hostPostLoginPatchersInjected &&
-            !state.gameServerInjected &&
-            !state.gameServerInjectionScheduled
-        ? _hostGameServerReadySignalReason(line)
-        : null;
-    if (hostReadySignalReason != null) {
-      state.gameServerInjectionScheduled = true;
-      _log(
-        'gameserver',
-        'Host ready via $hostReadySignalReason. Scheduling game server DLL injection...',
-      );
-      unawaited(_performDeferredGameServerInjection(state));
-    }
   }
 
   int _calculateExponentialBackoffMs(
@@ -6880,26 +6859,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
-    // Optimized for low-end PCs: reduced from 900ms to 300ms to start injections faster
-    // while still giving the client time to initialize.
-    final postLoginDelayMs = state.host && state.headless
-        ? _headlessPostLoginInjectionDelayMs
-        : _postLoginInjectionDelayMs;
-    await Future.delayed(Duration(milliseconds: postLoginDelayMs));
+    // Match Reboot's host behavior: once the login marker is seen, inject the
+    // host patchers immediately instead of waiting for later frontend markers.
+    final postLoginDelayMs = state.host ? 0 : _postLoginInjectionDelayMs;
+    if (postLoginDelayMs > 0) {
+      await Future.delayed(Duration(milliseconds: postLoginDelayMs));
+    }
     if (state.killed || state.exited) return;
 
     if (state.host) {
-      final inferredFallbackLogin = state.postLoginInferredFromFallback;
-
-      // For the host, inject post-login patchers and then schedule the game
-      // server DLL injection. If login was only inferred via fallback (no real
-      // login marker), skip memory.dll to avoid early-load access violations.
-      if (inferredFallbackLogin) {
-        _log(
-          'gameserver',
-          'Using safe fallback host flow: skipping memory patcher until stable login markers.',
-        );
-      }
       _setUiStatus(
         host: true,
         message: 'Injecting post-login patchers...',
@@ -6913,7 +6881,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         state.pid,
         state.gameVersion,
         includeAuth: false,
-        includeMemory: !inferredFallbackLogin,
+        includeMemory: true,
         includeLargePak: false,
         includeUnreal: false,
         includeGameServer: false,
@@ -6934,12 +6902,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
 
       state.hostPostLoginPatchersInjected = true;
-      _setUiStatus(
-        host: true,
-        message: 'Logged in. Waiting for host to finish loading...',
-        severity: _UiStatusSeverity.info,
+      _log(
+        'gameserver',
+        'Post-login patchers injected. Injecting game server DLL...',
       );
-      unawaited(_scheduleHostFallbackGameServerInjection(state));
+      await _performGameServerInjection(state);
     } else {
       _setUiStatus(
         host: false,
@@ -7055,20 +7022,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _performDeferredLargePakInjection(state);
   }
 
-  Future<void> _performDeferredGameServerInjection(
-    _FortniteProcessState state,
-  ) async {
+  Future<void> _performGameServerInjection(_FortniteProcessState state) async {
     if (!state.host) return;
-    if (state.killed || state.exited) return;
-    if (state.gameServerInjected) return;
-
-    // Give the lobby/subgame UI a moment to settle. Headless hosts benefit
-    // from a longer pause here because the frontend signal can arrive before
-    // the process is actually safe to patch.
-    final settleDelayMs = state.headless
-        ? _headlessGameServerInjectionSettleDelayMs
-        : 450;
-    await Future<void>.delayed(Duration(milliseconds: settleDelayMs));
     if (state.killed || state.exited) return;
     if (state.gameServerInjected) return;
 
@@ -7077,10 +7032,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Injecting game server DLL...',
       severity: _UiStatusSeverity.info,
     );
-    final injectionUiDelayMs = state.headless
-        ? _headlessGameServerInjectionUiDelayMs
-        : 120;
-    await Future<void>.delayed(Duration(milliseconds: injectionUiDelayMs));
+    await Future<void>.delayed(const Duration(milliseconds: _uiStatusDelayMs));
 
     final serverReport = await _injectConfiguredPatchers(
       state.pid,
@@ -7094,7 +7046,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final serverFailure = serverReport.firstRequiredFailure;
     if (serverFailure != null) {
-      state.gameServerInjectionScheduled = false;
       _setUiStatus(
         host: true,
         message: 'Failed to inject ${serverFailure.name}.',
@@ -7109,31 +7060,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Running.',
       severity: _UiStatusSeverity.success,
     );
-  }
-
-  Future<void> _scheduleHostFallbackGameServerInjection(
-    _FortniteProcessState state,
-  ) async {
-    if (!state.host) return;
-    if (state.killed || state.exited) return;
-    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
-
-    // Some builds never emit the lobby UI marker. As a fallback, attempt the
-    // server DLL injection after a short delay once post-login patchers ran.
-    final fallbackDelaySeconds = state.headless
-        ? _headlessFallbackGameServerInjectionDelaySeconds
-        : 16;
-    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
-    if (state.killed || state.exited) return;
-    if (!state.hostPostLoginPatchersInjected) return;
-    if (state.gameServerInjected || state.gameServerInjectionScheduled) return;
-
-    state.gameServerInjectionScheduled = true;
-    _log(
-      'gameserver',
-      'Host loading marker not seen. Running fallback game server DLL injection...',
-    );
-    unawaited(_performDeferredGameServerInjection(state));
   }
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
@@ -7370,12 +7296,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       message: 'Checking backend connection...',
       severity: _UiStatusSeverity.info,
     );
-    await _refreshRuntime();
+    await _refreshRuntime(force: true);
     if (_backendOnline) return true;
 
     final shouldLaunchManagedBackend =
         _settings.launchBackendOnSessionStart &&
         _settings.backendConnectionType == BackendConnectionType.local &&
+        _effectiveBackendPort() == _defaultBackendPort &&
         Platform.isWindows;
     if (shouldLaunchManagedBackend) {
       _setUiStatus(
@@ -7387,12 +7314,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (!mounted) return false;
 
       // Give the backend time to bind/listen before proceeding to game processes.
-      const attempts = 18;
+      const attempts = 60;
       for (var attempt = 0; attempt < attempts; attempt++) {
-        await _refreshRuntime();
+        await _refreshRuntime(force: true);
         if (_backendOnline) return true;
         if (!mounted) return false;
-        await Future<void>.delayed(const Duration(milliseconds: 350));
+        await Future<void>.delayed(const Duration(milliseconds: 500));
       }
     }
 
@@ -8358,7 +8285,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       const SizedBox(height: 8),
                                       settingTile(
                                         icon: Icons.cloud_rounded,
-                                        title: 'Launch Backend with Game',
+                                        title: 'Launch ATLAS Backend with Game',
                                         subtitle:
                                             'Start ATLAS Backend when launching a session',
                                         trailing: Switch(
@@ -9018,7 +8945,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     state.launched = true;
     state.postLoginInjected = true;
-    state.postLoginInferredFromFallback = true;
     _log(
       'gameserver',
       'Login marker not seen. Running fallback post-login injections...',
@@ -10284,6 +10210,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       patcherPath: gameServerPath,
       patcherName: 'game server',
       required: true,
+      waitForCompletion: false,
+      useAnsiLoadLibrary: true,
     );
     if (attempt.success || !attempt.attempted) return attempt;
 
@@ -10304,6 +10232,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         patcherPath: gameServerPath,
         patcherName: 'game server',
         required: true,
+        waitForCompletion: false,
+        useAnsiLoadLibrary: true,
       );
       if (attempt.success || !attempt.attempted) return attempt;
     }
@@ -10417,6 +10347,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     required String patcherPath,
     required String patcherName,
     required bool required,
+    bool waitForCompletion = true,
+    bool useAnsiLoadLibrary = false,
   }) async {
     final path = patcherPath.trim();
     if (path.isEmpty) {
@@ -10452,7 +10384,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     try {
-      await _injectDllIntoProcess(gamePid, path);
+      await _injectDllIntoProcess(
+        gamePid,
+        path,
+        waitForCompletion: waitForCompletion,
+        useAnsiLoadLibrary: useAnsiLoadLibrary,
+      );
       _log('game', 'Injected $patcherName.');
       return _InjectionAttempt(
         name: patcherName,
@@ -10472,7 +10409,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
-  Future<void> _injectDllIntoProcess(int pid, String dllPath) async {
+  Future<void> _injectDllIntoProcess(
+    int pid,
+    String dllPath, {
+    bool waitForCompletion = true,
+    bool useAnsiLoadLibrary = false,
+  }) async {
     if (!Platform.isWindows) return;
     final dllFile = File(dllPath);
     if (!dllFile.existsSync()) {
@@ -10505,8 +10447,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
 
       final kernelModuleName = 'KERNEL32.DLL'.toNativeUtf16();
-      final loadLibraryProcName = 'LoadLibraryW'.toNativeUtf8();
-      final dllPathNative = dllPath.toNativeUtf16();
+      final loadLibraryProcName =
+          (useAnsiLoadLibrary ? 'LoadLibraryA' : 'LoadLibraryW').toNativeUtf8();
+      final dllPathNativeUtf8 = useAnsiLoadLibrary
+          ? dllPath.toNativeUtf8()
+          : null;
+      final dllPathNativeUtf16 = useAnsiLoadLibrary
+          ? null
+          : dllPath.toNativeUtf16();
 
       try {
         final kernelModule = GetModuleHandle(kernelModuleName);
@@ -10519,10 +10467,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           loadLibraryProcName,
         );
         if (processAddress == ffi.nullptr) {
-          throw 'GetProcAddress failed for LoadLibraryW.';
+          final procName = useAnsiLoadLibrary ? 'LoadLibraryA' : 'LoadLibraryW';
+          throw 'GetProcAddress failed for $procName.';
         }
 
-        final bytesLength = (dllPath.length + 1) * 2;
+        final bytesLength = useAnsiLoadLibrary
+            ? utf8.encode(dllPath).length + 1
+            : (dllPath.length + 1) * 2;
         final remoteAddress = VirtualAllocEx(
           processHandle,
           ffi.nullptr,
@@ -10537,7 +10488,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         final writeMemoryResult = WriteProcessMemory(
           processHandle,
           remoteAddress,
-          dllPathNative.cast(),
+          useAnsiLoadLibrary
+              ? dllPathNativeUtf8!.cast()
+              : dllPathNativeUtf16!.cast(),
           bytesLength,
           ffi.nullptr,
         );
@@ -10545,20 +10498,30 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           throw 'WriteProcessMemory failed.';
         }
 
-        final createThreadResult = CreateRemoteThread(
-          processHandle,
-          ffi.nullptr,
-          0,
-          processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
-          remoteAddress,
-          0,
-          ffi.nullptr,
-        );
-        if (createThreadResult == NULL) {
-          throw 'CreateRemoteThread failed.';
-        }
-
+        var createThreadResult = NULL;
+        var releaseRemoteAddress = true;
         try {
+          createThreadResult = CreateRemoteThread(
+            processHandle,
+            ffi.nullptr,
+            0,
+            processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
+            remoteAddress,
+            0,
+            ffi.nullptr,
+          );
+          if (createThreadResult == NULL) {
+            throw 'CreateRemoteThread failed.';
+          }
+
+          if (!waitForCompletion) {
+            // Reboot-style injection: some game-server DLLs do heavy work in
+            // their loader thread. Do not wait on or free the remote path while
+            // the target process may still be loading the module.
+            releaseRemoteAddress = false;
+            return;
+          }
+
           final waitResult = WaitForSingleObject(
             createThreadResult,
             _dllInjectionWaitMs,
@@ -10588,13 +10551,22 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             calloc.free(exitCode);
           }
         } finally {
-          VirtualFreeEx(processHandle, remoteAddress, 0, MEM_RELEASE);
-          CloseHandle(createThreadResult);
+          if (releaseRemoteAddress) {
+            VirtualFreeEx(processHandle, remoteAddress, 0, MEM_RELEASE);
+          }
+          if (createThreadResult != NULL) {
+            CloseHandle(createThreadResult);
+          }
         }
       } finally {
         calloc.free(kernelModuleName);
         calloc.free(loadLibraryProcName);
-        calloc.free(dllPathNative);
+        if (dllPathNativeUtf8 != null) {
+          calloc.free(dllPathNativeUtf8);
+        }
+        if (dllPathNativeUtf16 != null) {
+          calloc.free(dllPathNativeUtf16);
+        }
         CloseHandle(processHandle);
       }
     });
@@ -18783,6 +18755,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         : _atlasBackendProcess != null
         ? 'ATLAS Backend running'
         : 'Launch ATLAS Backend';
+    final canUseManagedAtlasBackend =
+        _settings.backendConnectionType == BackendConnectionType.local &&
+        _effectiveBackendPort() == _defaultBackendPort;
 
     if (_showBackendConnectionTip &&
         _backendQuickTipStep == 0 &&
@@ -18972,8 +18947,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               builder: (context, constraints) {
                 final compactActions = constraints.maxWidth < 980;
                 final backendLaunchEnabled =
-                    _settings.backendConnectionType ==
-                        BackendConnectionType.local &&
+                    canUseManagedAtlasBackend &&
                     !_atlasBackendActionBusy &&
                     _atlasBackendProcess == null &&
                     !_backendOnline;
@@ -19097,6 +19071,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       await _checkBackendNow();
       return;
     }
+    if (_settings.backendConnectionType != BackendConnectionType.local ||
+        _effectiveBackendPort() != _defaultBackendPort) {
+      _toast('Managed ATLAS Backend launch uses local port 3551');
+      return;
+    }
+    await _refreshRuntime(force: true);
+    if (_backendOnline) {
+      _toast('ATLAS Backend is already running');
+      return;
+    }
 
     setState(() => _atlasBackendActionBusy = true);
     try {
@@ -19121,7 +19105,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         const <String>[],
         workingDirectory: workingDir,
         runInShell: true,
-        environment: {...Platform.environment},
+        environment: {
+          ...Platform.environment,
+          'ATLAS_START_BACKEND_ON_LAUNCH': '1',
+        },
       );
       _atlasBackendProcess = process;
       _attachProcessLogs(process, source: 'backend');
@@ -19139,7 +19126,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       if (mounted) _toast('ATLAS Backend launched');
       await Future<void>.delayed(const Duration(milliseconds: 1200));
-      await _refreshRuntime();
+      await _refreshRuntime(force: true);
     } catch (error) {
       _log('backend', 'Failed to launch managed ATLAS Backend: $error');
       if (mounted) _toast('Failed to launch ATLAS Backend');
@@ -19260,7 +19247,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Text(
-                                  'Link will download the latest installer and open setup. After setup finishes, come back and click Launch ATLAS Backend again.',
+                                  'Link will download the latest installer and open setup. After setup finishes, ATLAS Link will launch it automatically.',
                                   style: TextStyle(
                                     color: _onSurface(dialogContext, 0.78),
                                     fontWeight: FontWeight.w600,
@@ -19511,11 +19498,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         );
       }
       keepInstallerFolder = true;
-      unawaited(_watchAtlasBackendInstallAndCleanup(tempDir.path));
+      unawaited(
+        _watchAtlasBackendInstallAndCleanup(
+          tempDir.path,
+          launchAfterInstall: true,
+        ),
+      );
       await _hideAtlasBackendInstallDialog();
       if (mounted) {
         _toast(
-          'ATLAS Backend setup launched. Finish setup, then click Launch ATLAS Backend again',
+          'ATLAS Backend setup launched. Finish setup and ATLAS Link will launch it',
         );
       }
       return true;
@@ -19545,8 +19537,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<void> _watchAtlasBackendInstallAndCleanup(
-    String installerDirPath,
-  ) async {
+    String installerDirPath, {
+    bool launchAfterInstall = false,
+  }) async {
     if (_atlasBackendInstallCleanupWatcherActive) return;
     _atlasBackendInstallCleanupWatcherActive = true;
     try {
@@ -19562,6 +19555,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             'backend',
             'ATLAS Backend detected at $installedPath. Installer cache cleaned.',
           );
+          if (launchAfterInstall) {
+            await _rememberBackendExecutablePath(installedPath);
+            await _refreshRuntime(force: true);
+            if (_backendOnline) {
+              if (mounted) _toast('ATLAS Backend installed and running');
+            } else {
+              if (mounted) _toast('ATLAS Backend installed. Launching...');
+              await Future<void>.delayed(const Duration(milliseconds: 500));
+              unawaited(_launchManagedAtlasBackend());
+            }
+          }
           return;
         }
       }
@@ -20085,6 +20089,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       programFiles == null ? null : _joinPath([programFiles, 'ATLAS-Backend']),
     );
     addWithNames(
+      programFiles == null ? null : _joinPath([programFiles, 'ATLAS']),
+    );
+    addWithNames(
       programFilesX86 == null
           ? null
           : _joinPath([programFilesX86, 'ATLAS Backend']),
@@ -20093,6 +20100,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       programFilesX86 == null
           ? null
           : _joinPath([programFilesX86, 'ATLAS-Backend']),
+    );
+    addWithNames(
+      programFilesX86 == null ? null : _joinPath([programFilesX86, 'ATLAS']),
     );
 
     final seen = <String>{};
@@ -20141,9 +20151,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             final lowerPath = entity.path.toLowerCase();
             if (fileName.endsWith('.exe') &&
                 ((fileName.contains('atlas') && fileName.contains('backend')) ||
+                    (fileName == 'atlas_gui_flutter.exe' &&
+                        lowerPath.contains('atlas')) ||
                     (fileName == 'atlas.exe' &&
                         (lowerPath.contains('\\atlas backend\\') ||
-                            lowerPath.contains('/atlas backend/'))))) {
+                            lowerPath.contains('/atlas backend/') ||
+                            lowerPath.contains('\\atlas-backend\\') ||
+                            lowerPath.contains('/atlas-backend/'))))) {
               return entity.path;
             }
           } else if (entity is Directory && current.depth < maxDepth) {

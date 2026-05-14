@@ -66,5 +66,41 @@ void main() {
         ),
       );
     });
+
+    test('includes legacy Flutter runner executable names', () {
+      final root = [
+        'C:',
+        'Program Files',
+        'ATLAS Backend',
+      ].join(Platform.pathSeparator);
+      final candidates = AtlasBackendInstallSupport.executableCandidatesForRoot(
+        root,
+      ).toList();
+
+      expect(
+        candidates,
+        contains([root, 'atlas_gui_flutter.exe'].join(Platform.pathSeparator)),
+      );
+    });
+
+    test('identifies ATLAS backend paths without matching other backends', () {
+      expect(
+        AtlasBackendInstallSupport.looksLikeAtlasBackendPath(
+          ['C:', 'Program Files', 'ATLAS Backend'].join(Platform.pathSeparator),
+        ),
+        isTrue,
+      );
+      expect(
+        AtlasBackendInstallSupport.looksLikeAtlasBackendPath(
+          [
+            'C:',
+            'Servers',
+            'LawinServer',
+            'Backend.exe',
+          ].join(Platform.pathSeparator),
+        ),
+        isFalse,
+      );
+    });
   });
 }
