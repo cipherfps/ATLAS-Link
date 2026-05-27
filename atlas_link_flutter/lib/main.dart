@@ -484,6 +484,44 @@ enum BackendConnectionType { local, remote }
 
 enum BackendRuntimeProvider { atlas, external }
 
+class BackendProxyRouting {
+  static const String defaultBackendHost = '127.0.0.1';
+  static const int defaultBackendPort = 3551;
+
+  static bool proxyRequired({
+    required BackendConnectionType connectionType,
+    required String host,
+    required int port,
+  }) {
+    if (connectionType == BackendConnectionType.remote) {
+      return !isDefaultBackendEndpoint(host, port);
+    }
+    return port != defaultBackendPort;
+  }
+
+  static bool isDefaultBackendEndpoint(String host, int port) {
+    return port == defaultBackendPort && isLocalHost(host);
+  }
+
+  static bool isLocalHost(String host) {
+    final normalized = host
+        .trim()
+        .toLowerCase()
+        .replaceFirst(RegExp(r'^http://', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'^https://', caseSensitive: false), '')
+        .split('/')
+        .first;
+    final bare = normalized.startsWith('[')
+        ? normalized.split(']').first.replaceFirst('[', '')
+        : normalized.split(':').first;
+    return bare == 'localhost' ||
+        bare == '0.0.0.0' ||
+        bare == '::1' ||
+        bare == '127.0.0.1' ||
+        bare.startsWith('127.');
+  }
+}
+
 extension _BackendConnectionTypeLabel on BackendConnectionType {
   String get label => this == BackendConnectionType.local ? 'Local' : 'Remote';
 }
@@ -669,14 +707,15 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.2.9';
-  static const String _launcherBuildLabel = 'Stable 1.2.9';
+  static const String _launcherVersion = '1.3.0';
+  static const String _launcherBuildLabel = 'Stable 1.3.0';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
   static const String _eacEosExeName = 'FortniteClient-Win64-Shipping_EAC_EOS.exe';
-  static const String _defaultBackendHost = '127.0.0.1';
-  static const int _defaultBackendPort = 3551;
+  static const String _defaultBackendHost =
+      BackendProxyRouting.defaultBackendHost;
+  static const int _defaultBackendPort = BackendProxyRouting.defaultBackendPort;
   static const String _defaultExternalBackendStartCommand = 'node app.js';
   static const int _defaultGameServerPort = 7777;
   static const String _legacyLaunchFltoken = '3db3ba5dcbd2e16703f3978d';
@@ -806,6 +845,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   OverlayEntry? _toastOverlayEntry;
   final GlobalKey<_ToastOverlayHostState> _toastHostKey =
       GlobalKey<_ToastOverlayHostState>();
+  int _toastProgressRequestId = 0;
 
   final _usernameController = TextEditingController();
   final _profileAuthEmailController = TextEditingController();
@@ -866,6 +906,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _launcherUpdateAutoChecked = false;
   bool _launcherUpdateInstallerCleanupWatcherActive = false;
   bool _atlasBackendActionBusy = false;
+  bool _backendConnectionActionBusy = false;
+  String _backendActionMessage = '';
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
   // When the game server is started from the "start game server?" prompt during
@@ -4097,9 +4139,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       return;
     }
 
-    final hostInput = _backendHostController.text.trim();
-    final normalizedRemoteHost =
-        hostInput.isEmpty || _isLocalHost(hostInput) ? '' : hostInput;
+    final normalizedRemoteHost = _backendHostController.text.trim();
     _settings = _settings.copyWith(
       remoteBackendHost: normalizedRemoteHost,
       remoteBackendPort: parsedPort.clamp(1, 65535),
@@ -4121,7 +4161,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       return _defaultBackendHost;
     }
     final host = _settings.remoteBackendHost.trim();
-    if (host.isEmpty || _isLocalHost(host)) {
+    if (host.isEmpty) {
       return '';
     }
     return host;
@@ -4515,18 +4555,14 @@ class _LauncherScreenState extends State<LauncherScreen>
         ..autoUncompress = false;
       try {
         final req = await client.getUrl(uri);
-        final res = await req.close();
+        await req.close();
         if (mounted) {
-          final online = res.statusCode < 500;
-          if (_backendOnline != online) {
-            final wasOnline = _backendOnline;
+          if (!_backendOnline) {
             setState(() {
-              // If we get a response and it's not a proxy error, treat it as online.
-              _backendOnline = online;
+              // Match Reboot: any completed HTTP response means the backend
+              // endpoint is reachable, regardless of status code.
+              _backendOnline = true;
             });
-            if (wasOnline && !online) {
-              _toastBackendUndetected();
-            }
           }
         }
       } catch (_) {
@@ -4563,11 +4599,15 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   bool _backendProxyRequired() {
-    if (_settings.backendConnectionType == BackendConnectionType.remote) {
-      return true;
-    }
-    // Local backend not on the default port: proxy through the launcher port.
-    return _effectiveBackendPort() != _defaultBackendPort;
+    return BackendProxyRouting.proxyRequired(
+      connectionType: _settings.backendConnectionType,
+      host: _effectiveBackendHost(),
+      port: _effectiveBackendPort(),
+    );
+  }
+
+  bool _isDefaultBackendEndpoint(String host, int port) {
+    return BackendProxyRouting.isDefaultBackendEndpoint(host, port);
   }
 
   Future<bool> _syncBackendProxy() async {
@@ -4592,6 +4632,16 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (_backendProxyServer != null &&
           _backendProxyTarget != null &&
           _backendProxySignature == signature) {
+        final target = await _resolveBackendProxyTarget();
+        if (target == null) {
+          _log(
+            'backend',
+            'Backend proxy target no longer reachable: ${_effectiveBackendHost()}:${_effectiveBackendPort()}',
+          );
+          await _stopBackendProxy();
+          return false;
+        }
+        _backendProxyTarget = target;
         return true;
       }
 
@@ -4650,7 +4700,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (server != null) return server;
 
     // Free the default backend port and try again.
-    await _killExistingProcessByPort(_defaultBackendPort);
+    await _killExistingProcessByPort(_defaultBackendPort, exceptPid: pid);
     await Future.delayed(const Duration(milliseconds: 200));
     server = await tryBind();
     if (server == null) {
@@ -4676,28 +4726,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
 
     if (host.isEmpty) return null;
-    if (_isLocalHost(host)) return null;
     final ping = await _pingBackend(host, port);
     if (ping == null) return null;
     return Uri(scheme: ping.scheme, host: ping.host, port: ping.port);
   }
 
   bool _isLocalHost(String host) {
-    final normalized = host
-        .trim()
-        .toLowerCase()
-        .replaceFirst(RegExp(r'^http://', caseSensitive: false), '')
-        .replaceFirst(RegExp(r'^https://', caseSensitive: false), '')
-        .split('/')
-        .first;
-    final bare = normalized.startsWith('[')
-        ? normalized.split(']').first.replaceFirst('[', '')
-        : normalized.split(':').first;
-    return bare == 'localhost' ||
-        bare == '0.0.0.0' ||
-        bare == '::1' ||
-        bare == '127.0.0.1' ||
-        bare.startsWith('127.');
+    return BackendProxyRouting.isLocalHost(host);
   }
 
   Future<Uri?> _pingBackend(String host, int port, [bool https = false]) async {
@@ -4740,6 +4775,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (targetBase == null || client == null) {
       request.response.statusCode = HttpStatus.serviceUnavailable;
       await request.response.close();
+      return;
+    }
+    if (_isDefaultBackendEndpoint(targetBase.host, targetBase.port)) {
+      request.response.statusCode = HttpStatus.badGateway;
+      request.response.write('Backend proxy self-target blocked.');
+      await request.response.close();
+      _log('backend', 'Blocked backend proxy self-target: $targetBase');
       return;
     }
 
@@ -7298,12 +7340,45 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   bool _canAutoLaunchManagedBackend() {
-    return _effectiveBackendPort() == _defaultBackendPort;
+    return _settings.backendConnectionType == BackendConnectionType.local;
   }
 
-  Future<void> _launchManagedBackend() async {
-    await _launchManagedAtlasBackend();
+  Future<void> _useDefaultPortForManagedBackendLaunch({
+    bool toast = true,
+  }) async {
+    if (_settings.backendConnectionType != BackendConnectionType.local ||
+        _effectiveBackendPort() == _defaultBackendPort) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _settings = _settings.copyWith(
+          localBackendPort: _defaultBackendPort,
+          backendPort: _defaultBackendPort,
+        );
+        _backendPortController.text = _defaultBackendPort.toString();
+      });
+    } else {
+      _settings = _settings.copyWith(
+        localBackendPort: _defaultBackendPort,
+        backendPort: _defaultBackendPort,
+      );
+      _backendPortController.text = _defaultBackendPort.toString();
+    }
+    await _saveSettings(toast: false);
+    await _stopBackendProxy();
+    if (toast && mounted) {
+      _toast('Switched local backend port to 3551 for ATLAS Backend');
+    }
   }
+
+  Future<void> _launchManagedBackend({bool showProgressToast = true}) async {
+    await _launchManagedAtlasBackend(showProgressToast: showProgressToast);
+  }
+
+  bool get _backendActionBusy =>
+      _atlasBackendActionBusy || _backendConnectionActionBusy;
 
   Future<bool> _ensureBackendReadyForSession({
     required bool host,
@@ -7331,6 +7406,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
     await _refreshRuntime(force: true);
     if (_backendOnline) {
+      _toastProgressDismiss();
       await _ensureBackendConsoleKeyConfig();
       return true;
     }
@@ -7341,12 +7417,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         Platform.isWindows &&
         _canAutoLaunchManagedBackend();
     if (shouldLaunchManagedBackend) {
+      final prefix = host ? 'Host' : 'Fortnite';
+      _toastProgress(
+        '$prefix: Starting ATLAS Backend...',
+        progress: null,
+        indeterminate: true,
+      );
       _setUiStatus(
         host: host,
         message: 'Launching ATLAS Backend...',
         severity: _UiStatusSeverity.info,
       );
-      await _launchManagedBackend();
+      await _launchManagedBackend(showProgressToast: false);
       if (!mounted) return false;
 
       // Give the backend time to bind/listen before proceeding to game processes.
@@ -7354,6 +7436,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       for (var attempt = 0; attempt < attempts; attempt++) {
         await _refreshRuntime(force: true);
         if (_backendOnline) {
+          _toastProgressDismiss();
           await _ensureBackendConsoleKeyConfig();
           return true;
         }
@@ -7365,6 +7448,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final msg =
         'No backend found on ${_effectiveBackendHost()}:${_effectiveBackendPort()}';
     if (toastOnFailure && mounted) _toast(msg);
+    _toastProgressDismiss();
     _setUiStatus(host: host, message: msg, severity: _UiStatusSeverity.error);
     return false;
   }
@@ -7387,7 +7471,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     _lastBackendCheckingToastAt = now;
 
     final prefix = host ? 'Host' : 'Fortnite';
-    _toast('$prefix: Checking backend connection...');
+    _toastProgress(
+      '$prefix: Checking backend connection...',
+      progress: null,
+      indeterminate: true,
+    );
   }
 
   Future<void> _startFortnite({
@@ -12208,6 +12296,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _gameUiStatus = null;
         _gameServerUiStatus = null;
         _atlasBackendActionBusy = false;
+        _backendConnectionActionBusy = false;
+        _backendActionMessage = '';
         _gameAction = _GameActionState.idle;
         _gameServerLaunching = false;
         _gameProcess = null;
@@ -12258,6 +12348,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _gameUiStatus = null;
       _gameServerUiStatus = null;
       _atlasBackendActionBusy = false;
+      _backendConnectionActionBusy = false;
+      _backendActionMessage = '';
       _gameAction = _GameActionState.idle;
       _gameServerLaunching = false;
       _gameProcess = null;
@@ -13884,7 +13976,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     if (!mounted) return;
 
     if (!_ensureToastOverlayReady()) return;
-    _toastHostKey.currentState?.show(message);
+    final host = _toastHostKey.currentState;
+    if (host != null) {
+      host.show(message);
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _toastHostKey.currentState?.show(message);
+    });
   }
 
   bool _ensureToastOverlayReady() {
@@ -13924,15 +14025,27 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) {
     if (!mounted) return;
     if (!_ensureToastOverlayReady()) return;
-    _toastHostKey.currentState?.showProgress(
-      message,
-      progress: progress,
-      indeterminate: indeterminate,
-    );
+    final requestId = ++_toastProgressRequestId;
+    void show() {
+      if (!mounted || requestId != _toastProgressRequestId) return;
+      _toastHostKey.currentState?.showProgress(
+        message,
+        progress: progress,
+        indeterminate: indeterminate,
+      );
+    }
+
+    if (_toastHostKey.currentState != null) {
+      show();
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => show());
   }
 
   void _toastProgressDismiss() {
     if (!mounted) return;
+    _toastProgressRequestId++;
     _toastHostKey.currentState?.dismissProgressSoon();
   }
 
@@ -18074,17 +18187,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final hostLabel = resolvedHost.isEmpty ? _defaultBackendHost : resolvedHost;
     final portLabel = _effectiveBackendPort().toString();
     final configuredEndpoint = '$hostLabel:$portLabel';
-    final statusLabel = _backendOnline
+    final backendActionBusy = _backendActionBusy;
+    final backendBusyLabel = _backendActionMessage.trim().isEmpty
+        ? 'Checking backend...'
+        : _backendActionMessage;
+    final backendBusyStatus = backendBusyLabel.replaceAll('...', '').trim();
+    final statusLabel = backendActionBusy
+        ? '$backendBusyStatus on $configuredEndpoint'
+        : _backendOnline
         ? 'Connected on $configuredEndpoint'
         : 'Waiting on $configuredEndpoint';
     final backendLaunchLabel = _atlasBackendActionBusy
-        ? 'Preparing ATLAS Backend...'
+        ? backendBusyLabel
         : _atlasBackendProcess != null
         ? 'ATLAS Backend running'
         : 'Launch ATLAS Backend';
     final canUseManagedBackend =
-        _settings.backendConnectionType == BackendConnectionType.local &&
-        _effectiveBackendPort() == _defaultBackendPort;
+        _settings.backendConnectionType == BackendConnectionType.local;
 
     if (_showBackendConnectionTip &&
         _backendQuickTipStep == 0 &&
@@ -18119,35 +18238,52 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 color: onSurface.withValues(alpha: 0.06),
                 border: Border.all(color: onSurface.withValues(alpha: 0.12)),
               ),
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _backendOnline
-                          ? const Color(0xFF16C47F)
-                          : const Color(0xFFDC3545),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    _backendOnline
-                        ? 'Backend reachable'
-                        : 'Backend not detected',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: onSurface.withValues(alpha: 0.92),
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    statusLabel,
-                    style: TextStyle(
-                      color: onSurface.withValues(alpha: 0.74),
-                      fontWeight: FontWeight.w600,
-                    ),
+                  Row(
+                    children: [
+                      Container(
+                        width: 10,
+                        height: 10,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _backendOnline
+                              ? const Color(0xFF16C47F)
+                              : backendActionBusy
+                              ? secondary.withValues(alpha: 0.92)
+                              : const Color(0xFFDC3545),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        _backendOnline
+                            ? 'Backend reachable'
+                            : backendActionBusy
+                            ? backendBusyLabel.replaceAll('...', '')
+                            : 'Backend not detected',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: onSurface.withValues(alpha: 0.92),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            statusLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.end,
+                            style: TextStyle(
+                              color: onSurface.withValues(alpha: 0.74),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -18222,27 +18358,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       ),
                   onChanged: (value) {
                     final trimmed = value.trim();
-                    if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          remoteBackendHost: '',
-                          backendHost: '',
-                        );
-                      });
-                      if (_backendHostController.text.isNotEmpty) {
-                        _backendHostController.value = const TextEditingValue(
-                          text: '',
-                        );
-                      }
-                      unawaited(_saveSettings(toast: false));
-                      unawaited(_refreshRuntime());
-                      if (mounted) {
-                        _toast(
-                          'Remote backend host cannot be localhost. Use an external host or IP',
-                        );
-                      }
-                      return;
-                    }
                     setState(() {
                       _settings = _settings.copyWith(
                         remoteBackendHost: trimmed,
@@ -18294,7 +18409,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 final compactActions = constraints.maxWidth < 980;
                 final backendLaunchEnabled =
                     canUseManagedBackend &&
-                    !_atlasBackendActionBusy &&
+                    !backendActionBusy &&
                     _atlasBackendProcess == null &&
                     !_backendOnline;
                 const buttonTextStyle = TextStyle(
@@ -18321,12 +18436,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     _atlasBackendProcess != null
                         ? Icons.check_circle_rounded
                         : Icons.play_arrow_rounded,
+                    size: 18,
                   ),
                   label: Text(backendLaunchLabel),
                 );
 
                 final checkButton = FilledButton.tonalIcon(
-                  onPressed: _checkBackendNow,
+                  onPressed: backendActionBusy ? null : _checkBackendNow,
                   style: FilledButton.styleFrom(
                     backgroundColor: secondary.withValues(alpha: 0.92),
                     foregroundColor: Colors.white,
@@ -18339,11 +18455,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     elevation: 0,
                   ),
                   icon: const Icon(Icons.network_check_rounded, size: 18),
-                  label: const Text('Check backend'),
+                  label: Text(
+                    _backendConnectionActionBusy
+                        ? backendBusyLabel
+                        : 'Check backend',
+                  ),
                 );
 
                 final resetButton = OutlinedButton.icon(
-                  onPressed: _resetBackendPreferences,
+                  onPressed: backendActionBusy
+                      ? null
+                      : _resetBackendPreferences,
                   style: OutlinedButton.styleFrom(
                     foregroundColor: onSurface.withValues(alpha: 0.9),
                     side: BorderSide(color: onSurface.withValues(alpha: 0.22)),
@@ -18406,8 +18528,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  Future<void> _launchManagedAtlasBackend() async {
-    if (_atlasBackendActionBusy) return;
+  Future<void> _launchManagedAtlasBackend({
+    bool showProgressToast = true,
+  }) async {
+    if (_backendActionBusy) return;
     if (!Platform.isWindows) {
       _toast('Launching ATLAS Backend is only available on Windows');
       return;
@@ -18417,21 +18541,40 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       await _checkBackendNow();
       return;
     }
-    if (_settings.backendConnectionType != BackendConnectionType.local ||
-        _effectiveBackendPort() != _defaultBackendPort) {
-      _toast('Managed ATLAS Backend launch uses local port 3551');
+    if (_settings.backendConnectionType != BackendConnectionType.local) {
+      _toast('Switch Backend Type to Local to launch ATLAS Backend');
       return;
     }
-    await _refreshRuntime(force: true);
-    if (_backendOnline) {
-      _toast('ATLAS Backend is already running');
-      return;
+    await _useDefaultPortForManagedBackendLaunch(toast: showProgressToast);
+    setState(() {
+      _atlasBackendActionBusy = true;
+      _backendActionMessage = 'Checking backend...';
+    });
+    if (showProgressToast) {
+      _toastProgress('Checking backend...', progress: null, indeterminate: true);
     }
-
-    setState(() => _atlasBackendActionBusy = true);
     try {
+      await _refreshRuntime(force: true);
+      if (_backendOnline) {
+        _toast('ATLAS Backend is already running');
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _backendActionMessage = 'Starting backend...');
+      } else {
+        _backendActionMessage = 'Starting backend...';
+      }
+      if (showProgressToast) {
+        _toastProgress(
+          'Starting ATLAS Backend...',
+          progress: null,
+          indeterminate: true,
+        );
+      }
       var backendExePath = await _findInstalledAtlasBackendExecutable();
       if (backendExePath == null) {
+        if (showProgressToast) _toastProgressDismiss();
         final installChoice = await _promptInstallAtlasBackend();
         if (installChoice == 'install' && backendExePath == null) {
           // Let the dialog finish its close animation before we start I/O work.
@@ -18477,10 +18620,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _log('backend', 'Failed to launch managed ATLAS Backend: $error');
       if (mounted) _toast('Failed to launch ATLAS Backend');
     } finally {
+      if (showProgressToast) _toastProgressDismiss();
       if (mounted) {
-        setState(() => _atlasBackendActionBusy = false);
+        setState(() {
+          _atlasBackendActionBusy = false;
+          _backendActionMessage = '';
+        });
       } else {
         _atlasBackendActionBusy = false;
+        _backendActionMessage = '';
       }
     }
   }
@@ -19581,21 +19729,52 @@ foreach ($app in $appPaths) {
   }
 
   Future<void> _checkBackendNow() async {
+    return _checkBackendNowWithStatus();
+  }
+
+  Future<void> _checkBackendNowWithStatus({
+    String busyMessage = 'Checking backend...',
+  }) async {
+    if (_backendActionBusy) return;
     if (_settings.backendConnectionType == BackendConnectionType.remote) {
       final host = _backendHostController.text.trim();
-      if (host.isEmpty || _isLocalHost(host)) {
-        _toast('Remote host is required and cannot be localhost');
+      if (host.isEmpty) {
+        _toast('Remote host is required');
         return;
       }
     }
-    await _saveSettings(toast: false);
-    await _refreshRuntime(force: true);
-    if (!mounted) return;
-    final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
-    if (_backendOnline) {
-      _toast('Connected to backend on $configured');
+    if (mounted) {
+      setState(() {
+        _backendConnectionActionBusy = true;
+        _backendActionMessage = busyMessage;
+      });
     } else {
-      _toast('No backend detected on $configured');
+      _backendConnectionActionBusy = true;
+      _backendActionMessage = busyMessage;
+    }
+    _toastProgress(busyMessage, progress: null, indeterminate: true);
+    try {
+      await _saveSettings(toast: false);
+      await _refreshRuntime(force: true);
+      if (!mounted) return;
+      final configured =
+          '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
+      if (_backendOnline) {
+        _toast('Connected to backend on $configured');
+      } else {
+        _toast('No backend detected on $configured');
+      }
+    } finally {
+      _toastProgressDismiss();
+      if (mounted) {
+        setState(() {
+          _backendConnectionActionBusy = false;
+          _backendActionMessage = '';
+        });
+      } else {
+        _backendConnectionActionBusy = false;
+        _backendActionMessage = '';
+      }
     }
   }
 
@@ -19645,10 +19824,6 @@ foreach ($app in $appPaths) {
     final host = _backendHostController.text.trim();
     if (host.isEmpty) {
       _toast('Enter a backend host first');
-      return;
-    }
-    if (_isLocalHost(host)) {
-      _toast('Remote backend host cannot be localhost');
       return;
     }
 
@@ -19770,9 +19945,6 @@ foreach ($app in $appPaths) {
 
           if (name.isEmpty) nextNameError = 'Name is required';
           if (host.isEmpty) nextHostError = 'Host is required';
-          if (host.isNotEmpty && _isLocalHost(host)) {
-            nextHostError = 'Host cannot be localhost';
-          }
 
           final parsedPort = int.tryParse(portRaw);
           if (parsedPort == null || parsedPort <= 0 || parsedPort > 65535) {

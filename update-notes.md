@@ -1,4 +1,4 @@
-<!-- version: 1.2.9 -->
+<!-- version: 1.3.0 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,9 +15,7 @@ Markdown Quick Key
 ---
 
 # Improvements
-- You can now add any version of your choice
-
-# Fixes
-- Fixed launching/startup flow
+- Fixed backend detections for custom ports
+- Visual clarity on pinging backends
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
