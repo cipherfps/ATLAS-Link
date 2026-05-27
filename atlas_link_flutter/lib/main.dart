@@ -482,6 +482,8 @@ enum _GameServerPromptAction { ignore, start }
 
 enum BackendConnectionType { local, remote }
 
+enum BackendRuntimeProvider { atlas, external }
+
 extension _BackendConnectionTypeLabel on BackendConnectionType {
   String get label => this == BackendConnectionType.local ? 'Local' : 'Remote';
 }
@@ -516,6 +518,9 @@ class _FortniteProcessState {
   bool exited = false;
   bool postLoginInjected = false;
   bool largePakInjected = false;
+  bool largePakScheduleRequested = false;
+  bool unrealEngineInjected = false;
+  bool unrealEngineInjectionScheduled = false;
   bool gameServerInjected = false;
   bool hostPostLoginPatchersInjected = false;
   bool sawContinueLoggingIn = false;
@@ -653,17 +658,6 @@ class _LaunchAuthCredentials {
   final String password;
 }
 
-class _LaunchSessionTokens {
-  const _LaunchSessionTokens({this.fltoken, this.caldera});
-
-  final String? fltoken;
-  final String? caldera;
-
-  bool get hasAny => fltoken != null || caldera != null;
-
-  bool get hasBoth => fltoken != null && caldera != null;
-}
-
 class LauncherScreen extends StatefulWidget {
   const LauncherScreen({super.key, required this.onDarkModeChanged});
 
@@ -680,32 +674,24 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
+  static const String _eacEosExeName = 'FortniteClient-Win64-Shipping_EAC_EOS.exe';
   static const String _defaultBackendHost = '127.0.0.1';
   static const int _defaultBackendPort = 3551;
+  static const String _defaultExternalBackendStartCommand = 'node app.js';
   static const int _defaultGameServerPort = 7777;
-  static const int _authInjectionInitialDelayMs = 0;
-  static const int _authInjectionRetryDelayMs = 100;
-  static const int _authInjectionMaxRetryDelayMs = 800;
-  static const int _authInjectionMaxAttempts = 3;
-  // Optimized for low-end PCs: increased from 20s to 40s timeout to account for
-  // slow disk I/O, AV scanning, and heavy system contention. This significantly
-  // reduces "Injection timed out" failures on low-end hardware.
-  static const int _dllInjectionWaitMs = 40000;
-  static const int _gameServerInjectionRetryDelayMs = 100;
-  static const int _gameServerInjectionMaxRetryDelayMs = 800;
-  static const int _gameServerInjectionMaxAttempts = 3;
   static const String _legacyLaunchFltoken = '3db3ba5dcbd2e16703f3978d';
   static const String _legacyLaunchCalderaToken =
       'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
-  static const Duration _maxLaunchTokenAge = Duration(days: 30);
-  static const Duration _maxLaunchTokenClockSkew = Duration(minutes: 10);
+  static const String _legacyLaunchCalderaEosToken =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoic2FyYWgiLCJnZW5lcmF0ZWQiOjE3NzQxMjEzNzksImNhbGRlcmFHdWlkIjoiZWYzMGE4MjUtMzFlNi00ZWRhLTlmM2EtZTI4YzgwNjYxODkxIiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXRFT1MiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.f7EcDmsjj3XHzdbMl41YHyJE-LlAirjbjaqzcdqBB_Y';
   static const Duration _playtimeCheckpointInterval = Duration(seconds: 15);
-  // Reduced post-login delay for faster injection start on low-end PCs
-  static const int _postLoginInjectionDelayMs = 300;
-  static const int _headlessFallbackPostLoginDelaySeconds = 16;
+  // Inject memory/console/gameserver synchronously at login (0ms delay).
+  static const int _postLoginInjectionDelayMs = 0;
   // Reduced UI status delay for snappier feedback
   static const int _uiStatusDelayMs = 20;
-  static const String _defaultEpicAuthPassword = 'AtlasDefault';
+  static const String _defaultEpicAuthPassword = 'Rebooted';
+  static const Duration _gameServerPingInterval = Duration(seconds: 5);
+  static const Duration _gameServerLocalPingTimeout = Duration(minutes: 2);
   static const String _aftermathDllName = 'GFSDK_Aftermath_Lib.dll';
   static const String _discordRpcDllName = 'discord-rpc.dll';
   static const String _discordRpcOriginalDllName = 'discord-rpc-original.dll';
@@ -4087,7 +4073,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     _profileAuthPasswordController.text = _settings.profileAuthPassword;
     _backendDirController.text = _settings.backendWorkingDirectory;
     _backendCommandController.text = _settings.backendStartCommand;
-    _backendHostController.text = _effectiveBackendHost();
+    _backendHostController.text =
+        _settings.backendConnectionType == BackendConnectionType.remote
+        ? _settings.remoteBackendHost
+        : '';
     _backendPortController.text = _effectiveBackendPort().toString();
     _unrealEnginePatcherController.text = _settings.unrealEnginePatcherPath;
     _authenticationPatcherController.text = _settings.authenticationPatcherPath;
@@ -4096,29 +4085,42 @@ class _LauncherScreenState extends State<LauncherScreen>
     _largePakPatcherController.text = _settings.largePakPatcherFilePath;
   }
 
-  void _applyControllers() {
+  void _persistBackendFieldsFromControllers() {
+    final parsedPort =
+        int.tryParse(_backendPortController.text.trim()) ?? _defaultBackendPort;
+    if (_settings.backendConnectionType == BackendConnectionType.local) {
+      _settings = _settings.copyWith(
+        localBackendPort: parsedPort.clamp(1, 65535),
+        backendHost: _defaultBackendHost,
+        backendPort: parsedPort.clamp(1, 65535),
+      );
+      return;
+    }
+
     final hostInput = _backendHostController.text.trim();
-    final normalizedRemoteHost = hostInput.isEmpty || _isLocalHost(hostInput)
-        ? ''
-        : hostInput;
+    final normalizedRemoteHost =
+        hostInput.isEmpty || _isLocalHost(hostInput) ? '' : hostInput;
+    _settings = _settings.copyWith(
+      remoteBackendHost: normalizedRemoteHost,
+      remoteBackendPort: parsedPort.clamp(1, 65535),
+      backendHost: normalizedRemoteHost,
+      backendPort: parsedPort.clamp(1, 65535),
+    );
+  }
+
+  void _applyControllers() {
+    _persistBackendFieldsFromControllers();
     _settings = _settings.copyWith(
       backendWorkingDirectory: _backendDirController.text.trim(),
       backendStartCommand: _backendCommandController.text.trim(),
-      backendHost:
-          _settings.backendConnectionType == BackendConnectionType.local
-          ? '127.0.0.1'
-          : normalizedRemoteHost,
-      backendPort:
-          int.tryParse(_backendPortController.text.trim()) ??
-          _settings.backendPort,
     );
   }
 
   String _effectiveBackendHost() {
     if (_settings.backendConnectionType == BackendConnectionType.local) {
-      return '127.0.0.1';
+      return _defaultBackendHost;
     }
-    final host = _settings.backendHost.trim();
+    final host = _settings.remoteBackendHost.trim();
     if (host.isEmpty || _isLocalHost(host)) {
       return '';
     }
@@ -4126,33 +4128,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   int _effectiveBackendPort() {
-    final port = _settings.backendPort;
-    return port > 0 ? port : 3551;
-  }
-
-  String _effectiveBackendHostForLaunchArgs() {
-    final host = _effectiveBackendHost().trim();
-    if (host.isEmpty) return _defaultBackendHost;
-
-    final normalized = host
-        .replaceFirst(RegExp(r'^http://', caseSensitive: false), '')
-        .replaceFirst(RegExp(r'^https://', caseSensitive: false), '')
-        .split('/')
-        .first
-        .trim();
-    if (normalized.isEmpty) return _defaultBackendHost;
-
-    // Strip an inline port if one was provided.
-    if (normalized.startsWith('[')) {
-      final endBracket = normalized.indexOf(']');
-      if (endBracket > 0) {
-        return normalized.substring(1, endBracket).trim();
-      }
-      return normalized.replaceAll('[', '').replaceAll(']', '').trim();
-    }
-
-    final parts = normalized.split(':');
-    return parts.isEmpty ? _defaultBackendHost : parts.first.trim();
+    final port = _settings.backendConnectionType == BackendConnectionType.local
+        ? _settings.localBackendPort
+        : _settings.remoteBackendPort;
+    return port > 0 ? port : _defaultBackendPort;
   }
 
   int _effectiveGameServerPort() {
@@ -4445,12 +4424,13 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _setBackendConnectionType(BackendConnectionType type) async {
     if (_settings.backendConnectionType == type) return;
+    _persistBackendFieldsFromControllers();
     setState(() {
-      _settings = _settings.copyWith(
-        backendConnectionType: type,
-        backendHost: type == BackendConnectionType.local ? '127.0.0.1' : '',
-      );
-      _backendHostController.text = _effectiveBackendHost();
+      _settings = _settings.copyWith(backendConnectionType: type);
+      _backendHostController.text = type == BackendConnectionType.remote
+          ? _settings.remoteBackendHost
+          : '';
+      _backendPortController.text = _effectiveBackendPort().toString();
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
@@ -4579,14 +4559,14 @@ class _LauncherScreenState extends State<LauncherScreen>
     _lastBackendUndetectedToastAt = now;
 
     final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
-    _toast('Backend undetected (configured: $configured)');
+    _toast('Backend undetected on $configured');
   }
 
   bool _backendProxyRequired() {
     if (_settings.backendConnectionType == BackendConnectionType.remote) {
       return true;
     }
-    // Local backend not on the default port: proxy local 3551 -> local custom port.
+    // Local backend not on the default port: proxy through the launcher port.
     return _effectiveBackendPort() != _defaultBackendPort;
   }
 
@@ -4688,7 +4668,11 @@ class _LauncherScreenState extends State<LauncherScreen>
     final port = _effectiveBackendPort();
 
     if (_settings.backendConnectionType == BackendConnectionType.local) {
-      return Uri(scheme: 'http', host: _defaultBackendHost, port: port);
+      if (port == _defaultBackendPort) {
+        return Uri(scheme: 'http', host: _defaultBackendHost, port: port);
+      }
+      final ping = await _pingBackend(_defaultBackendHost, port);
+      return ping;
     }
 
     if (host.isEmpty) return null;
@@ -6654,16 +6638,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final completedSeen = lower.contains(_loginCompletedMarker.toLowerCase());
 
     if (continueLoggingInSeen && completedSeen) {
-      return lower.contains(_loginCompleteStepMarker.toLowerCase())
-          ? 'continue_logging_in_completed_en'
-          : 'continue_logging_in_completed';
+      return 'continue_logging_in_completed';
     }
 
-    // Fallback marker some builds emit immediately after finishing login.
-    if (lower.contains(_loginUiStateTransitionMarker.toLowerCase())) {
-      return 'ui_state_transition';
-    }
+    return null;
+  }
 
+  String? _gameServerPortConflictError() {
+    if (_effectiveGameServerPort() == _effectiveBackendPort()) {
+      return 'Game server port cannot match backend port '
+          '(${_effectiveBackendPort()}). Change the host port in settings.';
+    }
     return null;
   }
 
@@ -6784,18 +6769,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         'garbledLoginCompletion=${state.sawPotentialGarbledLoginCompletion}';
   }
 
-  /// Markers that indicate the client loading screen has completed.
-  /// Multiple markers increase chances of catching game fully loaded in various versions.
+  /// Legacy broad markers retained for readiness diagnostics only.
   static const List<String> _clientLoadingCompleteMarkers = [
     'UI.State.Startup.SubgameSelect',
     'LobbyUI',
-    'Lobby',
     'UI.State.Lobby',
     'Started Application',
     'Foreground',
-    'UGameEngine::Tick',
-    'World changed',
-    'Engine',
   ];
 
   void _handleFortniteOutput(_FortniteProcessState state, String line) {
@@ -6830,38 +6810,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
       unawaited(_performPostLoginInjections(state));
     }
-
-    // Inject the large pak patcher for the client after the loading screen.
-    if (!state.host &&
-        !state.largePakInjected &&
-        state.postLoginInjected &&
-        _clientLoadingCompleteMarkers.any(line.contains)) {
-      state.largePakInjected = true;
-      _log('game', 'Client fully loaded. Scheduling large pak injection...');
-      unawaited(_performDeferredLargePakInjection(state));
-    }
-  }
-
-  int _calculateExponentialBackoffMs(
-    int attempt,
-    int baseDelayMs,
-    int maxDelayMs,
-  ) {
-    // Calculate delay: baseDelay * (2 ^ (attempt - 2)) with jitter, capped at maxDelay
-    // attempt 2: baseDelay, attempt 3: baseDelay * 2, attempt 4: baseDelay * 4, etc.
-    final exponentialDelay = baseDelayMs * (1 << (attempt - 2));
-    final cappedDelay = exponentialDelay > maxDelayMs
-        ? maxDelayMs
-        : exponentialDelay;
-    // Add ±10% random jitter to prevent thundering herd
-    final jitter = (cappedDelay * 0.1 * (_rng.nextDouble() * 2 - 1)).toInt();
-    return (cappedDelay + jitter).clamp(0, maxDelayMs);
   }
 
   Future<void> _performPostLoginInjections(_FortniteProcessState state) async {
-    // Match Reboot's host behavior: once the login marker is seen, inject the
-    // host patchers immediately instead of waiting for later frontend markers.
-    final postLoginDelayMs = state.host ? 0 : _postLoginInjectionDelayMs;
+    // Auth at startup; console + gameserver at login.
+    if (state.host && state.hostPostLoginPatchersInjected) return;
+    if (!state.host && state.unrealEngineInjected) return;
+
+    final postLoginDelayMs = _postLoginInjectionDelayMs;
     if (postLoginDelayMs > 0) {
       await Future.delayed(Duration(milliseconds: postLoginDelayMs));
     }
@@ -6877,25 +6833,26 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         const Duration(milliseconds: _uiStatusDelayMs),
       );
 
-      final report = await _injectConfiguredPatchers(
-        state.pid,
-        state.gameVersion,
-        includeAuth: false,
-        includeMemory: true,
-        includeLargePak: false,
-        includeUnreal: false,
-        includeGameServer: false,
-      );
-
-      final failure = report.firstRequiredFailure;
-      if (failure != null) {
-        _setUiStatus(
-          host: true,
-          message: 'Failed to inject ${failure.name}.',
-          severity: _UiStatusSeverity.error,
+      if (_isChapterOneVersion(state.gameVersion)) {
+        final memoryAttempt = await _injectSinglePatcher(
+          gamePid: state.pid,
+          patcherPath: _settings.memoryPatcherPath,
+          patcherName: 'memory patcher',
+          required: false,
         );
-        return;
+        final memoryFailure = memoryAttempt.required && !memoryAttempt.success
+            ? memoryAttempt
+            : null;
+        if (memoryFailure != null) {
+          _setUiStatus(
+            host: true,
+            message: 'Failed to inject ${memoryFailure.name}.',
+            severity: _UiStatusSeverity.error,
+          );
+          return;
+        }
       }
+
       await _killExistingProcessByPort(
         _effectiveGameServerPort(),
         exceptPid: state.pid,
@@ -6910,21 +6867,35 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     } else {
       _setUiStatus(
         host: false,
-        message: 'Injecting launch patchers...',
+        message: 'Injecting post-login patchers...',
         severity: _UiStatusSeverity.info,
       );
       await Future<void>.delayed(
         const Duration(milliseconds: _uiStatusDelayMs),
       );
 
-      final report = await _injectConfiguredPatchers(
-        state.pid,
-        state.gameVersion,
-        includeAuth: false,
-        includeMemory: true,
-        includeUnreal: true,
-        includeGameServer: false,
+      final attempts = <_InjectionAttempt>[];
+      if (_isChapterOneVersion(state.gameVersion)) {
+        attempts.add(
+          await _injectSinglePatcher(
+            gamePid: state.pid,
+            patcherPath: _settings.memoryPatcherPath,
+            patcherName: 'memory patcher',
+            required: false,
+          ),
+        );
+      }
+      attempts.add(
+        await _injectSinglePatcher(
+          gamePid: state.pid,
+          patcherPath: _settings.unrealEnginePatcherPath,
+          patcherName: 'unreal engine patcher',
+          required: false,
+        ),
       );
+      final report = _InjectionReport(attempts);
+
+      state.unrealEngineInjected = true;
 
       final requiredFailure = report.firstRequiredFailure;
       if (requiredFailure != null) {
@@ -6935,10 +6906,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         );
         return;
       }
-      // Large Pak normally injects on a specific loading-complete marker.
-      // In some game-server launch flows that marker may be delayed/missing,
-      // so schedule a fallback attempt after post-login setup.
-      unawaited(_scheduleLargePakFallbackInjection(state));
 
       final optionalFailure = report.firstOptionalFailure;
       if (optionalFailure != null) {
@@ -6957,69 +6924,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         severity: _UiStatusSeverity.success,
       );
     }
-  }
-
-  Future<void> _performDeferredLargePakInjection(
-    _FortniteProcessState state,
-  ) async {
-    if (state.killed || state.exited || !_settings.largePakPatcherEnabled) {
-      return;
-    }
-
-    // Give the frontend a moment to settle after the loading screen.
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (state.killed || state.exited) return;
-
-    _setUiStatus(
-      host: false,
-      message: 'Injecting large pak patcher...',
-      severity: _UiStatusSeverity.info,
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-
-    final report = await _injectConfiguredPatchers(
-      state.pid,
-      state.gameVersion,
-      includeAuth: false,
-      includeMemory: false,
-      includeLargePak: true,
-      includeUnreal: false,
-      includeGameServer: false,
-    );
-
-    final optionalFailure = report.firstOptionalFailure;
-    if (optionalFailure != null) {
-      _setUiStatus(
-        host: false,
-        message:
-            'Fortnite running (optional patcher issue: ${optionalFailure.name}).',
-        severity: _UiStatusSeverity.warning,
-      );
-      return;
-    }
-
-    _setUiStatus(
-      host: false,
-      message: 'Fortnite running.',
-      severity: _UiStatusSeverity.success,
-    );
-  }
-
-  Future<void> _scheduleLargePakFallbackInjection(
-    _FortniteProcessState state,
-  ) async {
-    if (state.host || !_settings.largePakPatcherEnabled) return;
-
-    await Future<void>.delayed(const Duration(seconds: 8));
-    if (state.killed || state.exited || state.largePakInjected) return;
-    if (!state.postLoginInjected) return;
-
-    state.largePakInjected = true;
-    _log(
-      'game',
-      'Client loading marker not seen in time. Running fallback large pak injection...',
-    );
-    await _performDeferredLargePakInjection(state);
   }
 
   Future<void> _performGameServerInjection(_FortniteProcessState state) async {
@@ -7055,11 +6959,81 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     state.gameServerInjected = true;
+
     _setUiStatus(
       host: true,
-      message: 'Running.',
-      severity: _UiStatusSeverity.success,
+      message: 'Waiting for game server...',
+      severity: _UiStatusSeverity.info,
     );
+    final listening = await _waitForLocalGameServer();
+    if (state.killed || state.exited) return;
+
+    if (listening) {
+      _setUiStatus(
+        host: true,
+        message: 'Running.',
+        severity: _UiStatusSeverity.success,
+      );
+    } else {
+      _log(
+        'gameserver',
+        'Game server DLL injected but local port ${_effectiveGameServerPort()} did not respond in time.',
+      );
+      _setUiStatus(
+        host: true,
+        message: 'Running (port not responding yet).',
+        severity: _UiStatusSeverity.warning,
+      );
+    }
+  }
+
+  Future<bool> _pingGameServerPort(String hostname, int port) async {
+    final host = hostname.toLowerCase() == 'localhost'
+        ? '127.0.0.1'
+        : hostname;
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      await for (final event in socket) {
+        switch (event) {
+          case RawSocketEvent.read:
+            return true;
+          case RawSocketEvent.write:
+            socket.send(
+              base64Decode('AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABA=='),
+              InternetAddress(host),
+              port,
+            );
+          case RawSocketEvent.readClosed:
+          case RawSocketEvent.closed:
+            return false;
+        }
+      }
+      return false;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.close();
+    }
+  }
+
+  Future<bool> _waitForLocalGameServer({
+    Duration timeout = _gameServerLocalPingTimeout,
+  }) async {
+    final port = _effectiveGameServerPort();
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final ping = _pingGameServerPort('127.0.0.1', port).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => false,
+      );
+      if (await ping) {
+        _log('gameserver', 'Local game server responding on port $port.');
+        return true;
+      }
+      await Future.delayed(_gameServerPingInterval);
+    }
+    return false;
   }
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
@@ -7137,6 +7111,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       'Fortnite exited with code $exitCode '
       '(killed=${state.killed}, launched=${state.launched}, '
       'postLoginInjected=${state.postLoginInjected}, '
+      'unrealEngineInjected=${state.unrealEngineInjected}, '
+      'largePakInjected=${state.largePakInjected}, '
       'hostPostLoginPatchersInjected=${state.hostPostLoginPatchersInjected}, '
       'gameServerInjected=${state.gameServerInjected}).',
     );
@@ -7148,8 +7124,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     if (!state.host) {
-      // If hosting was started for this session, stop it only once every client
-      // has exited (multi-launch can have more than one client alive).
       unawaited(_stopSessionLinkedHostingIfNeeded());
     }
 
@@ -7272,6 +7246,65 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _startHosting(overrideVersion: version, triggeredByAutoRestart: true);
   }
 
+  Future<void> _ensureBackendConsoleKeyConfig() async {
+    if (!Platform.isWindows) return;
+
+    const consoleKeyIni =
+        '[/Script/Engine.InputSettings]\n'
+        '+ConsoleKeys=Tilde\n'
+        '+ConsoleKeys=F8\n';
+
+    final roots = <String>{};
+    final configured = _settings.backendWorkingDirectory.trim();
+    if (configured.isNotEmpty) {
+      if (configured.toLowerCase().endsWith('.exe')) {
+        roots.add(File(configured).parent.path);
+      } else if (Directory(configured).existsSync()) {
+        roots.add(configured);
+      }
+    }
+
+    final backendExe = await _findInstalledAtlasBackendExecutable();
+    if (backendExe != null) {
+      roots.add(File(backendExe).parent.path);
+    }
+
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    if (localAppData != null) {
+      for (final relative in [
+        'ATLAS Backend',
+        'Programs/ATLAS Backend',
+        'Programs/ATLAS-Backend',
+      ]) {
+        roots.add(_joinPath([localAppData, relative]));
+      }
+    }
+
+    for (final root in roots) {
+      if (root.trim().isEmpty) continue;
+      try {
+        final cloudDir = Directory(_joinPath([root, 'CloudStorage']));
+        await cloudDir.create(recursive: true);
+        final defaultInput = File(_joinPath([cloudDir.path, 'DefaultInput.ini']));
+        await defaultInput.writeAsString(consoleKeyIni, flush: true);
+        _log('backend', 'Wrote console key config to ${defaultInput.path}.');
+      } catch (error) {
+        _log(
+          'backend',
+          'Failed to write DefaultInput.ini under $root: $error',
+        );
+      }
+    }
+  }
+
+  bool _canAutoLaunchManagedBackend() {
+    return _effectiveBackendPort() == _defaultBackendPort;
+  }
+
+  Future<void> _launchManagedBackend() async {
+    await _launchManagedAtlasBackend();
+  }
+
   Future<bool> _ensureBackendReadyForSession({
     required bool host,
     bool toastOnFailure = true,
@@ -7297,27 +7330,33 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       severity: _UiStatusSeverity.info,
     );
     await _refreshRuntime(force: true);
-    if (_backendOnline) return true;
+    if (_backendOnline) {
+      await _ensureBackendConsoleKeyConfig();
+      return true;
+    }
 
     final shouldLaunchManagedBackend =
         _settings.launchBackendOnSessionStart &&
         _settings.backendConnectionType == BackendConnectionType.local &&
-        _effectiveBackendPort() == _defaultBackendPort &&
-        Platform.isWindows;
+        Platform.isWindows &&
+        _canAutoLaunchManagedBackend();
     if (shouldLaunchManagedBackend) {
       _setUiStatus(
         host: host,
         message: 'Launching ATLAS Backend...',
         severity: _UiStatusSeverity.info,
       );
-      await _launchManagedAtlasBackend();
+      await _launchManagedBackend();
       if (!mounted) return false;
 
       // Give the backend time to bind/listen before proceeding to game processes.
       const attempts = 60;
       for (var attempt = 0; attempt < attempts; attempt++) {
         await _refreshRuntime(force: true);
-        if (_backendOnline) return true;
+        if (_backendOnline) {
+          await _ensureBackendConsoleKeyConfig();
+          return true;
+        }
         if (!mounted) return false;
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
@@ -7436,6 +7475,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         return;
       }
       if (gameServerPrompt == _GameServerPromptAction.start) {
+        final portConflict = _gameServerPortConflictError();
+        if (portConflict != null) {
+          _log('gameserver', portConflict);
+          _setUiStatus(
+            host: true,
+            message: portConflict,
+            severity: _UiStatusSeverity.error,
+          );
+          if (mounted) _toast(portConflict);
+          return;
+        }
         if (mounted) {
           setState(() => _gameServerLaunching = true);
         } else {
@@ -7482,25 +7532,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
       if (launchAuth == null) return;
       final playCustomArgs = _settings.playCustomLaunchArgs;
-      final playLaunchTokens = _resolveLaunchSessionTokens(
-        customArgs: playCustomArgs,
-      );
-      final playTokenValidationError = _validateLaunchSessionTokens(
-        playLaunchTokens,
-      );
-      if (playTokenValidationError != null) {
-        _log(
-          'game',
-          'Launch token validation failed: $playTokenValidationError',
-        );
-        _setUiStatus(
-          host: false,
-          message: playTokenValidationError,
-          severity: _UiStatusSeverity.error,
-        );
-        if (mounted) _toast(playTokenValidationError);
-        return;
-      }
       final launchClientName = _normalizeClientUsername(requestedClientName);
 
       await _deleteAftermathCrashDlls(version.location);
@@ -7509,23 +7540,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _launcherExeName,
         hintDir: exeDir,
       );
-      final eacPid = await _startPausedAuxiliaryProcess(
+      final eac = await _startPausedEacProcess(
         version.location,
-        _eacExeName,
         hintDir: exeDir,
       );
+      final eacPid = eac.pid;
 
-      final backendHost = _effectiveBackendHostForLaunchArgs();
-      final backendPort = _effectiveBackendPort();
-      final args =
-          _createFortniteLaunchArgs(
-              username: launchAuth.login,
-              password: launchAuth.password,
-              launchTokens: playLaunchTokens,
-              customArgs: playCustomArgs,
-            )
-            ..add('-BackendHost=$backendHost')
-            ..add('-BackendPort=$backendPort');
+      final args = _createFortniteLaunchArgs(
+        username: launchAuth.login,
+        password: launchAuth.password,
+        eacEos: eac.eacEos,
+        customArgs: playCustomArgs,
+      );
 
       _log(
         'game',
@@ -8759,6 +8785,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return null;
     }
 
+    final portConflict = _gameServerPortConflictError();
+    if (portConflict != null) {
+      _log('gameserver', portConflict);
+      if (mounted) _toast(portConflict);
+      return null;
+    }
+
     try {
       final exe = await _resolveExecutable(version);
       if (exe == null) {
@@ -8771,19 +8804,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         await _syncCustomDiscordRpcDllForBuild(version);
       }
 
-      // Patch exe for headless mode if enabled
-      if (_settings.hostHeadlessEnabled) {
-        final patched = await _patchExecutableForHeadless(exe);
-        if (patched) {
-          _log('gameserver', 'Patched executable for headless mode.');
-        } else {
-          _log(
-            'gameserver',
-            'Exe headless patch not needed or already applied.',
-          );
-        }
-      }
-
       final hostUsername = _settings.hostUsername.trim().isEmpty
           ? 'host'
           : _settings.hostUsername;
@@ -8793,25 +8813,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
       if (launchAuth == null) return null;
       final hostCustomArgs = _settings.hostCustomLaunchArgs;
-      final hostLaunchTokens = _resolveLaunchSessionTokens(
-        customArgs: hostCustomArgs,
-      );
-      final hostTokenValidationError = _validateLaunchSessionTokens(
-        hostLaunchTokens,
-      );
-      if (hostTokenValidationError != null) {
-        _log(
-          'gameserver',
-          'Launch token validation failed: $hostTokenValidationError',
-        );
-        _setUiStatus(
-          host: true,
-          message: hostTokenValidationError,
-          severity: _UiStatusSeverity.error,
-        );
-        if (mounted) _toast(hostTokenValidationError);
-        return null;
-      }
+      final headless = _settings.hostHeadlessEnabled;
 
       await _deleteAftermathCrashDlls(version.location);
       final launcherPid = await _startPausedAuxiliaryProcess(
@@ -8819,27 +8821,21 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _launcherExeName,
         hintDir: exeDir,
       );
-      final eacPid = await _startPausedAuxiliaryProcess(
+      final eac = await _startPausedEacProcess(
         version.location,
-        _eacExeName,
         hintDir: exeDir,
       );
+      final eacPid = eac.pid;
 
-      final backendHost = _effectiveBackendHostForLaunchArgs();
-      final backendPort = _effectiveBackendPort();
-      final args =
-          _createFortniteLaunchArgs(
-              username: launchAuth.login,
-              password: launchAuth.password,
-              launchTokens: hostLaunchTokens,
-              host: true,
-              headless: _settings.hostHeadlessEnabled,
-              logging: false,
-              hostPort: _effectiveGameServerPort(),
-              customArgs: hostCustomArgs,
-            )
-            ..add('-BackendHost=$backendHost')
-            ..add('-BackendPort=$backendPort');
+      final args = _createFortniteLaunchArgs(
+        username: launchAuth.login,
+        password: launchAuth.password,
+        host: true,
+        headless: headless,
+        logging: false,
+        eacEos: eac.eacEos,
+        customArgs: hostCustomArgs,
+      );
 
       _log(
         'gameserver',
@@ -8873,7 +8869,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         versionId: version.id,
         gameVersion: version.gameVersion,
         clientName: _normalizeClientUsername(hostUsername),
-        headless: _settings.hostHeadlessEnabled,
+        headless: headless,
         launcherPid: launcherPid,
         eacPid: eacPid,
       );
@@ -8911,7 +8907,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           message: 'Waiting for login...',
           severity: _UiStatusSeverity.info,
         );
-        unawaited(_scheduleHostFallbackPostLoginInjections(instance));
       }
       _log(
         'gameserver',
@@ -8925,36 +8920,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       if (mounted) _toast('Failed to start automatic game server');
       return null;
     }
-  }
-
-  Future<void> _scheduleHostFallbackPostLoginInjections(
-    _FortniteProcessState state,
-  ) async {
-    if (!state.host) return;
-    if (state.postLoginInjected) return;
-
-    // Dedicated/headless hosting flows may never emit the UI-based login
-    // markers used by `_loginCompleteSignalReason`. As a safety net, attempt
-    // post-login injections after a short delay if the server is still running.
-    final fallbackDelaySeconds = state.headless
-        ? _headlessFallbackPostLoginDelaySeconds
-        : 12;
-    await Future<void>.delayed(Duration(seconds: fallbackDelaySeconds));
-    if (state.killed || state.exited) return;
-    if (state.postLoginInjected) return;
-
-    state.launched = true;
-    state.postLoginInjected = true;
-    _log(
-      'gameserver',
-      'Login marker not seen. Running fallback post-login injections...',
-    );
-    _setUiStatus(
-      host: true,
-      message: 'Finalizing host launch...',
-      severity: _UiStatusSeverity.info,
-    );
-    unawaited(_performPostLoginInjections(state));
   }
 
   String _normalizeClientUsername(String username) {
@@ -9085,152 +9050,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
   }
 
-  String? _normalizeOptionalLaunchToken(String? value) {
-    final trimmed = value?.trim() ?? '';
-    return trimmed.isEmpty ? null : trimmed;
-  }
-
-  String? _extractLaunchArgValue(List<String> args, String argumentName) {
-    final prefix = '-${argumentName.toUpperCase()}=';
-    for (final arg in args) {
-      final trimmed = arg.trim();
-      if (trimmed.length <= prefix.length) continue;
-      if (trimmed.toUpperCase().startsWith(prefix)) {
-        final value = trimmed.substring(prefix.length).trim();
-        if (value.isNotEmpty) return value;
-      }
-    }
-    return null;
-  }
-
-  _LaunchSessionTokens _resolveLaunchSessionTokens({
-    required String customArgs,
-  }) {
-    final parsedArgs = _splitLaunchArguments(customArgs);
-    final argFltoken = _normalizeOptionalLaunchToken(
-      _extractLaunchArgValue(parsedArgs, 'fltoken'),
-    );
-    final argCaldera = _normalizeOptionalLaunchToken(
-      _extractLaunchArgValue(parsedArgs, 'caldera'),
-    );
-
-    final envFltoken = _normalizeOptionalLaunchToken(
-      Platform.environment['ATLAS_FLTOKEN'],
-    );
-    final envCaldera = _normalizeOptionalLaunchToken(
-      Platform.environment['ATLAS_CALDERA'],
-    );
-
-    final resolvedFltoken = argFltoken ?? envFltoken;
-    final resolvedCaldera = argCaldera ?? envCaldera;
-    if (resolvedFltoken == null && resolvedCaldera == null) {
-      return const _LaunchSessionTokens(
-        fltoken: _legacyLaunchFltoken,
-        caldera: _legacyLaunchCalderaToken,
-      );
-    }
-
-    return _LaunchSessionTokens(
-      fltoken: resolvedFltoken,
-      caldera: resolvedCaldera,
-    );
-  }
-
-  bool _isLegacyLaunchTokenPair(_LaunchSessionTokens tokens) {
-    return tokens.fltoken == _legacyLaunchFltoken &&
-        tokens.caldera == _legacyLaunchCalderaToken;
-  }
-
-  Map<String, dynamic>? _decodeJwtPayloadMap(String token) {
-    final segments = token.split('.');
-    if (segments.length != 3) return null;
-    final payloadSegment = segments[1].trim();
-    if (payloadSegment.isEmpty) return null;
-
-    try {
-      final normalized = base64Url.normalize(payloadSegment);
-      final decoded = utf8.decode(base64Url.decode(normalized));
-      final payload = jsonDecode(decoded);
-      if (payload is Map<String, dynamic>) return payload;
-      if (payload is Map) {
-        return payload.map((key, value) => MapEntry(key.toString(), value));
-      }
-    } catch (_) {
-      return null;
-    }
-
-    return null;
-  }
-
-  String? _validateLaunchSessionTokens(_LaunchSessionTokens tokens) {
-    if (!tokens.hasAny) return null;
-    if (!tokens.hasBoth) {
-      return 'Launch tokens are incomplete. Provide both -fltoken and -caldera.';
-    }
-
-    final fltoken = tokens.fltoken!;
-    if (!RegExp(r'^[A-Za-z0-9._-]{8,256}$').hasMatch(fltoken)) {
-      return 'Launch token (-fltoken) format is invalid.';
-    }
-
-    final caldera = tokens.caldera!;
-    if (!RegExp(
-      r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$',
-    ).hasMatch(caldera)) {
-      return 'Launch token (-caldera) format is invalid.';
-    }
-
-    final payload = _decodeJwtPayloadMap(caldera);
-    if (payload == null) {
-      return 'Launch token (-caldera) payload could not be decoded.';
-    }
-
-    final accountId = payload['account_id']?.toString().trim() ?? '';
-    if (accountId.isEmpty) {
-      return 'Launch token (-caldera) is missing account_id.';
-    }
-
-    final generatedValue = payload['generated'];
-    int? generatedUnixSeconds;
-    if (generatedValue is int) {
-      generatedUnixSeconds = generatedValue;
-    } else if (generatedValue is num) {
-      generatedUnixSeconds = generatedValue.toInt();
-    } else if (generatedValue is String) {
-      generatedUnixSeconds = int.tryParse(generatedValue);
-    }
-    if (generatedUnixSeconds == null || generatedUnixSeconds <= 0) {
-      return 'Launch token (-caldera) is missing a valid generated timestamp.';
-    }
-
-    final generatedAt = DateTime.fromMillisecondsSinceEpoch(
-      generatedUnixSeconds * 1000,
-      isUtc: true,
-    );
-    final now = DateTime.now().toUtc();
-    if (generatedAt.isAfter(now.add(_maxLaunchTokenClockSkew))) {
-      return 'Launch token (-caldera) timestamp is in the future.';
-    }
-    if (!_isLegacyLaunchTokenPair(tokens) &&
-        now.difference(generatedAt) > _maxLaunchTokenAge) {
-      return 'Launch token (-caldera) is stale '
-          '(generated ${generatedAt.toIso8601String()} UTC).';
-    }
-
-    return null;
-  }
-
-  List<String> _removeLaunchTokenArgs(List<String> args) {
-    return args
-        .where((arg) {
-          final upper = arg.toUpperCase();
-          if (upper.startsWith('-FLTOKEN=')) return false;
-          if (upper.startsWith('-CALDERA=')) return false;
-          return true;
-        })
-        .toList(growable: false);
-  }
-
   List<String> _redactSensitiveLaunchArgs(List<String> args) {
     return args
         .map((arg) {
@@ -9255,366 +9074,71 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   List<String> _createFortniteLaunchArgs({
     required String username,
     required String password,
-    required _LaunchSessionTokens launchTokens,
     bool host = false,
     bool headless = false,
     bool logging = false,
-    int? hostPort,
+    bool eacEos = false,
     String customArgs = '',
   }) {
     final resolvedPassword = password.trim().isEmpty
         ? _defaultEpicAuthPassword
         : password;
-    final args = <String>[
-      '-epicapp=Fortnite',
-      '-epicenv=Prod',
-      '-epiclocale=en-us',
-      '-epicportal',
-      '-skippatchcheck',
-      '-nobe',
-      '-fromfl=eac',
-      '-AUTH_LOGIN=$username',
-      '-AUTH_PASSWORD=$resolvedPassword',
-      '-AUTH_TYPE=epic',
-    ];
-    if (launchTokens.hasBoth) {
-      args.add('-fltoken=${launchTokens.fltoken!}');
-      args.add('-caldera=${launchTokens.caldera!}');
-    }
-    if (logging) args.add('-log');
-    if (host) {
-      args.add('-nosplash');
-      args.add('-nosound');
-      if (hostPort != null && hostPort > 0) {
-        args.add('-Port=$hostPort');
-      }
-      if (headless) {
-        args.add('-nullrhi');
-      }
-    }
-    final extras = _removeLaunchTokenArgs(_splitLaunchArguments(customArgs));
-    if (extras.isNotEmpty) {
-      args.addAll(extras);
-    }
-    return args;
-  }
-
-  List<String> _splitLaunchArguments(String raw) {
-    final text = raw.trim();
-    if (text.isEmpty) return const <String>[];
-
-    final args = <String>[];
-    final buffer = StringBuffer();
-    String? activeQuote;
-
-    void flush() {
-      if (buffer.isEmpty) return;
-      args.add(buffer.toString());
-      buffer.clear();
-    }
-
-    for (var i = 0; i < text.length; i++) {
-      final char = text[i];
-      final isQuote = char == '"' || char == "'";
-      if (isQuote) {
-        if (activeQuote == null) {
-          activeQuote = char;
-          continue;
-        }
-        if (activeQuote == char) {
-          activeQuote = null;
-          continue;
-        }
-      }
-
-      if (activeQuote == null && RegExp(r'\s').hasMatch(char)) {
-        flush();
-        continue;
-      }
-      buffer.write(char);
-    }
-    flush();
-    return args;
-  }
-
-  // Binary patch patterns for headless mode
-  // Original string: -invitesession -invitefrom -party_joiningfo_token -replay
-  static final Uint8List _originalHeadlessBytes = Uint8List.fromList([
-    45,
-    0,
-    105,
-    0,
-    110,
-    0,
-    118,
-    0,
-    105,
-    0,
-    116,
-    0,
-    101,
-    0,
-    115,
-    0,
-    101,
-    0,
-    115,
-    0,
-    115,
-    0,
-    105,
-    0,
-    111,
-    0,
-    110,
-    0,
-    32,
-    0,
-    45,
-    0,
-    105,
-    0,
-    110,
-    0,
-    118,
-    0,
-    105,
-    0,
-    116,
-    0,
-    101,
-    0,
-    102,
-    0,
-    114,
-    0,
-    111,
-    0,
-    109,
-    0,
-    32,
-    0,
-    45,
-    0,
-    112,
-    0,
-    97,
-    0,
-    114,
-    0,
-    116,
-    0,
-    121,
-    0,
-    95,
-    0,
-    106,
-    0,
-    111,
-    0,
-    105,
-    0,
-    110,
-    0,
-    105,
-    0,
-    110,
-    0,
-    102,
-    0,
-    111,
-    0,
-    95,
-    0,
-    116,
-    0,
-    111,
-    0,
-    107,
-    0,
-    101,
-    0,
-    110,
-    0,
-    32,
-    0,
-    45,
-    0,
-    114,
-    0,
-    101,
-    0,
-    112,
-    0,
-    108,
-    0,
-    97,
-    0,
-    121,
-    0,
-  ]);
-
-  // Patched string: -log -nosplash -nosound -nullrhi -useolditemcards
-  static final Uint8List _patchedHeadlessBytes = Uint8List.fromList([
-    45,
-    0,
-    108,
-    0,
-    111,
-    0,
-    103,
-    0,
-    32,
-    0,
-    45,
-    0,
-    110,
-    0,
-    111,
-    0,
-    115,
-    0,
-    112,
-    0,
-    108,
-    0,
-    97,
-    0,
-    115,
-    0,
-    104,
-    0,
-    32,
-    0,
-    45,
-    0,
-    110,
-    0,
-    111,
-    0,
-    115,
-    0,
-    111,
-    0,
-    117,
-    0,
-    110,
-    0,
-    100,
-    0,
-    32,
-    0,
-    45,
-    0,
-    110,
-    0,
-    117,
-    0,
-    108,
-    0,
-    108,
-    0,
-    114,
-    0,
-    104,
-    0,
-    105,
-    0,
-    32,
-    0,
-    45,
-    0,
-    117,
-    0,
-    115,
-    0,
-    101,
-    0,
-    111,
-    0,
-    108,
-    0,
-    100,
-    0,
-    105,
-    0,
-    116,
-    0,
-    101,
-    0,
-    109,
-    0,
-    99,
-    0,
-    97,
-    0,
-    114,
-    0,
-    100,
-    0,
-    115,
-    0,
-    32,
-    0,
-    32,
-    0,
-    32,
-    0,
-    32,
-    0,
-    32,
-    0,
-    32,
-    0,
-    32,
-    0,
-  ]);
-
-  Future<bool> _patchExecutableForHeadless(String exePath) async {
-    return Isolate.run(() async {
-      try {
-        final file = File(exePath);
-        if (!file.existsSync()) return false;
-
-        final original = _originalHeadlessBytes;
-        final patched = _patchedHeadlessBytes;
-
-        if (original.length != patched.length) {
-          throw Exception('Patch length mismatch');
-        }
-
-        final bytes = await file.readAsBytes();
-        var patchOffset = -1;
-        var matchCount = 0;
-
-        // Find the original pattern in the exe
-        for (var i = 0; i < bytes.length; i++) {
-          if (bytes[i] == original[matchCount]) {
-            if (patchOffset == -1) patchOffset = i;
-            matchCount++;
-            if (matchCount == original.length) break;
-          } else {
-            patchOffset = -1;
-            matchCount = 0;
-          }
-        }
-
-        if (patchOffset == -1) {
-          // Pattern not found - might be already patched or different version
-          return false;
-        }
-
-        // Apply the patch
-        for (var i = 0; i < patched.length; i++) {
-          bytes[patchOffset + i] = patched[i];
-        }
-
-        await file.writeAsBytes(bytes, flush: true);
-        return true;
-      } catch (error) {
-        return false;
-      }
+    final args = LinkedHashMap<String, String>(
+      equals: (a, b) => a.toUpperCase() == b.toUpperCase(),
+      hashCode: (a) => a.toUpperCase().hashCode,
+    );
+    args.addAll(<String, String>{
+      '-epicapp': 'Fortnite',
+      '-epicenv': 'Prod',
+      '-epiclocale': 'en-us',
+      '-epicportal': '',
+      '-skippatchcheck': '',
+      '-nobe': '',
+      '-fromfl': eacEos ? 'eaceos' : 'eac',
+      '-fltoken': _legacyLaunchFltoken,
+      '-caldera': eacEos
+          ? _legacyLaunchCalderaEosToken
+          : _legacyLaunchCalderaToken,
+      '-AUTH_LOGIN': username,
+      '-AUTH_PASSWORD': resolvedPassword,
+      '-AUTH_TYPE': 'epic',
     });
+    if (eacEos) {
+      args['-nouac'] = '';
+      args['-nocodeguards'] = '';
+    }
+    if (logging) {
+      args['-log'] = '';
+    }
+    if (host) {
+      args['-nosplash'] = '';
+      args['-nosound'] = '';
+      if (headless) {
+        args['-nullrhi'] = '';
+      }
+    }
+
+    for (final additionalArg in customArgs.split(' ')) {
+      if (additionalArg.isEmpty) continue;
+      final separatorIndex = additionalArg.indexOf('=');
+      final argName = separatorIndex == -1
+          ? additionalArg
+          : additionalArg.substring(0, separatorIndex);
+      final argValue =
+          separatorIndex == -1 ||
+              separatorIndex + 1 >= additionalArg.length
+          ? ''
+          : additionalArg.substring(separatorIndex + 1);
+      args[argName] = argValue;
+    }
+
+    return args.entries
+        .map(
+          (entry) => entry.value.isEmpty
+              ? entry.key
+              : '${entry.key}=${entry.value}',
+        )
+        .toList(growable: false);
   }
 
   Future<void> _deleteAftermathCrashDlls(String buildRootPath) async {
@@ -9992,6 +9516,26 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     });
   }
 
+  Future<({int? pid, bool eacEos})> _startPausedEacProcess(
+    String buildRootPath, {
+    String? hintDir,
+  }) async {
+    final eacPid = await _startPausedAuxiliaryProcess(
+      buildRootPath,
+      _eacExeName,
+      hintDir: hintDir,
+    );
+    if (eacPid != null) {
+      return (pid: eacPid, eacEos: false);
+    }
+    final eosPid = await _startPausedAuxiliaryProcess(
+      buildRootPath,
+      _eacEosExeName,
+      hintDir: hintDir,
+    );
+    return (pid: eosPid, eacEos: eosPid != null);
+  }
+
   Future<int?> _startPausedAuxiliaryProcess(
     String buildRootPath,
     String exeName, {
@@ -10078,9 +9622,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         );
       } else {
         attempts.add(
-          await _injectAuthenticationPatcherWithRetry(
+          await _injectSinglePatcher(
             gamePid: gamePid,
-            authPath: authPath,
+            patcherPath: authPath,
+            patcherName: 'authentication patcher',
+            required: true,
           ),
         );
       }
@@ -10144,7 +9690,27 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     if (includeUnreal) {
       final unrealPath = _settings.unrealEnginePatcherPath.trim();
-      if (unrealPath.isEmpty) {
+      final gameServerPath = _settings.gameServerFilePath.trim();
+      if (unrealPath.isNotEmpty &&
+          gameServerPath.isNotEmpty &&
+          _normalizePath(unrealPath) == _normalizePath(gameServerPath)) {
+        _log(
+          'game',
+          'Unreal engine patcher path matches game server path. '
+          'Configure separate DLLs for the unreal engine patcher and game server.',
+        );
+        parallelInjections.add(
+          Future.value(
+            const _InjectionAttempt(
+              name: 'unreal engine patcher',
+              required: false,
+              attempted: false,
+              success: false,
+              error: 'Same path as game server DLL.',
+            ),
+          ),
+        );
+      } else if (unrealPath.isEmpty) {
         parallelInjections.add(
           Future.value(
             const _InjectionAttempt(
@@ -10172,9 +9738,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final gameServerPath = _settings.gameServerFilePath.trim();
       if (gameServerPath.isNotEmpty) {
         parallelInjections.add(
-          _injectGameServerPatcherWithRetry(
+          _injectSinglePatcher(
             gamePid: gamePid,
-            gameServerPath: gameServerPath,
+            patcherPath: gameServerPath,
+            patcherName: 'game server',
+            required: true,
           ),
         );
       } else {
@@ -10201,154 +9769,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     return _InjectionReport(attempts);
   }
 
-  Future<_InjectionAttempt> _injectGameServerPatcherWithRetry({
-    required int gamePid,
-    required String gameServerPath,
-  }) async {
-    _InjectionAttempt attempt = await _injectSinglePatcher(
-      gamePid: gamePid,
-      patcherPath: gameServerPath,
-      patcherName: 'game server',
-      required: true,
-      waitForCompletion: false,
-      useAnsiLoadLibrary: true,
-    );
-    if (attempt.success || !attempt.attempted) return attempt;
-
-    for (var retry = 2; retry <= _gameServerInjectionMaxAttempts; retry++) {
-      _log(
-        'game',
-        'Game server injection retry $retry/$_gameServerInjectionMaxAttempts.',
-      );
-      // Use exponential backoff instead of fixed delay for better low-end PC performance
-      final delayMs = _calculateExponentialBackoffMs(
-        retry,
-        _gameServerInjectionRetryDelayMs,
-        _gameServerInjectionMaxRetryDelayMs,
-      );
-      await Future<void>.delayed(Duration(milliseconds: delayMs));
-      attempt = await _injectSinglePatcher(
-        gamePid: gamePid,
-        patcherPath: gameServerPath,
-        patcherName: 'game server',
-        required: true,
-        waitForCompletion: false,
-        useAnsiLoadLibrary: true,
-      );
-      if (attempt.success || !attempt.attempted) return attempt;
-    }
-
-    final baseError = attempt.error ?? 'Unknown error.';
-    return _InjectionAttempt(
-      name: attempt.name,
-      required: attempt.required,
-      attempted: attempt.attempted,
-      success: false,
-      error: '$baseError (after $_gameServerInjectionMaxAttempts attempts)',
-    );
-  }
-
-  Future<_InjectionAttempt> _injectAuthenticationPatcherWithRetry({
-    required int gamePid,
-    required String authPath,
-  }) async {
-    await Future<void>.delayed(
-      const Duration(milliseconds: _authInjectionInitialDelayMs),
-    );
-
-    Future<String> repairAuthPathIfNeeded(String configured) async {
-      final candidate = configured.trim();
-      if (candidate.isNotEmpty && File(candidate).existsSync()) {
-        return candidate;
-      }
-
-      final bundledPath = await _ensureBundledDll(
-        bundledAssetPath: 'assets/dlls/Tellurium.dll',
-        bundledFileName: 'Tellurium.dll',
-        label: 'authentication patcher',
-      );
-      final nextPath = bundledPath?.trim() ?? '';
-      if (nextPath.isEmpty) return candidate;
-
-      _log(
-        'settings',
-        'Repairing authentication patcher path. Using bundled default at $nextPath.',
-      );
-      if (mounted) {
-        setState(() {
-          _settings = _settings.copyWith(authenticationPatcherPath: nextPath);
-          _authenticationPatcherController.text = nextPath;
-        });
-      } else {
-        _settings = _settings.copyWith(authenticationPatcherPath: nextPath);
-        _authenticationPatcherController.text = nextPath;
-      }
-      try {
-        await _saveSettings(toast: false, applyControllers: false);
-      } catch (error) {
-        _log(
-          'settings',
-          'Failed to persist repaired auth patcher path: $error',
-        );
-      }
-      return nextPath;
-    }
-
-    var resolvedAuthPath = await repairAuthPathIfNeeded(authPath);
-    _InjectionAttempt attempt = await _injectSinglePatcher(
-      gamePid: gamePid,
-      patcherPath: resolvedAuthPath,
-      patcherName: 'authentication patcher',
-      required: true,
-    );
-    if (attempt.success || !attempt.attempted) return attempt;
-
-    for (var retry = 2; retry <= _authInjectionMaxAttempts; retry++) {
-      _log(
-        'game',
-        'Authentication patcher injection retry $retry/$_authInjectionMaxAttempts.',
-      );
-      // Use exponential backoff instead of fixed delay for better low-end PC performance
-      final delayMs = _calculateExponentialBackoffMs(
-        retry,
-        _authInjectionRetryDelayMs,
-        _authInjectionMaxRetryDelayMs,
-      );
-      await Future<void>.delayed(Duration(milliseconds: delayMs));
-      resolvedAuthPath = await repairAuthPathIfNeeded(resolvedAuthPath);
-      attempt = await _injectSinglePatcher(
-        gamePid: gamePid,
-        patcherPath: resolvedAuthPath,
-        patcherName: 'authentication patcher',
-        required: true,
-      );
-      if (attempt.success || !attempt.attempted) return attempt;
-    }
-
-    final baseError = attempt.error ?? 'Unknown error.';
-    return _InjectionAttempt(
-      name: attempt.name,
-      required: attempt.required,
-      attempted: attempt.attempted,
-      success: false,
-      error: '$baseError (after $_authInjectionMaxAttempts attempts)',
-    );
-  }
-
-  bool _isChapterOneVersion(String version) {
-    final match = RegExp(r'\d+').firstMatch(version);
-    final major = int.tryParse(match?.group(0) ?? '');
-    if (major == null) return true;
-    return major < 10;
-  }
-
   Future<_InjectionAttempt> _injectSinglePatcher({
     required int gamePid,
     required String patcherPath,
     required String patcherName,
     required bool required,
-    bool waitForCompletion = true,
-    bool useAnsiLoadLibrary = false,
   }) async {
     final path = patcherPath.trim();
     if (path.isEmpty) {
@@ -10384,12 +9809,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     try {
-      await _injectDllIntoProcess(
-        gamePid,
-        path,
-        waitForCompletion: waitForCompletion,
-        useAnsiLoadLibrary: useAnsiLoadLibrary,
-      );
+      await _injectDllIntoProcess(gamePid, path);
       _log('game', 'Injected $patcherName.');
       return _InjectionAttempt(
         name: patcherName,
@@ -10409,12 +9829,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
-  Future<void> _injectDllIntoProcess(
-    int pid,
-    String dllPath, {
-    bool waitForCompletion = true,
-    bool useAnsiLoadLibrary = false,
-  }) async {
+  bool _isChapterOneVersion(String version) {
+    final match = RegExp(r'\d+').firstMatch(version);
+    final major = int.tryParse(match?.group(0) ?? '');
+    if (major == null) return true;
+    return major < 10;
+  }
+
+  Future<void> _injectDllIntoProcess(int pid, String dllPath) async {
     if (!Platform.isWindows) return;
     final dllFile = File(dllPath);
     if (!dllFile.existsSync()) {
@@ -10427,149 +9849,68 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       throw '$dllLabel is not accessible';
     }
 
-    // WinAPI calls (notably WaitForSingleObject) can block the UI isolate, so
-    // do the injection work in a background isolate.
-    await Isolate.run(() {
-      const waitObject0 = 0x00000000;
-      const waitTimeout = 0x00000102;
+    // LoadLibraryA remote thread, fire-and-forget (no wait/retry).
+    const processAccess = 0x43A;
+    final processHandle = OpenProcess(processAccess, FALSE, pid);
+    if (processHandle == NULL) {
+      throw 'OpenProcess failed for pid $pid';
+    }
 
-      final processHandle = OpenProcess(
-        PROCESS_CREATE_THREAD |
-            PROCESS_QUERY_INFORMATION |
-            PROCESS_VM_OPERATION |
-            PROCESS_VM_WRITE |
-            PROCESS_VM_READ,
-        FALSE,
-        pid,
+    final kernelModuleName = 'KERNEL32'.toNativeUtf16();
+    final loadLibraryProcName = 'LoadLibraryA'.toNativeUtf8();
+    final dllPathNative = dllPath.toNativeUtf8();
+
+    try {
+      final kernelModule = GetModuleHandle(kernelModuleName);
+      if (kernelModule == NULL) {
+        throw 'GetModuleHandle failed.';
+      }
+
+      final processAddress = GetProcAddress(kernelModule, loadLibraryProcName);
+      if (processAddress == ffi.nullptr) {
+        throw 'GetProcAddress failed for LoadLibraryA.';
+      }
+
+      final dllAddress = VirtualAllocEx(
+        processHandle,
+        ffi.nullptr,
+        dllPath.length + 1,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE,
       );
-      if (processHandle == NULL) {
-        throw 'OpenProcess failed for pid $pid';
+      if (dllAddress == ffi.nullptr) {
+        throw 'VirtualAllocEx failed.';
       }
 
-      final kernelModuleName = 'KERNEL32.DLL'.toNativeUtf16();
-      final loadLibraryProcName =
-          (useAnsiLoadLibrary ? 'LoadLibraryA' : 'LoadLibraryW').toNativeUtf8();
-      final dllPathNativeUtf8 = useAnsiLoadLibrary
-          ? dllPath.toNativeUtf8()
-          : null;
-      final dllPathNativeUtf16 = useAnsiLoadLibrary
-          ? null
-          : dllPath.toNativeUtf16();
-
-      try {
-        final kernelModule = GetModuleHandle(kernelModuleName);
-        if (kernelModule == NULL) {
-          throw 'GetModuleHandle failed.';
-        }
-
-        final processAddress = GetProcAddress(
-          kernelModule,
-          loadLibraryProcName,
-        );
-        if (processAddress == ffi.nullptr) {
-          final procName = useAnsiLoadLibrary ? 'LoadLibraryA' : 'LoadLibraryW';
-          throw 'GetProcAddress failed for $procName.';
-        }
-
-        final bytesLength = useAnsiLoadLibrary
-            ? utf8.encode(dllPath).length + 1
-            : (dllPath.length + 1) * 2;
-        final remoteAddress = VirtualAllocEx(
-          processHandle,
-          ffi.nullptr,
-          bytesLength,
-          MEM_COMMIT | MEM_RESERVE,
-          PAGE_READWRITE,
-        );
-        if (remoteAddress == ffi.nullptr) {
-          throw 'VirtualAllocEx failed.';
-        }
-
-        final writeMemoryResult = WriteProcessMemory(
-          processHandle,
-          remoteAddress,
-          useAnsiLoadLibrary
-              ? dllPathNativeUtf8!.cast()
-              : dllPathNativeUtf16!.cast(),
-          bytesLength,
-          ffi.nullptr,
-        );
-        if (writeMemoryResult != 1) {
-          throw 'WriteProcessMemory failed.';
-        }
-
-        var createThreadResult = NULL;
-        var releaseRemoteAddress = true;
-        try {
-          createThreadResult = CreateRemoteThread(
-            processHandle,
-            ffi.nullptr,
-            0,
-            processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
-            remoteAddress,
-            0,
-            ffi.nullptr,
-          );
-          if (createThreadResult == NULL) {
-            throw 'CreateRemoteThread failed.';
-          }
-
-          if (!waitForCompletion) {
-            // Reboot-style injection: some game-server DLLs do heavy work in
-            // their loader thread. Do not wait on or free the remote path while
-            // the target process may still be loading the module.
-            releaseRemoteAddress = false;
-            return;
-          }
-
-          final waitResult = WaitForSingleObject(
-            createThreadResult,
-            _dllInjectionWaitMs,
-          );
-          if (waitResult == waitTimeout) {
-            throw 'Injection timed out.';
-          }
-          if (waitResult != waitObject0) {
-            throw 'WaitForSingleObject failed (code $waitResult).';
-          }
-
-          final exitCode = calloc<ffi.Uint32>();
-          try {
-            final kernel32 = ffi.DynamicLibrary.open('kernel32.dll');
-            final getExitCodeThread = kernel32
-                .lookupFunction<
-                  ffi.Int32 Function(ffi.IntPtr, ffi.Pointer<ffi.Uint32>),
-                  int Function(int, ffi.Pointer<ffi.Uint32>)
-                >('GetExitCodeThread');
-
-            final ok = getExitCodeThread(createThreadResult, exitCode);
-            if (ok == 0) throw 'GetExitCodeThread failed.';
-            if (exitCode.value == 0) {
-              throw 'LoadLibraryW returned 0 (DLL failed to load).';
-            }
-          } finally {
-            calloc.free(exitCode);
-          }
-        } finally {
-          if (releaseRemoteAddress) {
-            VirtualFreeEx(processHandle, remoteAddress, 0, MEM_RELEASE);
-          }
-          if (createThreadResult != NULL) {
-            CloseHandle(createThreadResult);
-          }
-        }
-      } finally {
-        calloc.free(kernelModuleName);
-        calloc.free(loadLibraryProcName);
-        if (dllPathNativeUtf8 != null) {
-          calloc.free(dllPathNativeUtf8);
-        }
-        if (dllPathNativeUtf16 != null) {
-          calloc.free(dllPathNativeUtf16);
-        }
-        CloseHandle(processHandle);
+      final writeMemoryResult = WriteProcessMemory(
+        processHandle,
+        dllAddress,
+        dllPathNative.cast(),
+        dllPath.length,
+        ffi.nullptr,
+      );
+      if (writeMemoryResult != 1) {
+        throw 'WriteProcessMemory failed.';
       }
-    });
+
+      final createThreadResult = CreateRemoteThread(
+        processHandle,
+        ffi.nullptr,
+        0,
+        processAddress.cast<ffi.NativeFunction<LPTHREAD_START_ROUTINE>>(),
+        dllAddress,
+        0,
+        ffi.nullptr,
+      );
+      if (createThreadResult == -1) {
+        throw 'CreateRemoteThread failed.';
+      }
+    } finally {
+      calloc.free(kernelModuleName);
+      calloc.free(loadLibraryProcName);
+      calloc.free(dllPathNative);
+      CloseHandle(processHandle);
+    }
   }
 
   Future<void> _closeFortnite() async {
@@ -10843,23 +10184,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         return;
       }
       final executable = shippingPaths.first;
-      update('Applying headless patch…', progress: 0.25);
+      update('Applying headless patch…', progress: 0.55);
       await patchHeadless(File(executable));
-
-      update('Reading game version…', progress: 0.5);
-      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+      update('Reading game version…', progress: 0.35);
+      final importInfo = await extractBuildImportInfo(
         importRequest.buildRootPath,
       );
-      if (shouldRejectImportVersion(resolvedGameVersion)) {
-        _toast(
-          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
-        );
-        return;
-      }
       update('Finding splash image…', progress: 0.72);
       final splashImagePath = await _findBuildSplashImage(
         importRequest.buildRootPath,
-        gameVersionHint: resolvedGameVersion,
+        gameVersionHint: importInfo.gameVersion,
         buildNameHint: importRequest.buildName,
       );
 
@@ -10867,7 +10201,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final version = VersionEntry(
         id: '${DateTime.now().millisecondsSinceEpoch}-${_rng.nextInt(90000)}',
         name: importRequest.buildName,
-        gameVersion: resolvedGameVersion,
+        gameVersion: importInfo.gameVersion,
+        engineChangelist: importInfo.engineChangelist,
         location: importRequest.buildRootPath,
         executablePath: executable,
         splashImagePath: splashImagePath ?? '',
@@ -11037,26 +10372,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
       final executable = shippingPaths.first;
 
-      phase('Importing', 0.38);
+      phase('Headless patch', 0.44);
       await patchHeadless(File(executable));
 
+      phase('Importing', 0.38);
       phase('Reading version', 0.52);
-      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+      final importInfo = await extractBuildImportInfo(
         root,
       );
-      if (shouldRejectImportVersion(resolvedGameVersion)) {
-        skippedInvalid++;
-        onProgress?.call(
-          'Skipped (unsupported version): $label (${i + 1} of $total)',
-          progress: (i + 1) / total,
-        );
-        continue;
-      }
-
       phase('Splash image', 0.68);
       final splashImagePath = await _findBuildSplashImage(
         root,
-        gameVersionHint: resolvedGameVersion,
+        gameVersionHint: importInfo.gameVersion,
         buildNameHint: label,
       );
 
@@ -11065,7 +10392,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         VersionEntry(
           id: '${DateTime.now().millisecondsSinceEpoch}-$i-${_rng.nextInt(90000)}',
           name: label,
-          gameVersion: resolvedGameVersion,
+          gameVersion: importInfo.gameVersion,
+          engineChangelist: importInfo.engineChangelist,
           location: root,
           executablePath: executable,
           splashImagePath: splashImagePath ?? '',
@@ -11155,23 +10483,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         return;
       }
       final executable = shippingPaths.first;
-      update('Applying headless patch…', progress: 0.3);
+      update('Applying headless patch…', progress: 0.62);
       await patchHeadless(File(executable));
-
-      update('Reading game version…', progress: 0.55);
-      final resolvedGameVersion = await extractGameVersionFromBuildDirectory(
+      update('Reading game version…', progress: 0.45);
+      final importInfo = await extractBuildImportInfo(
         editRequest.buildRootPath,
       );
-      if (shouldRejectImportVersion(resolvedGameVersion)) {
-        _toast(
-          'This build version is not supported (must be below $kMaxAllowedImportVersion).',
-        );
-        return;
-      }
       update('Finding splash image…', progress: 0.78);
       final splashImagePath = await _findBuildSplashImage(
         editRequest.buildRootPath,
-        gameVersionHint: resolvedGameVersion,
+        gameVersionHint: importInfo.gameVersion,
         buildNameHint: editRequest.buildName,
       );
 
@@ -11182,7 +10503,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             if (version.id != entry.id) return version;
             return version.copyWith(
               name: editRequest.buildName,
-              gameVersion: resolvedGameVersion,
+              gameVersion: importInfo.gameVersion,
+              engineChangelist: importInfo.engineChangelist,
+              clearEngineChangelist: importInfo.engineChangelist == null,
               location: editRequest.buildRootPath,
               executablePath: executable,
               splashImagePath: splashImagePath ?? '',
@@ -15059,7 +14382,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                             ),
                                             _buildVersionTag(
                                               context,
-                                              label: 'v30.00',
+                                              label: 'v32.11',
                                               accent: Theme.of(
                                                 context,
                                               ).colorScheme.secondary,
@@ -15612,34 +14935,38 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   void _beginBackendTipPreviewIfNeeded() {
     _backendQuickTipOriginalType ??= _settings.backendConnectionType;
-    _backendQuickTipOriginalHost ??= _settings.backendHost;
+    _backendQuickTipOriginalHost ??= _settings.remoteBackendHost;
   }
 
   void _previewBackendTypeForTip(BackendConnectionType type) {
     _beginBackendTipPreviewIfNeeded();
-    final originalHost = _backendQuickTipOriginalHost ?? _settings.backendHost;
-    final previewHost = type == BackendConnectionType.local
-        ? '127.0.0.1'
-        : originalHost;
+    final originalHost =
+        _backendQuickTipOriginalHost ?? _settings.remoteBackendHost;
     setState(() {
-      _settings = _settings.copyWith(
-        backendConnectionType: type,
-        backendHost: previewHost,
-      );
-      _backendHostController.text = _effectiveBackendHost();
+      _settings = _settings.copyWith(backendConnectionType: type);
+      _backendHostController.text = type == BackendConnectionType.remote
+          ? originalHost
+          : '';
+      _backendPortController.text = _effectiveBackendPort().toString();
     });
   }
 
   void _restoreBackendTypeAfterTipPreview() {
     final originalType = _backendQuickTipOriginalType;
     if (originalType == null) return;
-    final originalHost = _backendQuickTipOriginalHost ?? _settings.backendHost;
+    final originalHost =
+        _backendQuickTipOriginalHost ?? _settings.remoteBackendHost;
     setState(() {
       _settings = _settings.copyWith(
         backendConnectionType: originalType,
-        backendHost: originalHost,
+        remoteBackendHost: originalType == BackendConnectionType.remote
+            ? originalHost
+            : _settings.remoteBackendHost,
       );
-      _backendHostController.text = _effectiveBackendHost();
+      _backendHostController.text = originalType == BackendConnectionType.remote
+          ? originalHost
+          : '';
+      _backendPortController.text = _effectiveBackendPort().toString();
       _backendQuickTipOriginalType = null;
       _backendQuickTipOriginalHost = null;
     });
@@ -15691,7 +15018,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     Widget stepContent;
     if (!stepTwo && !stepThree) {
       stepContent = Text(
-        'Running your own backend? Keep Type on Local so Link uses your local server settings.',
+        'Running your own backend on this PC? Keep Type on Local and set Port to whatever your backend listens on (for example 5595 for Neonite). Link proxies Fortnite through 3551.',
         style: TextStyle(
           fontSize: 12.5,
           height: 1.28,
@@ -18744,18 +18071,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
     final resolvedHost = _effectiveBackendHost().trim();
-    final hostLabel = resolvedHost.isEmpty ? '127.0.0.1' : resolvedHost;
+    final hostLabel = resolvedHost.isEmpty ? _defaultBackendHost : resolvedHost;
     final portLabel = _effectiveBackendPort().toString();
-    final endpointLabel = '$hostLabel:$portLabel';
+    final configuredEndpoint = '$hostLabel:$portLabel';
     final statusLabel = _backendOnline
-        ? 'Connected on $endpointLabel'
-        : 'Waiting on $endpointLabel';
+        ? 'Connected on $configuredEndpoint'
+        : 'Waiting on $configuredEndpoint';
     final backendLaunchLabel = _atlasBackendActionBusy
         ? 'Preparing ATLAS Backend...'
         : _atlasBackendProcess != null
         ? 'ATLAS Backend running'
         : 'Launch ATLAS Backend';
-    final canUseManagedAtlasBackend =
+    final canUseManagedBackend =
         _settings.backendConnectionType == BackendConnectionType.local &&
         _effectiveBackendPort() == _defaultBackendPort;
 
@@ -18834,7 +18161,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               icon: Icons.settings_ethernet_rounded,
               title: 'Type',
               subtitle:
-                  'Choose Local for a local backend or Remote for another host',
+                  'The type of backend to use when logging into Fortnite',
               trailing: _tipPulseGlowIf(
                 DropdownButtonFormField<BackendConnectionType>(
                   initialValue: _settings.backendConnectionType,
@@ -18897,7 +18224,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     final trimmed = value.trim();
                     if (trimmed.isNotEmpty && _isLocalHost(trimmed)) {
                       setState(() {
-                        _settings = _settings.copyWith(backendHost: '');
+                        _settings = _settings.copyWith(
+                          remoteBackendHost: '',
+                          backendHost: '',
+                        );
                       });
                       if (_backendHostController.text.isNotEmpty) {
                         _backendHostController.value = const TextEditingValue(
@@ -18914,7 +18244,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       return;
                     }
                     setState(() {
-                      _settings = _settings.copyWith(backendHost: trimmed);
+                      _settings = _settings.copyWith(
+                        remoteBackendHost: trimmed,
+                        backendHost: trimmed,
+                      );
                     });
                     unawaited(_saveSettings(toast: false));
                     unawaited(_refreshRuntime());
@@ -18930,12 +18263,25 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 controller: _backendPortController,
                 keyboardType: TextInputType.number,
                 inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: _backendFieldDecoration(hintText: '3551'),
+                decoration: _backendFieldDecoration(
+                  hintText: '3551',
+                ),
                 onChanged: (value) {
                   final parsed = int.tryParse(value);
                   if (parsed == null || parsed <= 0) return;
                   setState(() {
-                    _settings = _settings.copyWith(backendPort: parsed);
+                    if (_settings.backendConnectionType ==
+                        BackendConnectionType.local) {
+                      _settings = _settings.copyWith(
+                        localBackendPort: parsed,
+                        backendPort: parsed,
+                      );
+                    } else {
+                      _settings = _settings.copyWith(
+                        remoteBackendPort: parsed,
+                        backendPort: parsed,
+                      );
+                    }
                   });
                   unawaited(_saveSettings(toast: false));
                   unawaited(_refreshRuntime());
@@ -18947,7 +18293,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               builder: (context, constraints) {
                 final compactActions = constraints.maxWidth < 980;
                 final backendLaunchEnabled =
-                    canUseManagedAtlasBackend &&
+                    canUseManagedBackend &&
                     !_atlasBackendActionBusy &&
                     _atlasBackendProcess == null &&
                     !_backendOnline;
@@ -18958,7 +18304,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
                 final launchButton = FilledButton.icon(
                   onPressed: backendLaunchEnabled
-                      ? _launchManagedAtlasBackend
+                      ? _launchManagedBackend
                       : null,
                   style: FilledButton.styleFrom(
                     backgroundColor: secondary.withValues(alpha: 0.92),
@@ -20246,23 +19592,30 @@ foreach ($app in $appPaths) {
     await _refreshRuntime(force: true);
     if (!mounted) return;
     final configured = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
-    final effective = '$_defaultBackendHost:$_defaultBackendPort';
     if (_backendOnline) {
-      _toast('Connected to backend on $effective (configured: $configured)');
+      _toast('Connected to backend on $configured');
     } else {
-      _toast('No backend detected (configured: $configured)');
+      _toast('No backend detected on $configured');
     }
   }
 
   Future<void> _resetBackendPreferences() async {
     setState(() {
       _settings = _settings.copyWith(
+        backendRuntimeProvider: BackendRuntimeProvider.atlas,
         backendConnectionType: BackendConnectionType.local,
-        backendHost: '127.0.0.1',
-        backendPort: 3551,
+        backendHost: _defaultBackendHost,
+        backendPort: _defaultBackendPort,
+        localBackendPort: _defaultBackendPort,
+        remoteBackendHost: '',
+        remoteBackendPort: _defaultBackendPort,
+        backendWorkingDirectory: '',
+        backendStartCommand: _defaultExternalBackendStartCommand,
       );
-      _backendHostController.text = _effectiveBackendHost();
-      _backendPortController.text = _effectiveBackendPort().toString();
+      _backendHostController.text = '';
+      _backendPortController.text = _defaultBackendPort.toString();
+      _backendDirController.text = '';
+      _backendCommandController.text = _defaultExternalBackendStartCommand;
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
@@ -21153,6 +20506,8 @@ foreach ($app in $appPaths) {
                                     _settings = _settings.copyWith(
                                       backendConnectionType:
                                           BackendConnectionType.remote,
+                                      remoteBackendHost: entry.host,
+                                      remoteBackendPort: entry.port,
                                       backendHost: entry.host,
                                       backendPort: entry.port,
                                     );
@@ -24826,9 +24181,13 @@ class LauncherSettings {
     required this.launcherUpdateChecksEnabled,
     required this.backendWorkingDirectory,
     required this.backendStartCommand,
+    required this.backendRuntimeProvider,
     required this.backendConnectionType,
     required this.backendHost,
     required this.backendPort,
+    required this.localBackendPort,
+    required this.remoteBackendHost,
+    required this.remoteBackendPort,
     required this.launchBackendOnSessionStart,
     required this.largePakPatcherEnabled,
     required this.hostUsername,
@@ -24872,9 +24231,13 @@ class LauncherSettings {
   final bool launcherUpdateChecksEnabled;
   final String backendWorkingDirectory;
   final String backendStartCommand;
+  final BackendRuntimeProvider backendRuntimeProvider;
   final BackendConnectionType backendConnectionType;
   final String backendHost;
   final int backendPort;
+  final int localBackendPort;
+  final String remoteBackendHost;
+  final int remoteBackendPort;
   final bool launchBackendOnSessionStart;
   final bool largePakPatcherEnabled;
   final String hostUsername;
@@ -24982,9 +24345,13 @@ class LauncherSettings {
     bool? launcherUpdateChecksEnabled,
     String? backendWorkingDirectory,
     String? backendStartCommand,
+    BackendRuntimeProvider? backendRuntimeProvider,
     BackendConnectionType? backendConnectionType,
     String? backendHost,
     int? backendPort,
+    int? localBackendPort,
+    String? remoteBackendHost,
+    int? remoteBackendPort,
     bool? launchBackendOnSessionStart,
     bool? largePakPatcherEnabled,
     String? hostUsername,
@@ -25039,10 +24406,15 @@ class LauncherSettings {
       backendWorkingDirectory:
           backendWorkingDirectory ?? this.backendWorkingDirectory,
       backendStartCommand: backendStartCommand ?? this.backendStartCommand,
+      backendRuntimeProvider:
+          backendRuntimeProvider ?? this.backendRuntimeProvider,
       backendConnectionType:
           backendConnectionType ?? this.backendConnectionType,
       backendHost: backendHost ?? this.backendHost,
       backendPort: backendPort ?? this.backendPort,
+      localBackendPort: localBackendPort ?? this.localBackendPort,
+      remoteBackendHost: remoteBackendHost ?? this.remoteBackendHost,
+      remoteBackendPort: remoteBackendPort ?? this.remoteBackendPort,
       launchBackendOnSessionStart:
           launchBackendOnSessionStart ?? this.launchBackendOnSessionStart,
       largePakPatcherEnabled:
@@ -25098,10 +24470,14 @@ class LauncherSettings {
       updateDefaultDllsOnLaunchEnabled: true,
       launcherUpdateChecksEnabled: true,
       backendWorkingDirectory: '',
-      backendStartCommand: 'npm run start',
+      backendStartCommand: 'node app.js',
+      backendRuntimeProvider: BackendRuntimeProvider.atlas,
       backendConnectionType: BackendConnectionType.local,
       backendHost: '127.0.0.1',
       backendPort: 3551,
+      localBackendPort: 3551,
+      remoteBackendHost: '',
+      remoteBackendPort: 3551,
       launchBackendOnSessionStart: true,
       largePakPatcherEnabled: false,
       hostUsername: 'host',
@@ -25155,6 +24531,10 @@ class LauncherSettings {
       final raw = (value ?? '').toString().toLowerCase().trim();
       if (raw == 'remote') return BackendConnectionType.remote;
       return BackendConnectionType.local;
+    }
+
+    BackendRuntimeProvider asBackendRuntimeProvider(dynamic value) {
+      return BackendRuntimeProvider.atlas;
     }
 
     Map<String, List<SavedBackend>> parseScopedSavedBackends(dynamic value) {
@@ -25232,6 +24612,15 @@ class LauncherSettings {
       parsedSavedBackendsByProfile[profileSavedBackendsKey] ??
           parsedSavedBackends,
     );
+
+    final resolvedBackendConnectionType = asBackendType(
+      json['backendConnectionType'] ??
+          json['backendType'] ??
+          json['BackendConnectionType'] ??
+          json['BackendType'],
+    );
+    final legacyBackendPort = asInt(json['backendPort'], 3551);
+    final legacyBackendHost = (json['backendHost'] ?? '').toString();
 
     return LauncherSettings(
       username: resolvedUsername,
@@ -25323,16 +24712,33 @@ class LauncherSettings {
             ),
       backendWorkingDirectory: (json['backendWorkingDirectory'] ?? '')
           .toString(),
-      backendStartCommand: (json['backendStartCommand'] ?? 'npm run start')
+      backendStartCommand: (json['backendStartCommand'] ?? 'node app.js')
           .toString(),
-      backendConnectionType: asBackendType(
-        json['backendConnectionType'] ??
-            json['backendType'] ??
-            json['BackendConnectionType'] ??
-            json['BackendType'],
+      backendRuntimeProvider: asBackendRuntimeProvider(
+        json['backendRuntimeProvider'] ??
+            json['backendProvider'] ??
+            json['BackendRuntimeProvider'],
       ),
-      backendHost: (json['backendHost'] ?? '').toString(),
-      backendPort: asInt(json['backendPort'], 3551),
+      backendConnectionType: resolvedBackendConnectionType,
+      backendHost: legacyBackendHost,
+      backendPort: legacyBackendPort,
+      localBackendPort: asInt(
+        json['localBackendPort'],
+        resolvedBackendConnectionType == BackendConnectionType.local
+            ? legacyBackendPort
+            : 3551,
+      ),
+      remoteBackendHost: (json['remoteBackendHost'] ??
+              (resolvedBackendConnectionType == BackendConnectionType.remote
+                  ? legacyBackendHost
+                  : ''))
+          .toString(),
+      remoteBackendPort: asInt(
+        json['remoteBackendPort'],
+        resolvedBackendConnectionType == BackendConnectionType.remote
+            ? legacyBackendPort
+            : 3551,
+      ),
       launchBackendOnSessionStart: asBool(
         json['launchBackendOnSessionStart'] ?? json['launchBackend'],
         true,
@@ -25427,9 +24833,19 @@ class LauncherSettings {
       'launcherUpdateChecksEnabled': launcherUpdateChecksEnabled,
       'backendWorkingDirectory': backendWorkingDirectory,
       'backendStartCommand': backendStartCommand,
+      'backendRuntimeProvider': backendRuntimeProvider.name,
       'backendConnectionType': backendConnectionType.name,
-      'backendHost': backendHost,
-      'backendPort': backendPort,
+      'backendHost':
+          backendConnectionType == BackendConnectionType.remote
+              ? remoteBackendHost
+              : '127.0.0.1',
+      'backendPort':
+          backendConnectionType == BackendConnectionType.local
+              ? localBackendPort
+              : remoteBackendPort,
+      'localBackendPort': localBackendPort,
+      'remoteBackendHost': remoteBackendHost,
+      'remoteBackendPort': remoteBackendPort,
       'launchBackendOnSessionStart': launchBackendOnSessionStart,
       'largePakPatcherEnabled': largePakPatcherEnabled,
       'hostUsername': hostUsername,
@@ -25498,6 +24914,7 @@ class VersionEntry {
     required this.gameVersion,
     required this.location,
     required this.executablePath,
+    this.engineChangelist,
     this.splashImagePath = '',
     this.playTimeSeconds = 0,
     this.lastPlayedAtEpochMs = 0,
@@ -25508,6 +24925,7 @@ class VersionEntry {
   final String gameVersion;
   final String location;
   final String executablePath;
+  final int? engineChangelist;
   final String splashImagePath;
   final int playTimeSeconds;
   final int lastPlayedAtEpochMs;
@@ -25518,6 +24936,8 @@ class VersionEntry {
     String? gameVersion,
     String? location,
     String? executablePath,
+    int? engineChangelist,
+    bool clearEngineChangelist = false,
     String? splashImagePath,
     int? playTimeSeconds,
     int? lastPlayedAtEpochMs,
@@ -25528,6 +24948,9 @@ class VersionEntry {
       gameVersion: gameVersion ?? this.gameVersion,
       location: location ?? this.location,
       executablePath: executablePath ?? this.executablePath,
+      engineChangelist: clearEngineChangelist
+          ? null
+          : (engineChangelist ?? this.engineChangelist),
       splashImagePath: splashImagePath ?? this.splashImagePath,
       playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
       lastPlayedAtEpochMs: lastPlayedAtEpochMs ?? this.lastPlayedAtEpochMs,
@@ -25542,12 +24965,21 @@ class VersionEntry {
       return fallback;
     }
 
+    int? asNullableInt(dynamic value) {
+      if (value == null) return null;
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value);
+      return null;
+    }
+
     return VersionEntry(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
       gameVersion: (json['gameVersion'] ?? '').toString(),
       location: (json['location'] ?? '').toString(),
       executablePath: (json['executablePath'] ?? '').toString(),
+      engineChangelist: asNullableInt(json['engineChangelist']),
       splashImagePath: (json['splashImagePath'] ?? json['coverImagePath'] ?? '')
           .toString(),
       playTimeSeconds: asInt(
@@ -25568,6 +25000,7 @@ class VersionEntry {
       'gameVersion': gameVersion,
       'location': location,
       'executablePath': executablePath,
+      if (engineChangelist != null) 'engineChangelist': engineChangelist,
       'splashImagePath': splashImagePath,
       'playTimeSeconds': playTimeSeconds,
       'lastPlayedAtEpochMs': lastPlayedAtEpochMs,

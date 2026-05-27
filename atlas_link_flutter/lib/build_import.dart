@@ -1,5 +1,5 @@
 // Fortnite build import: unique Shipping exe, headless binary patch,
-// CrashReport metadata version, and max-version gate.
+// and CrashReport metadata version.
 // ignore_for_file: avoid_dynamic_calls
 
 import 'dart:ffi';
@@ -9,11 +9,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as path;
-import 'package:version/version.dart';
 import 'package:win32/win32.dart';
-
-/// Builds at or above this version are rejected on import.
-final Version kMaxAllowedImportVersion = Version.parse('30.10');
 
 const String kShippingExeName = 'FortniteClient-Win64-Shipping.exe';
 const String kCrashReportExeName = 'CrashReportClient.exe';
@@ -49,121 +45,101 @@ final Uint8List _patchedHeadless = Uint8List.fromList([
   45, 0, 108, 0, 111, 0, 103, 0, 32, 0, 45, 0, 110, 0, 111, 0, 115, 0, 112, 0, 108, 0, 97, 0, 115, 0, 104, 0, 32, 0, 45, 0, 110, 0, 111, 0, 115, 0, 111, 0, 117, 0, 110, 0, 100, 0, 32, 0, 45, 0, 110, 0, 117, 0, 108, 0, 108, 0, 114, 0, 104, 0, 105, 0, 32, 0, 45, 0, 117, 0, 115, 0, 101, 0, 111, 0, 108, 0, 100, 0, 105, 0, 116, 0, 101, 0, 109, 0, 99, 0, 97, 0, 114, 0, 100, 0, 115, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0
 ]);
 
-// Engine CL -> display label (see https://github.com/polynite/fn-releases).
-const Map<int, String> _buildToGameVersion = {
-  2870186: "1.0.0",
-  3700114: "1.7.2",
-  3724489: "1.8.0",
-  3729133: "1.8.1",
-  3741772: "1.8.2",
-  3757339: "1.9",
-  3775276: "1.9.1",
-  3790078: "1.10",
-  3807424: "1.11",
-  3825894: "2.1",
-  3841827: "2.2",
-  3847564: "2.3",
-  3858292: "2.4",
-  3870737: "2.4.2",
-  3889387: "2.5",
-  3901517: "3.0.0",
-  3915963: "3.1",
-  3917250: "3.1.1",
-  3935073: "3.2",
-  3942182: "3.3",
-  4008490: "3.5",
-  4019403: "3.6",
-  4039451: "4.0",
-  4053532: "4.1",
-  4072250: "4.2",
-  4117433: "4.4",
-  4127312: "4.4.1",
-  4159770: "4.5",
-  4204761: "5.0",
-  4214610: "5.01",
-  4240749: "5.10",
-  4288479: "5.21",
-  4305896: "5.30",
-  4352937: "5.40",
-  4363240: "5.41",
-  4395664: "6.0",
-  4424678: "6.01",
-  4461277: "6.0.2",
-  4464155: "6.10",
-  4476098: "6.10.1",
-  4480234: "6.10.2",
-  4526925: "6.21",
-  4543176: "6.22",
-  4573279: "6.31",
-  4629139: "7.0",
-  4667333: "7.10",
-  4727874: "7.20",
-  4834550: "7.30",
-  5046157: "7.40",
-  5203069: "8.00",
-  5625478: "8.20",
-  5793395: "8.30",
-  6005771: "8.40",
-  6058028: "8.50",
-  6165369: "8.51",
-  6337466: "9.00",
-  6428087: "9.01",
-  6639283: "9.10",
-  6922310: "9.21",
-  7095426: "9.30",
-  7315705: "9.40",
-  7609292: "9.41",
-  7704164: "10.00",
-  7955722: "10.10",
-  8456527: "10.20",
-  8723043: "10.31",
-  9380822: "10.40",
-  9603448: "11.00",
-  9901083: "11.10",
-  10708866: "11.30",
-  10800459: "11.31",
-  11265652: "11.50",
-  11556442: "12.00",
-  11883027: "12.10",
-  12353830: "12.21",
-  12905909: "12.41",
-  13137020: "12.50",
-  13498980: "12.61",
-  14113327: "13.40",
-  14211474: "14.00",
-  14456520: "14.30",
-  14550713: "14.40",
-  14786821: "14.60",
-  14835335: "15.00",
-  15014719: "15.10",
-  15341163: "15.30",
-  15526472: "15.50",
-  15913292: "16.10",
-  16163563: "16.30",
-  16218553: "16.40",
-  16469788: "16.50",
-  16745144: "17.10",
-  17004569: "17.30",
-  17269705: "17.40",
-  17388565: "17.50",
-  17468642: "18.00",
-  17661844: "18.10",
-  17745267: "18.20",
-  17811397: "18.21",
-  17882303: "18.30",
-  18163738: "18.40",
-  18489740: "19.01",
-  18675304: "19.10",
-  19458861: "20.00",
-  19598943: "20.10",
-  19751212: "20.20",
-  19950687: "20.30",
-  20244966: "20.40",
-  20463113: "21.00",
-  20696680: "21.10",
-  21035704: "21.20",
-  21657658: "21.50",
-};
+/// Fortnite-style version token in a folder/file name (e.g. 32.11, 2.5, 1.8.0).
+final RegExp _versionLabelPattern = RegExp(r'(\d+\.\d+(?:\.\d+)?)');
+
+/// Closest path segment that looks like a Fortnite version label.
+String inferVersionLabelFromDirectoryPath(String directoryPath) {
+  final normalized = directoryPath.trim();
+  final segments = path.split(normalized);
+  for (var i = segments.length - 1; i >= 0; i--) {
+    final segment = segments[i].trim();
+    if (segment.isEmpty) continue;
+    final match = _versionLabelPattern.firstMatch(segment);
+    if (match != null) {
+      return match.group(1)!;
+    }
+  }
+  return path.basename(normalized);
+}
+
+/// Parsed from CrashReportClient `++Fortnite+Release-*` metadata.
+class FortniteBuildMetadata {
+  const FortniteBuildMetadata({
+    required this.releaseLabel,
+    this.engineChangelist,
+  });
+
+  /// e.g. `32.11`, `Cert`, or `Next`.
+  final String releaseLabel;
+
+  /// Unreal engine changelist from metadata prefix (e.g. `38202817`).
+  final int? engineChangelist;
+}
+
+/// Result of reading a build folder at import time.
+class BuildImportInfo {
+  const BuildImportInfo({
+    required this.gameVersion,
+    this.engineChangelist,
+  });
+
+  final String gameVersion;
+  final int? engineChangelist;
+}
+
+FortniteBuildMetadata? parseFortniteBuildMetadata(String value) {
+  final headerIndex = value.indexOf('++Fortnite');
+  if (headerIndex == -1) return null;
+
+  final dashAfterHeader = value.indexOf('-', headerIndex);
+  if (dashAfterHeader == -1) return null;
+
+  final releaseLabel = value.substring(dashAfterHeader + 1);
+  final engineVersion = value.substring(0, value.indexOf('+'));
+  final engineParts = engineVersion.split('-');
+  final engineChangelist = engineParts.length >= 2
+      ? int.tryParse(engineParts[1])
+      : null;
+
+  return FortniteBuildMetadata(
+    releaseLabel: releaseLabel,
+    engineChangelist: engineChangelist,
+  );
+}
+
+bool pathContainsVersionLabel(String directoryPath) {
+  final segments = path.split(directoryPath.trim());
+  for (var i = segments.length - 1; i >= 0; i--) {
+    final segment = segments[i].trim();
+    if (segment.isEmpty) continue;
+    if (_versionLabelPattern.hasMatch(segment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+String resolveGameVersionLabel({
+  required FortniteBuildMetadata metadata,
+  required String directoryPath,
+}) {
+  final releaseLabel = metadata.releaseLabel;
+  if (releaseLabel != 'Cert' && releaseLabel != 'Next') {
+    return releaseLabel;
+  }
+
+  if (pathContainsVersionLabel(directoryPath)) {
+    return inferVersionLabelFromDirectoryPath(directoryPath);
+  }
+
+  final changelist = metadata.engineChangelist;
+  if (changelist != null) {
+    return changelist.toString();
+  }
+
+  return inferVersionLabelFromDirectoryPath(directoryPath);
+}
 
 Future<List<File>> findFiles(Directory directory, String name) =>
     Isolate.run(() => directory
@@ -231,25 +207,20 @@ Future<bool> _patch(File file, Uint8List original, Uint8List patched) async =>
       }
     });
 
-bool shouldRejectImportVersion(String gameVersion) {
-  try {
-    return Version.parse(gameVersion) >= kMaxAllowedImportVersion;
-  } catch (_) {
-    return false;
-  }
-}
-
-/// Version string from CrashReportClient metadata (Windows) when available.
-Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async {
+/// Version + engine CL from CrashReportClient metadata (Windows) when available.
+Future<BuildImportInfo> extractBuildImportInfo(String directoryPath) async {
   if (!Platform.isWindows) {
-    return path.basename(directoryPath.trim());
+    return BuildImportInfo(
+      gameVersion: inferVersionLabelFromDirectoryPath(directoryPath),
+    );
   }
   return Isolate.run(() async {
     final directory = Directory(directoryPath.trim());
-    final defaultGameVersion = path.basename(directory.path);
+    final defaultGameVersion =
+        inferVersionLabelFromDirectoryPath(directory.path);
     final crashReportClients = await findFiles(directory, kCrashReportExeName);
     if (crashReportClients.isEmpty) {
-      return defaultGameVersion;
+      return BuildImportInfo(gameVersion: defaultGameVersion);
     }
 
     final filePathPtr = crashReportClients.last.path.toNativeUtf16();
@@ -258,7 +229,7 @@ Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async 
     final ret = _shGetPropertyStoreFromParsingName(
       filePathPtr,
       nullptr,
-      GETPROPERTYSTOREFLAGS.GPS_DEFAULT,
+      GPS_DEFAULT,
       iidPropertyStore,
       pPropertyStore.cast(),
     );
@@ -268,7 +239,7 @@ Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async 
 
     if (FAILED(ret)) {
       calloc.free(pPropertyStore);
-      return defaultGameVersion;
+      return BuildImportInfo(gameVersion: defaultGameVersion);
     }
 
     final propertyStore = IPropertyStore(pPropertyStore);
@@ -278,7 +249,7 @@ Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async 
     final count = countPtr.value;
     calloc.free(countPtr);
     if (FAILED(hrCount)) {
-      return defaultGameVersion;
+      return BuildImportInfo(gameVersion: defaultGameVersion);
     }
 
     for (var i = 0; i < count; i++) {
@@ -292,20 +263,17 @@ Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async 
       final pv = calloc<PROPVARIANT>();
       final hrValue = propertyStore.getValue(pKey, pv);
       if (!FAILED(hrValue)) {
-        if (pv.ref.vt == VARENUM.VT_LPWSTR) {
+        if (pv.ref.vt == VT_LPWSTR) {
           final valueStr = pv.ref.pwszVal.toDartString();
-          final headerIndex = valueStr.indexOf('++Fortnite');
-          if (headerIndex != -1) {
-            var gameVersion =
-                valueStr.substring(valueStr.indexOf('-', headerIndex) + 1);
-            if (gameVersion == 'Cert' || gameVersion == 'Next') {
-              final engineVersion = valueStr.substring(0, valueStr.indexOf('+'));
-              final engineVersionParts = engineVersion.split('-');
-              final engineVersionBuild = int.parse(engineVersionParts[1]);
-              gameVersion =
-                  _buildToGameVersion[engineVersionBuild] ?? defaultGameVersion;
-            }
-            return gameVersion;
+          final metadata = parseFortniteBuildMetadata(valueStr);
+          if (metadata != null) {
+            return BuildImportInfo(
+              gameVersion: resolveGameVersionLabel(
+                metadata: metadata,
+                directoryPath: directory.path,
+              ),
+              engineChangelist: metadata.engineChangelist,
+            );
           }
         }
       }
@@ -313,6 +281,12 @@ Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async 
       calloc.free(pv);
     }
 
-    return defaultGameVersion;
+    return BuildImportInfo(gameVersion: defaultGameVersion);
   });
+}
+
+/// Version label only — prefer [extractBuildImportInfo] when CL is needed.
+Future<String> extractGameVersionFromBuildDirectory(String directoryPath) async {
+  final info = await extractBuildImportInfo(directoryPath);
+  return info.gameVersion;
 }
