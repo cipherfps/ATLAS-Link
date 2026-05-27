@@ -16,15 +16,6 @@
         "buttonUrl": "https://www.youtube.com/watch?v=C3pRAjzELzI"
       },
       {
-        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/spotlight/rev.png",
-        "imageFit": "contain",
-        "category": "SPOTLIGHT SUBMISSION",
-        "title": "Featured Video",
-        "description": "Monstera - Mona Vera (@vzbw)!",
-        "buttonLabel": "Watch Video",
-        "buttonUrl": "https://www.youtube.com/watch?v=sVav-UtlDHw"
-      },
-      {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",
         "imageFit": "cover",
         "category": "COMMUNITY",
