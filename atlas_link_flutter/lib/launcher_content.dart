@@ -84,7 +84,7 @@ class LauncherContentConfig {
         heroRotationSeconds: 5,
         slides: <LauncherContentSlide>[
           LauncherContentSlide(
-            image: 'assets/images/hero_banner.png',
+            image: 'assets/images/missingasset.webp',
             category: 'LAUNCHER',
             title: 'ATLAS Link',
             description:

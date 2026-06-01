@@ -1,0 +1,1138 @@
+{
+  "author": "This list was created by PRO100KatYT",
+  "note": "Half of the data here is from epic servers and cannot be found in the game files.",
+  "questsUnlockingSlots": [
+    "quest:stonewoodquest_launchrocket_d5",
+    "quest:outpostquest_t2_l2",
+    "quest:outpostquest_t2_l3",
+    "quest:outpostquest_t2_l4",
+    "quest:outpostquest_t2_l6",
+    "quest:outpostquest_t3_l1",
+    "quest:outpostquest_t3_l4",
+    "quest:outpostquest_t3_l5",
+    "quest:outpostquest_t4_l2",
+    "quest:outpostquest_t4_l3",
+    "quest:outpostquest_t4_l4"
+  ],
+  "slotsFromQuests": {
+    "quest:stonewoodquest_launchrocket_d5": [
+      "expedition.generation.miningore",
+      "expedition.generation.choppingwood",
+      "expedition.generation.land.t01_0",
+      "expedition.generation.land.t01_1"
+    ],
+    "quest:outpostquest_t2_l2": [
+      "expedition.generation.sea.t01_0",
+      "expedition.generation.sea.t01_1"
+    ],
+    "quest:outpostquest_t2_l3": [
+      "expedition.generation.air.t02_0",
+      "expedition.generation.air.t02_1"
+    ],
+    "quest:outpostquest_t2_l4": [
+      "expedition.generation.land.t02_0",
+      "expedition.generation.land.t02_1"
+    ],
+    "quest:outpostquest_t2_l6": [
+      "expedition.generation.sea.t02_0",
+      "expedition.generation.sea.t02_1"
+    ],
+    "quest:outpostquest_t3_l1": [
+      "expedition.generation.sea.t03_0",
+      "expedition.generation.sea.t03_1"
+    ],
+    "quest:outpostquest_t3_l4": [
+      "expedition.generation.air.t03_0",
+      "expedition.generation.air.t03_1"
+    ],
+    "quest:outpostquest_t3_l5": [
+      "expedition.generation.land.t03_0",
+      "expedition.generation.land.t03_1"
+    ],
+    "quest:outpostquest_t4_l2": [
+      "expedition.generation.land.t04_0",
+      "expedition.generation.land.t04_1"
+    ],
+    "quest:outpostquest_t4_l3": [
+      "expedition.generation.sea.t04_0",
+      "expedition.generation.sea.t04_1"
+    ],
+    "quest:outpostquest_t4_l4": [
+      "expedition.generation.air.t04_0",
+      "expedition.generation.air.t04_1"
+    ]
+  },
+  "slots": {
+    "expedition.generation.land.t01_0": {
+      "normal": [
+        "Expedition:expedition_resourcerun_wood_medium",
+        "Expedition:expedition_resourcerun_stone_short",
+        "Expedition:expedition_survivorscouting_short_t01",
+        "Expedition:expedition_supplyrun_short_t01",
+        "Expedition:expedition_craftingrun_short_t01",
+        "Expedition:expedition_resourcerun_stone_medium",
+        "Expedition:expedition_supplyrun_medium_t01",
+        "Expedition:expedition_craftingrun_medium_t01",
+        "Expedition:expedition_resourcerun_wood_short"
+      ]
+    },
+    "expedition.generation.land.t01_1": {
+      "normal": [
+        "Expedition:expedition_resourcerun_stone_short",
+        "Expedition:expedition_resourcerun_wood_medium",
+        "Expedition:expedition_survivorscouting_short_t01",
+        "Expedition:expedition_supplyrun_medium_t01",
+        "Expedition:expedition_resourcerun_stone_medium",
+        "Expedition:expedition_craftingrun_short_t01",
+        "Expedition:expedition_resourcerun_wood_short",
+        "Expedition:expedition_craftingrun_medium_t01",
+        "Expedition:expedition_supplyrun_short_t01"
+      ]
+    },
+    "expedition.generation.land.t02_0": {
+      "normal": [
+        "Expedition:expedition_resourcerun_woodstone_medium",
+        "Expedition:expedition_supplyrun_short_t02",
+        "Expedition:expedition_supplyrun_medium_t02",
+        "Expedition:expedition_supplyrun_long_t02",
+        "Expedition:expedition_survivorscouting_medium_t02",
+        "Expedition:expedition_resourcerun_metal_short",
+        "Expedition:expedition_resourcerun_metal_medium",
+        "Expedition:expedition_resourcerun_woodstone_short",
+        "Expedition:expedition_craftingrun_medium_t02",
+        "Expedition:expedition_craftingrun_short_t02",
+        "Expedition:expedition_resourcerun_stone_medium",
+        "Expedition:expedition_resourcerun_stone_short"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_weapons_t02"
+      ]
+    },
+    "expedition.generation.land.t02_1": {
+      "normal": [
+        "Expedition:expedition_resourcerun_stone_short",
+        "Expedition:expedition_resourcerun_woodstone_medium",
+        "Expedition:expedition_resourcerun_metal_short",
+        "Expedition:expedition_supplyrun_long_t02",
+        "Expedition:expedition_resourcerun_stone_medium",
+        "Expedition:expedition_resourcerun_woodstone_short",
+        "Expedition:expedition_craftingrun_short_t02",
+        "Expedition:expedition_supplyrun_medium_t02",
+        "Expedition:expedition_resourcerun_metal_medium",
+        "Expedition:expedition_supplyrun_short_t02",
+        "Expedition:expedition_survivorscouting_medium_t02",
+        "Expedition:expedition_craftingrun_medium_t02"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_traps_t02",
+        "Expedition:expedition_rare_weapons_t02"
+      ]
+    },
+    "expedition.generation.land.t03_0": {
+      "normal": [
+        "Expedition:expedition_supplyrun_short_t03",
+        "Expedition:expedition_survivorscouting_long_t03",
+        "Expedition:expedition_craftingrun_short_t03",
+        "Expedition:expedition_supplyrun_long_t03",
+        "Expedition:expedition_supplyrun_medium_t03",
+        "Expedition:expedition_craftingrun_long_t03",
+        "Expedition:expedition_craftingrun_medium_t03"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_managers_t03",
+        "Expedition:expedition_rare_heroes_t03",
+        "Expedition:expedition_rare_traps_t03",
+        "Expedition:expedition_rare_weapons_t03"
+      ]
+    },
+    "expedition.generation.land.t03_1": {
+      "normal": [
+        "Expedition:expedition_supplyrun_long_t03",
+        "Expedition:expedition_supplyrun_short_t03",
+        "Expedition:expedition_craftingrun_long_t03",
+        "Expedition:expedition_survivorscouting_long_t03",
+        "Expedition:expedition_craftingrun_short_t03",
+        "Expedition:expedition_supplyrun_medium_t03",
+        "Expedition:expedition_craftingrun_medium_t03"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_managers_t03",
+        "Expedition:expedition_rare_heroes_t03",
+        "Expedition:expedition_rare_traps_t03",
+        "Expedition:expedition_rare_weapons_t03"
+      ]
+    },
+    "expedition.generation.land.t04_0": {
+      "normal": [
+        "Expedition:expedition_survivorscouting_long_t04",
+        "Expedition:expedition_supplyrun_long_t04",
+        "Expedition:expedition_craftingrun_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_weapons_t04",
+        "Expedition:expedition_rare_heroes_t04",
+        "Expedition:expedition_rare_managers_t04",
+        "Expedition:expedition_rare_traps_t04"
+      ]
+    },
+    "expedition.generation.land.t04_1": {
+      "normal": [
+        "Expedition:expedition_supplyrun_long_t04",
+        "Expedition:expedition_survivorscouting_long_t04",
+        "Expedition:expedition_craftingrun_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_weapons_t04",
+        "Expedition:expedition_rare_heroes_t04",
+        "Expedition:expedition_rare_traps_t04",
+        "Expedition:expedition_rare_managers_t04"
+      ]
+    },
+    "expedition.generation.sea.t03_0": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_long_t03",
+        "Expedition:expedition_sea_survivorscouting_medium_t03"
+      ]
+    },
+    "expedition.generation.sea.t03_1": {
+      "normal": [
+        "Expedition:expedition_sea_survivorscouting_medium_t03",
+        "Expedition:expedition_sea_supplyrun_long_t03"
+      ]
+    },
+    "expedition.generation.sea.t04_0": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_long_t04",
+        "Expedition:expedition_sea_survivorscouting_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_sea_traps_t04",
+        "Expedition:expedition_rare_sea_weapons_t04",
+        "Expedition:expedition_rare_sea_managers_t05",
+        "Expedition:expedition_rare_sea_managers_t04",
+        "Expedition:expedition_rare_sea_heroes_t04",
+        "Expedition:expedition_rare_sea_traps_t05",
+        "Expedition:expedition_rare_sea_weapons_t05",
+        "Expedition:expedition_rare_sea_heroes_t05"
+      ]
+    },
+    "expedition.generation.sea.t04_1": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_long_t04",
+        "Expedition:expedition_sea_survivorscouting_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_sea_traps_t04",
+        "Expedition:expedition_rare_sea_traps_t05",
+        "Expedition:expedition_rare_sea_managers_t04",
+        "Expedition:expedition_rare_sea_heroes_t04",
+        "Expedition:expedition_rare_sea_weapons_t04",
+        "Expedition:expedition_rare_sea_managers_t05",
+        "Expedition:expedition_rare_sea_heroes_t05"
+      ]
+    },
+    "expedition.generation.air.t03_0": {
+      "normal": [
+        "Expedition:expedition_air_survivorscouting_medium_t03",
+        "Expedition:expedition_air_supplyrun_long_t03"
+      ]
+    },
+    "expedition.generation.air.t03_1": {
+      "normal": [
+        "Expedition:expedition_air_survivorscouting_medium_t03",
+        "Expedition:expedition_air_supplyrun_long_t03"
+      ]
+    },
+    "expedition.generation.air.t04_0": {
+      "normal": [
+        "Expedition:expedition_air_supplyrun_long_t04",
+        "Expedition:expedition_air_survivorscouting_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_air_heroes_t04",
+        "Expedition:expedition_rare_air_traps_t05",
+        "Expedition:expedition_rare_air_weapons_t04",
+        "Expedition:expedition_rare_air_managers_t04",
+        "Expedition:expedition_rare_air_traps_t04",
+        "Expedition:expedition_rare_air_heroes_t05",
+        "Expedition:expedition_rare_air_weapons_t05",
+        "Expedition:expedition_rare_air_managers_t05"
+      ]
+    },
+    "expedition.generation.air.t04_1": {
+      "normal": [
+        "Expedition:expedition_air_supplyrun_long_t04",
+        "Expedition:expedition_air_survivorscouting_long_t04"
+      ],
+      "rare": [
+        "Expedition:expedition_rare_air_heroes_t04",
+        "Expedition:expedition_rare_air_traps_t04",
+        "Expedition:expedition_rare_air_weapons_t04",
+        "Expedition:expedition_rare_air_managers_t05",
+        "Expedition:expedition_rare_air_managers_t04",
+        "Expedition:expedition_rare_air_weapons_t05",
+        "Expedition:expedition_rare_air_traps_t05",
+        "Expedition:expedition_rare_air_heroes_t05"
+      ]
+    },
+    "expedition.generation.choppingwood": {
+      "normal": [
+        "Expedition:expedition_miningore_t00"
+      ]
+    },
+    "expedition.generation.miningore": {
+      "normal": [
+        "Expedition:expedition_choppingwood_t00"
+      ]
+    },
+    "expedition.generation.sea.t01_0": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_short_t01",
+        "Expedition:expedition_sea_survivorscouting_short_t01"
+      ]
+    },
+    "expedition.generation.sea.t01_1": {
+      "normal": [
+        "Expedition:expedition_sea_survivorscouting_short_t01",
+        "Expedition:expedition_sea_supplyrun_short_t01"
+      ]
+    },
+    "expedition.generation.sea.t02_0": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_medium_t02",
+        "Expedition:expedition_sea_survivorscouting_medium_t02"
+      ]
+    },
+    "expedition.generation.sea.t02_1": {
+      "normal": [
+        "Expedition:expedition_sea_supplyrun_medium_t02",
+        "Expedition:expedition_sea_survivorscouting_medium_t02"
+      ]
+    },
+    "expedition.generation.air.t02_0": {
+      "normal": [
+        "Expedition:expedition_air_supplyrun_long_t02",
+        "Expedition:expedition_air_supplyrun_medium_t02",
+        "Expedition:expedition_air_survivorscouting_long_t02"
+      ]
+    },
+    "expedition.generation.air.t02_1": {
+      "normal": [
+        "Expedition:expedition_air_survivorscouting_long_t02",
+        "Expedition:expedition_air_supplyrun_long_t02",
+        "Expedition:expedition_air_supplyrun_medium_t02"
+      ]
+    }
+  },
+  "attributes": {
+    "Expedition:expedition_air_supplyrun_long_t02": {
+      "expedition_max_target_power": 330,
+      "expedition_min_target_power": 16,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_air_supplyrun_long_t03": {
+      "expedition_max_target_power": 520,
+      "expedition_min_target_power": 26,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_air_supplyrun_long_t04": {
+      "expedition_max_target_power": 735,
+      "expedition_min_target_power": 36,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_air_supplyrun_medium_t02": {
+      "expedition_max_target_power": 230,
+      "expedition_min_target_power": 11,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_air_survivorscouting_long_t02": {
+      "expedition_max_target_power": 385,
+      "expedition_min_target_power": 19,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_air_survivorscouting_long_t04": {
+      "expedition_max_target_power": 835,
+      "expedition_min_target_power": 41,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_air_survivorscouting_medium_t03": {
+      "expedition_max_target_power": 390,
+      "expedition_min_target_power": 19,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_choppingwood_t00": {
+      "expedition_max_target_power": 20,
+      "expedition_min_target_power": 1,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 240
+    },
+    "Expedition:expedition_craftingrun_long_t03": {
+      "expedition_max_target_power": 475,
+      "expedition_min_target_power": 23,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_craftingrun_long_t04": {
+      "expedition_max_target_power": 685,
+      "expedition_min_target_power": 34,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_craftingrun_medium_t01": {
+      "expedition_max_target_power": 105,
+      "expedition_min_target_power": 5,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_craftingrun_medium_t02": {
+      "expedition_max_target_power": 195,
+      "expedition_min_target_power": 9,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_craftingrun_medium_t03": {
+      "expedition_max_target_power": 275,
+      "expedition_min_target_power": 13,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_craftingrun_short_t01": {
+      "expedition_max_target_power": 95,
+      "expedition_min_target_power": 4,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_craftingrun_short_t02": {
+      "expedition_max_target_power": 155,
+      "expedition_min_target_power": 7,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_craftingrun_short_t03": {
+      "expedition_max_target_power": 225,
+      "expedition_min_target_power": 11,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_miningore_t00": {
+      "expedition_max_target_power": 25,
+      "expedition_min_target_power": 1,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 240
+    },
+    "Expedition:expedition_rare_air_heroes_t04": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_air_heroes_t05": {
+      "expedition_max_target_power": 1840,
+      "expedition_min_target_power": 92,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_air_managers_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_air_managers_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_air_traps_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_air_traps_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_air_weapons_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_air_weapons_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_heroes_t03": {
+      "expedition_max_target_power": 740,
+      "expedition_min_target_power": 37,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_heroes_t04": {
+      "expedition_max_target_power": 1440,
+      "expedition_min_target_power": 72,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_managers_t03": {
+      "expedition_max_target_power": 740,
+      "expedition_min_target_power": 37,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_managers_t04": {
+      "expedition_max_target_power": 1440,
+      "expedition_min_target_power": 72,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_sea_heroes_t04": {
+      "expedition_max_target_power": 1640,
+      "expedition_min_target_power": 82,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_sea_heroes_t05": {
+      "expedition_max_target_power": 2040,
+      "expedition_min_target_power": 102,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_sea_managers_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_sea_managers_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_sea_traps_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_sea_traps_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_sea_weapons_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_sea_weapons_t05": {
+      "expedition_max_target_power": 1540,
+      "expedition_min_target_power": 77,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1440
+    },
+    "Expedition:expedition_rare_traps_t02": {
+      "expedition_max_target_power": 220,
+      "expedition_min_target_power": 11,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_traps_t03": {
+      "expedition_max_target_power": 490,
+      "expedition_min_target_power": 24,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_traps_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_weapons_t02": {
+      "expedition_max_target_power": 220,
+      "expedition_min_target_power": 11,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_weapons_t03": {
+      "expedition_max_target_power": 490,
+      "expedition_min_target_power": 24,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_rare_weapons_t04": {
+      "expedition_max_target_power": 1240,
+      "expedition_min_target_power": 62,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_resourcerun_metal_medium": {
+      "expedition_max_target_power": 140,
+      "expedition_min_target_power": 7,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_resourcerun_metal_short": {
+      "expedition_max_target_power": 125,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_resourcerun_stone_medium": {
+      "expedition_max_target_power": 120,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_resourcerun_stone_short": {
+      "expedition_max_target_power": 110,
+      "expedition_min_target_power": 5,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_resourcerun_woodstone_medium": {
+      "expedition_max_target_power": 130,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_resourcerun_woodstone_short": {
+      "expedition_max_target_power": 120,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_resourcerun_wood_medium": {
+      "expedition_max_target_power": 100,
+      "expedition_min_target_power": 5,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_resourcerun_wood_short": {
+      "expedition_max_target_power": 95,
+      "expedition_min_target_power": 4,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_sea_supplyrun_long_t03": {
+      "expedition_max_target_power": 500,
+      "expedition_min_target_power": 25,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_sea_supplyrun_long_t04": {
+      "expedition_max_target_power": 725,
+      "expedition_min_target_power": 36,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_sea_supplyrun_medium_t02": {
+      "expedition_max_target_power": 215,
+      "expedition_min_target_power": 10,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_sea_supplyrun_short_t01": {
+      "expedition_max_target_power": 110,
+      "expedition_min_target_power": 5,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_sea_survivorscouting_long_t04": {
+      "expedition_max_target_power": 825,
+      "expedition_min_target_power": 41,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_sea_survivorscouting_medium_t02": {
+      "expedition_max_target_power": 270,
+      "expedition_min_target_power": 13,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_sea_survivorscouting_medium_t03": {
+      "expedition_max_target_power": 370,
+      "expedition_min_target_power": 18,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_sea_survivorscouting_short_t01": {
+      "expedition_max_target_power": 120,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_supplyrun_long_t02": {
+      "expedition_max_target_power": 295,
+      "expedition_min_target_power": 14,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_supplyrun_long_t03": {
+      "expedition_max_target_power": 475,
+      "expedition_min_target_power": 23,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_supplyrun_long_t04": {
+      "expedition_max_target_power": 685,
+      "expedition_min_target_power": 34,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_supplyrun_medium_t01": {
+      "expedition_max_target_power": 105,
+      "expedition_min_target_power": 5,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_supplyrun_medium_t02": {
+      "expedition_max_target_power": 195,
+      "expedition_min_target_power": 9,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_supplyrun_medium_t03": {
+      "expedition_max_target_power": 275,
+      "expedition_min_target_power": 13,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_supplyrun_short_t01": {
+      "expedition_max_target_power": 95,
+      "expedition_min_target_power": 4,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_supplyrun_short_t02": {
+      "expedition_max_target_power": 155,
+      "expedition_min_target_power": 7,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_supplyrun_short_t03": {
+      "expedition_max_target_power": 225,
+      "expedition_min_target_power": 11,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    },
+    "Expedition:expedition_survivorscouting_long_t03": {
+      "expedition_max_target_power": 545,
+      "expedition_min_target_power": 27,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1200
+    },
+    "Expedition:expedition_survivorscouting_long_t04": {
+      "expedition_max_target_power": 785,
+      "expedition_min_target_power": 39,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 1320
+    },
+    "Expedition:expedition_survivorscouting_medium_t02": {
+      "expedition_max_target_power": 250,
+      "expedition_min_target_power": 12,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 960
+    },
+    "Expedition:expedition_survivorscouting_short_t01": {
+      "expedition_max_target_power": 130,
+      "expedition_min_target_power": 6,
+      "expiration_duration_minutes": 90,
+      "expedition_duration_minutes": 480
+    }
+  },
+  "note2": "The rewards here are different from the ones on epic servers.",
+  "rewards": [
+    [
+      {
+        "templateId": "WorldItem:wooditemdata",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "WorldItem:stoneitemdata",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "WorldItem:metalitemdata",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_ore_obsidian",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_ore_malachite",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      
+      {
+        "templateId": "Ingredient:ingredient_ore_silver",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      
+      {
+        "templateId": "Ingredient:ingredient_ore_copper",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_mechanical_parts_t04",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_mechanical_parts_t03",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_mechanical_parts_t02",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_mechanical_parts_t01",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_rare_powercell",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_batteries",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_rare_mechanism",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_twine_t04",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_twine_t03",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_twine_t02",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_twine_t01",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_duct_tape",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_ore_coal",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_crystal_quartz",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_resin",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_powder_t04",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_powder_t03",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_powder_t02",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_powder_t01",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ],
+    [
+      {
+        "templateId": "Ingredient:ingredient_bacon",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_planks",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_flowers",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_ore_alloy",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_nuts_bolts",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      },
+      {
+        "templateId": "Ingredient:ingredient_herbs",
+        "itemProfile": "theater0",
+        "minQuantity": 50,
+        "maxQuantity": 250
+      }
+    ]
+  ],
+  "criteria": [
+    "RequiresNinja",
+    "RequiresCommando",
+    "RequiresConstructor",
+    "RequiresOutlander",
+    "RequiresRareNinja",
+    "RequiresRareCommando",
+    "RequiresRareConstructor",
+    "RequiresRareOutlander",
+    "RequiresEpicNinja",
+    "RequiresEpicCommando",
+    "RequiresEpicConstructor",
+    "RequiresEpicOutlander",
+    "RequiresLegendaryNinja",
+    "RequiresLegendaryCommando",
+    "RequiresLegendaryConstructor",
+    "RequiresLegendaryOutlander"
+  ],
+  "criteriaRequirements": {
+    "RequiresNinja": {
+      "ModValue": 1.5,
+      "requirements": {
+        "class": "ninja"
+      }
+    },
+    "RequiresCommando": {
+      "ModValue": 1.5,
+      "requirements": {
+        "class": "commando"
+      }
+    },
+    "RequiresConstructor": {
+      "ModValue": 1.5,
+      "requirements": {
+        "class": "constructor"
+      }
+    },
+    "RequiresOutlander": {
+      "ModValue": 1.5,
+      "requirements": {
+        "class": "outlander"
+      }
+    },
+    "RequiresRareNinja": {
+      "ModValue": 1.625,
+      "requirements": {
+        "class": "ninja",
+        "rarity": [
+          "r",
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresRareCommando": {
+      "ModValue": 1.625,
+      "requirements": {
+        "class": "commando",
+        "rarity": [
+          "r",
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresRareConstructor": {
+      "ModValue": 1.625,
+      "requirements": {
+        "class": "constructor",
+        "rarity": [
+          "r",
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresRareOutlander": {
+      "ModValue": 1.625,
+      "requirements": {
+        "class": "outlander",
+        "rarity": [
+          "r",
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresEpicNinja": {
+      "ModValue": 1.75,
+      "requirements": {
+        "class": "ninja",
+        "rarity": [
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresEpicCommando": {
+      "ModValue": 1.75,
+      "requirements": {
+        "class": "commando",
+        "rarity": [
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresEpicConstructor": {
+      "ModValue": 1.75,
+      "requirements": {
+        "class": "constructor",
+        "rarity": [
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresEpicOutlander": {
+      "ModValue": 1.75,
+      "requirements": {
+        "class": "outlander",
+        "rarity": [
+          "vr",
+          "sr"
+        ]
+      }
+    },
+    "RequiresLegendaryNinja": {
+      "ModValue": 2.0,
+      "requirements": {
+        "class": "ninja",
+        "rarity": [
+          "sr"
+        ]
+      }
+    },
+    "RequiresLegendaryCommando": {
+      "ModValue": 2.0,
+      "requirements": {
+        "class": "commando",
+        "rarity": [
+          "sr"
+        ]
+      }
+    },
+    "RequiresLegendaryConstructor": {
+      "ModValue": 2.0,
+      "requirements": {
+        "class": "constructor",
+        "rarity": [
+          "sr"
+        ]
+      }
+    },
+    "RequiresLegendaryOutlander": {
+      "ModValue": 2.0,
+      "requirements": {
+        "class": "outlander",
+        "rarity": [
+          "sr"
+        ]
+      }
+    }
+  }
+}

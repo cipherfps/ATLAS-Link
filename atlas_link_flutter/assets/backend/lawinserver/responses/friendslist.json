@@ -1,0 +1,23 @@
+[
+  {
+    "accountId": "host",
+    "status": "ACCEPTED",
+    "direction": "OUTBOUND",
+    "created": "2026-05-31T18:56:48.517Z",
+    "favorite": false
+  },
+  {
+    "accountId": "cipher",
+    "status": "ACCEPTED",
+    "direction": "OUTBOUND",
+    "created": "2026-05-31T18:56:59.508Z",
+    "favorite": false
+  },
+  {
+    "accountId": "client2",
+    "status": "ACCEPTED",
+    "direction": "OUTBOUND",
+    "created": "2026-06-01T18:05:56.034Z",
+    "favorite": false
+  }
+]

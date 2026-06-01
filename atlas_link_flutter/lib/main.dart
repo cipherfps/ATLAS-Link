@@ -196,14 +196,21 @@ void _registerSingleInstanceReleaseHooks() {
     exit(0);
   }
 
-  for (final signal in <ProcessSignal>[
+  final signals = <ProcessSignal>[
     ProcessSignal.sigint,
-    ProcessSignal.sigterm,
-  ]) {
+    if (!Platform.isWindows) ProcessSignal.sigterm,
+  ];
+
+  for (final signal in signals) {
     try {
-      signal.watch().listen((event) {
-        unawaited(onSignal(event));
-      });
+      signal.watch().listen(
+        (event) {
+          unawaited(onSignal(event));
+        },
+        onError: (_) {
+          // Some environments/signals may not be supported.
+        },
+      );
     } catch (_) {
       // Some environments/signals may not be supported.
     }
@@ -480,9 +487,17 @@ enum _GameActionState { idle, launching, closing }
 
 enum _GameServerPromptAction { ignore, start }
 
-enum BackendConnectionType { local, remote }
+enum BackendConnectionType { local, embedded, remote }
 
 enum BackendRuntimeProvider { atlas, external }
+
+enum EmbeddedBackendType { lawinServer, neoniteV2 }
+
+const List<BackendConnectionType> _backendConnectionTypeDropdownOrder = [
+  BackendConnectionType.local,
+  BackendConnectionType.remote,
+  BackendConnectionType.embedded,
+];
 
 class BackendProxyRouting {
   static const String defaultBackendHost = '127.0.0.1';
@@ -523,7 +538,72 @@ class BackendProxyRouting {
 }
 
 extension _BackendConnectionTypeLabel on BackendConnectionType {
-  String get label => this == BackendConnectionType.local ? 'Local' : 'Remote';
+  String get label {
+    switch (this) {
+      case BackendConnectionType.local:
+        return 'Local';
+      case BackendConnectionType.embedded:
+        return 'Embedded';
+      case BackendConnectionType.remote:
+        return 'Remote';
+    }
+  }
+}
+
+extension _EmbeddedBackendTypeDetails on EmbeddedBackendType {
+  String get label {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'LawinServer';
+      case EmbeddedBackendType.neoniteV2:
+        return 'NeoniteV2';
+    }
+  }
+
+  int get defaultPort {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return BackendProxyRouting.defaultBackendPort;
+      case EmbeddedBackendType.neoniteV2:
+        return 5595;
+    }
+  }
+
+  String get bundledAssetDirectory {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'assets/backend/lawinserver';
+      case EmbeddedBackendType.neoniteV2:
+        return 'assets/backend/neonite_v2';
+    }
+  }
+
+  String get startCommand {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'index.js';
+      case EmbeddedBackendType.neoniteV2:
+        return 'app.js';
+    }
+  }
+
+  String get executableAssetPath {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'assets/backend/bin/atlas_lawinserver.exe';
+      case EmbeddedBackendType.neoniteV2:
+        return 'assets/backend/bin/atlas_neonitev2.exe';
+    }
+  }
+
+  String get requiredNodePackage {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'express';
+      case EmbeddedBackendType.neoniteV2:
+        return 'sails';
+    }
+  }
 }
 
 class _FortniteProcessState {
@@ -707,12 +787,13 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.3.0';
-  static const String _launcherBuildLabel = 'Stable 1.3.0';
+  static const String _launcherVersion = '1.3.1';
+  static const String _launcherBuildLabel = 'Stable 1.3.1';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
-  static const String _eacEosExeName = 'FortniteClient-Win64-Shipping_EAC_EOS.exe';
+  static const String _eacEosExeName =
+      'FortniteClient-Win64-Shipping_EAC_EOS.exe';
   static const String _defaultBackendHost =
       BackendProxyRouting.defaultBackendHost;
   static const int _defaultBackendPort = BackendProxyRouting.defaultBackendPort;
@@ -762,11 +843,12 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
-  static const int _bundledDllPresetSeedVersion = 5;
+  static const int _bundledDllPresetSeedVersion = 7;
   static const String _rebootUltimateDefaultPresetName =
       'Reboot Ultimate GS Preset';
   static const String _legacyRebootUltimateDefaultPresetName =
       'Reboot Ultimate V1 Gameserver';
+  static const String _remixDefaultPresetName = 'Remix Preset';
   static const String _retracPakDefaultPresetName = '14.40 Pak Authenticator';
   static const String _legacyRetracPakDefaultPresetName =
       'Retrac Pak Authentication';
@@ -781,13 +863,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       label: 'game server',
     ),
     _BundledDllSpec(
-      assetPath: 'assets/dlls/LargePakPatch.dll',
-      fileName: 'LargePakPatch.dll',
-      label: 'large pak patcher',
-    ),
-    _BundledDllSpec(
-      assetPath: 'assets/dlls/memory.dll',
-      fileName: 'memory.dll',
+      assetPath: 'assets/dlls/Memory.dll',
+      fileName: 'Memory.dll',
       label: 'memory patcher',
     ),
     _BundledDllSpec(
@@ -796,9 +873,24 @@ class _LauncherScreenState extends State<LauncherScreen>
       label: 'authentication patcher',
     ),
     _BundledDllSpec(
-      assetPath: 'assets/dlls/console.dll',
-      fileName: 'console.dll',
+      assetPath: 'assets/dlls/Console.dll',
+      fileName: 'Console.dll',
       label: 'unreal engine patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/Remix Console.dll',
+      fileName: 'Remix Console.dll',
+      label: 'Remix unreal engine patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/Starfall.dll',
+      fileName: 'Starfall.dll',
+      label: 'Starfall authentication patcher',
+    ),
+    _BundledDllSpec(
+      assetPath: 'assets/dlls/Remix.dll',
+      fileName: 'Remix.dll',
+      label: 'Remix game server',
     ),
   ];
   static const String _atlasBackendLatestReleaseApi =
@@ -862,7 +954,6 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _authenticationPatcherController = TextEditingController();
   final _memoryPatcherController = TextEditingController();
   final _gameServerFileController = TextEditingController();
-  final _largePakPatcherController = TextEditingController();
 
   LauncherTab _tab = LauncherTab.home;
   LauncherTab _settingsReturnTab = LauncherTab.home;
@@ -908,6 +999,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _atlasBackendActionBusy = false;
   bool _backendConnectionActionBusy = false;
   String _backendActionMessage = '';
+  int? _backendTerminalPid;
+  DateTime? _lastEmbeddedOrphanCleanupAt;
+  bool _backgroundMotionPaused = false;
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
   // When the game server is started from the "start game server?" prompt during
@@ -927,6 +1021,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   int _backendQuickTipStep = 0;
   BackendConnectionType? _backendQuickTipOriginalType;
   String? _backendQuickTipOriginalHost;
+  int? _backendQuickTipOriginalBackendPort;
+  int? _backendQuickTipOriginalLocalPort;
   String _versionSearchQuery = '';
   String _statsSearchQuery = '';
   String _savedBackendSearchQuery = '';
@@ -954,6 +1050,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Timer? _pollTimer;
   Timer? _gameServerCrashStatusClearTimer;
   Timer? _playtimeCheckpointTimer;
+  Timer? _backgroundMotionPauseTimer;
   bool _runtimePollingStarted = false;
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
@@ -998,9 +1095,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _installStateFile;
   late File _launcherContentCacheFile;
   late File _dllPresetsFile;
+  late File _injectorDllLibraryFile;
   late File _logFile;
   bool _storageReady = false;
   List<_DllPreset> _dllPresets = <_DllPreset>[];
+  List<_SavedInjectorDll> _injectorDllLibrary = <_SavedInjectorDll>[];
   int _dllPresetSeedVersion = 0;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
@@ -1038,12 +1137,14 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   @override
   void dispose() {
+    _killManagedBackendProcessOnShutdown();
     _checkpointActivePlaytime(syncSave: true);
     _playtimeCheckpointTimer?.cancel();
     _playtimeCheckpointTimer = null;
     _homeHeroTimer?.cancel();
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
+    _backgroundMotionPauseTimer?.cancel();
     _toastOverlayEntry?.remove();
     _toastOverlayEntry = null;
     _logFlushTimer?.cancel();
@@ -1065,7 +1166,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     _authenticationPatcherController.dispose();
     _memoryPatcherController.dispose();
     _gameServerFileController.dispose();
-    _largePakPatcherController.dispose();
     _atlasBackendInstallProgress.dispose();
     unawaited(_stopBackendProxy());
     _launcherDiscordRpc.dispose();
@@ -1085,6 +1185,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _bootstrap() async {
     try {
       await _initStorage();
+      await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
       unawaited(_cleanupLauncherUpdateInstallerCacheOnLaunch());
       await _loadInstallState();
       await _loadSettings();
@@ -1337,7 +1438,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     try {
       final coverProvider = ResizeImage(
         _libraryCoverImage(_settings.selectedVersion),
-        width: (250 * dpr).round().clamp(1, 4096),
+        width: _imageCacheExtent(300, dpr),
       );
       await precacheImage(coverProvider, context);
     } catch (_) {
@@ -1345,7 +1446,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
 
     // Pre-cache a small batch of grid covers to reduce first-scroll pop-in.
-    final cacheWidth = (520 * dpr).round().clamp(1, 4096);
+    final cacheWidth = _imageCacheExtent(520, dpr, qualityScale: 1.0);
     final count = min(4, installed.length);
     for (var i = 0; i < count; i++) {
       if (!mounted) return;
@@ -1377,6 +1478,26 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       unawaited(_refreshRuntime());
+    });
+  }
+
+  void _pauseBackgroundMotionBriefly([
+    Duration duration = const Duration(milliseconds: 420),
+  ]) {
+    _backgroundMotionPauseTimer?.cancel();
+    if (!_backgroundMotionPaused && mounted) {
+      setState(() => _backgroundMotionPaused = true);
+    } else {
+      _backgroundMotionPaused = true;
+    }
+    _backgroundMotionPauseTimer = Timer(duration, () {
+      _backgroundMotionPauseTimer = null;
+      if (!_backgroundMotionPaused) return;
+      if (mounted) {
+        setState(() => _backgroundMotionPaused = false);
+      } else {
+        _backgroundMotionPaused = false;
+      }
     });
   }
 
@@ -2281,6 +2402,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       _joinPath([_dataDir.path, 'launcher_content_cache.json']),
     );
     _dllPresetsFile = File(_joinPath([_dataDir.path, 'dll_presets.json']));
+    _injectorDllLibraryFile = File(
+      _joinPath([_dataDir.path, 'injector_dlls.json']),
+    );
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
     // Reset launcher logs on every app start so each run has a clean log.
     // If truncation fails (locked, permissions), keep going.
@@ -2354,30 +2478,70 @@ class _LauncherScreenState extends State<LauncherScreen>
         .toList();
     if (parts.isEmpty) return null;
 
-    // On Flutter Windows, packaged assets live next to the executable:
-    //   <exeDir>\data\flutter_assets\<assetPath>
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    final candidate = _joinPath([exeDir, 'data', 'flutter_assets', ...parts]);
-    if (File(candidate).existsSync()) return candidate;
+    for (final candidate in _bundledAssetPathCandidates(parts)) {
+      if (File(candidate).existsSync()) return candidate;
+    }
 
     return null;
+  }
+
+  String? _resolveBundledAssetDirectoryPath(String bundledAssetPath) {
+    final normalized = bundledAssetPath
+        .trim()
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'^/+'), '');
+    if (normalized.isEmpty) return null;
+
+    final parts = normalized
+        .split('/')
+        .where((part) => part.trim().isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return null;
+
+    final seen = <String>{};
+    for (final candidate in _bundledAssetPathCandidates(parts)) {
+      if (!seen.add(candidate.toLowerCase())) continue;
+      if (Directory(candidate).existsSync()) return candidate;
+    }
+    return null;
+  }
+
+  List<String> _bundledAssetPathCandidates(List<String> parts) {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final currentDir = Directory.current.path;
+    final candidates = <String>[
+      _joinPath([exeDir, 'data', 'flutter_assets', ...parts]),
+      _joinPath([currentDir, ...parts]),
+      _joinPath([currentDir, 'atlas_link_flutter', ...parts]),
+    ];
+
+    final parentDir = Directory(currentDir).parent.path;
+    if (parentDir != currentDir) {
+      candidates.add(_joinPath([parentDir, ...parts]));
+      candidates.add(_joinPath([parentDir, 'atlas_link_flutter', ...parts]));
+    }
+
+    return candidates;
   }
 
   bool _isManagedBundledDllPath(String configuredPath, String fileName) {
     final raw = configuredPath.trim();
     if (raw.isEmpty) return false;
-    if (_basename(raw).toLowerCase() != fileName.toLowerCase()) return false;
+    if (!_bundledDllFileNameMatches(_basename(raw), fileName)) return false;
 
     final normalizedRaw = _normalizePath(raw);
+    final names = <String>{fileName, ..._legacyBundledDllFileNames(fileName)};
     final candidates = <String>[
-      _joinPath([_dataDir.path, 'dlls', fileName]),
+      for (final name in names) _joinPath([_dataDir.path, 'dlls', name]),
     ];
 
     final appData = Platform.environment['APPDATA'];
     if (appData != null && appData.trim().isNotEmpty) {
-      candidates.add(
-        _joinPath([appData, _legacyLauncherDataDirName, 'dlls', fileName]),
-      );
+      for (final name in names) {
+        candidates.add(
+          _joinPath([appData, _legacyLauncherDataDirName, 'dlls', name]),
+        );
+      }
     }
 
     for (final candidate in candidates) {
@@ -2389,13 +2553,46 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _looksLikeBundledAssetDllPath(String configuredPath, String fileName) {
     final raw = configuredPath.trim();
     if (raw.isEmpty) return false;
-    if (_basename(raw).toLowerCase() != fileName.toLowerCase()) return false;
+    if (!_bundledDllFileNameMatches(_basename(raw), fileName)) return false;
 
     final normalizedRaw = _normalizePath(raw);
-    final needle = _normalizePath(
-      _joinPath(['data', 'flutter_assets', 'assets', 'dlls', fileName]),
-    );
-    return normalizedRaw.contains(needle);
+    final names = <String>{fileName, ..._legacyBundledDllFileNames(fileName)};
+    for (final name in names) {
+      final needle = _normalizePath(
+        _joinPath(['data', 'flutter_assets', 'assets', 'dlls', name]),
+      );
+      if (normalizedRaw.contains(needle)) return true;
+    }
+    return false;
+  }
+
+  bool _usesLegacyBundledDllCasing(String configuredPath, String fileName) {
+    final name = _basename(configuredPath.trim());
+    return name.toLowerCase() == fileName.toLowerCase() && name != fileName;
+  }
+
+  bool _usesLegacyBundledDllName(String configuredPath, String fileName) {
+    final name = _basename(configuredPath.trim());
+    if (name == fileName) return false;
+    return _bundledDllFileNameMatches(name, fileName);
+  }
+
+  bool _bundledDllFileNameMatches(String candidate, String fileName) {
+    final candidateLower = candidate.trim().toLowerCase();
+    final fileLower = fileName.trim().toLowerCase();
+    if (candidateLower == fileLower) return true;
+    return _legacyBundledDllFileNames(fileName).contains(candidateLower);
+  }
+
+  Set<String> _legacyBundledDllFileNames(String fileName) {
+    switch (fileName.trim().toLowerCase()) {
+      case 'large pak patcher.dll':
+        return <String>{'largepakpatch.dll', 'largepakpatcher.dll'};
+      case 'remix console.dll':
+        return <String>{'remixconsole.dll'};
+      default:
+        return const <String>{};
+    }
   }
 
   bool _isBundledAssetDllFromCurrentInstall(
@@ -2413,15 +2610,15 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   _BundledDllSpec _bundledDllSpecByFileName(String fileName) {
-    final lower = fileName.trim().toLowerCase();
     for (final spec in _bundledDllSpecs) {
-      if (spec.fileNameLower == lower) return spec;
+      if (_bundledDllFileNameMatches(fileName, spec.fileName)) return spec;
     }
     throw StateError('Unknown bundled DLL file name: $fileName');
   }
 
   String? _resolveCurrentBundledDefaultDllPath(_BundledDllSpec spec) {
     final configuredPath = _configuredDllPathForSpec(spec).trim();
+    final managedPath = _joinPath([_dataDir.path, 'dlls', spec.fileName]);
     final configuredLooksLikeDll =
         configuredPath.isNotEmpty &&
         configuredPath.toLowerCase().endsWith('.dll');
@@ -2431,6 +2628,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (configuredLooksLikeDll &&
         configuredIsBundledDefaultLocation &&
         File(configuredPath).existsSync()) {
+      if (_isManagedBundledDllPath(configuredPath, spec.fileName)) {
+        return managedPath;
+      }
       return configuredPath;
     }
 
@@ -2438,7 +2638,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (installedPath != null && installedPath.trim().isNotEmpty) {
       return installedPath;
     }
-    final managedPath = _joinPath([_dataDir.path, 'dlls', spec.fileName]);
     if (File(managedPath).existsSync()) return managedPath;
     return null;
   }
@@ -2455,14 +2654,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     final managedPath = _joinPath([_dataDir.path, 'dlls', spec.fileName]);
     if (File(managedPath).existsSync()) return managedPath;
 
-    final configuredPath = _configuredDllPathForSpec(spec).trim();
-    if (configuredPath.isNotEmpty &&
-        File(configuredPath).existsSync() &&
-        (_isManagedBundledDllPath(configuredPath, spec.fileName) ||
-            _looksLikeBundledAssetDllPath(configuredPath, spec.fileName))) {
-      return configuredPath;
-    }
-
     final path = await _ensureBundledDll(
       bundledAssetPath: spec.assetPath,
       bundledFileName: spec.fileName,
@@ -2475,15 +2666,17 @@ class _LauncherScreenState extends State<LauncherScreen>
   String _configuredDllPathForSpec(_BundledDllSpec spec) {
     switch (spec.fileNameLower) {
       case 'console.dll':
+      case 'remix console.dll':
+      case 'remixconsole.dll':
         return _settings.unrealEnginePatcherPath;
       case 'tellurium.dll':
+      case 'starfall.dll':
         return _settings.authenticationPatcherPath;
       case 'memory.dll':
         return _settings.memoryPatcherPath;
       case 'magnesium.dll':
+      case 'remix.dll':
         return _settings.gameServerFilePath;
-      case 'largepakpatch.dll':
-        return _settings.largePakPatcherFilePath;
       default:
         return '';
     }
@@ -2676,6 +2869,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     final tmp = File('$outputPath.tmp');
     try {
       await outputDir.create(recursive: true);
+      if (_isManagedBundledDllPath(outputPath, spec.fileName)) {
+        await _normalizeManagedDllFileNameCasing(outputDir, spec.fileName);
+      }
       if (await tmp.exists()) {
         await tmp.delete();
       }
@@ -2892,6 +3088,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final dllDir = Directory(_joinPath([_dataDir.path, 'dlls']));
     try {
       await dllDir.create(recursive: true);
+      await _normalizeManagedDllFileNameCasing(dllDir, bundledFileName);
       final outputPath = _joinPath([dllDir.path, bundledFileName]);
       final outputFile = File(outputPath);
       if (overwriteFallbackCopy || !outputFile.existsSync()) {
@@ -2927,6 +3124,41 @@ class _LauncherScreenState extends State<LauncherScreen>
         'Failed to prepare bundled $label DLL ($bundledAssetPath): $error',
       );
       return null;
+    }
+  }
+
+  Future<void> _normalizeManagedDllFileNameCasing(
+    Directory directory,
+    String fileName,
+  ) async {
+    if (!Platform.isWindows) return;
+    try {
+      if (!await directory.exists()) return;
+      await for (final entity in directory.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final currentName = _basename(entity.path);
+        if (!_bundledDllFileNameMatches(currentName, fileName)) continue;
+        if (currentName == fileName) return;
+
+        final targetPath = _joinPath([directory.path, fileName]);
+        final tempPath = _joinPath([
+          directory.path,
+          '$fileName.rename-${DateTime.now().microsecondsSinceEpoch}.tmp',
+        ]);
+        final tempFile = File(tempPath);
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+        await entity.rename(tempPath);
+        await File(tempPath).rename(targetPath);
+        _log('settings', 'Renamed bundled DLL $currentName to $fileName.');
+        return;
+      }
+    } catch (error) {
+      _log(
+        'settings',
+        'Failed to normalize bundled DLL filename $fileName: $error',
+      );
     }
   }
 
@@ -3056,58 +3288,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
-    final bundledLargePakPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/LargePakPatch.dll',
-      bundledFileName: 'LargePakPatch.dll',
-      label: 'large pak patcher',
-      overwriteFallbackCopy: forceResetBundledPaths,
-    );
-    if (bundledLargePakPath != null && bundledLargePakPath.trim().isNotEmpty) {
-      final configuredLargePak = _settings.largePakPatcherFilePath.trim();
-      final largePakExists =
-          configuredLargePak.isNotEmpty &&
-          File(configuredLargePak).existsSync();
-      final looksBundledLargePak =
-          _looksLikeBundledAssetDllPath(
-            configuredLargePak,
-            'LargePakPatch.dll',
-          ) ||
-          _looksLikeBundledAssetDllPath(
-            configuredLargePak,
-            'LargePakPatcher.dll',
-          );
-      final bundledLargePakFromCurrentInstall =
-          _isBundledAssetDllFromCurrentInstall(
-            configuredLargePak,
-            'LargePakPatch.dll',
-          ) ||
-          _isBundledAssetDllFromCurrentInstall(
-            configuredLargePak,
-            'LargePakPatcher.dll',
-          );
-      final shouldAdoptBundledLargePak =
-          configuredLargePak.isEmpty ||
-          (configuredLargePak.isNotEmpty && !largePakExists) ||
-          (looksBundledLargePak &&
-              (!bundledLargePakFromCurrentInstall || forceResetBundledPaths));
-      if (shouldAdoptBundledLargePak) {
-        nextSettings = nextSettings.copyWith(
-          largePakPatcherFilePath: bundledLargePakPath,
-        );
-        _largePakPatcherController.text = bundledLargePakPath;
-        changed = true;
-        if (configuredLargePak.isNotEmpty && !largePakExists) {
-          _log(
-            'settings',
-            'Large pak patcher DLL missing at $configuredLargePak. Restored bundled default.',
-          );
-        }
-      }
-    }
-
     final bundledMemoryPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/memory.dll',
-      bundledFileName: 'memory.dll',
+      bundledAssetPath: 'assets/dlls/Memory.dll',
+      bundledFileName: 'Memory.dll',
       label: 'memory patcher',
       overwriteFallbackCopy: forceResetBundledPaths,
     );
@@ -3117,13 +3300,14 @@ class _LauncherScreenState extends State<LauncherScreen>
           configuredMemory.isNotEmpty && File(configuredMemory).existsSync();
       final looksBundledMemory = _looksLikeBundledAssetDllPath(
         configuredMemory,
-        'memory.dll',
+        'Memory.dll',
       );
       final bundledMemoryFromCurrentInstall =
-          _isBundledAssetDllFromCurrentInstall(configuredMemory, 'memory.dll');
+          _isBundledAssetDllFromCurrentInstall(configuredMemory, 'Memory.dll');
       final shouldAdoptBundledMemory =
           configuredMemory.isEmpty ||
           (configuredMemory.isNotEmpty && !memoryExists) ||
+          _usesLegacyBundledDllCasing(configuredMemory, 'Memory.dll') ||
           (looksBundledMemory &&
               (!bundledMemoryFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledMemory) {
@@ -3199,25 +3383,58 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
+    final configuredUnrealBeforeDefault = nextSettings.unrealEnginePatcherPath
+        .trim();
+    if (configuredUnrealBeforeDefault.isNotEmpty &&
+        (_isManagedBundledDllPath(
+              configuredUnrealBeforeDefault,
+              'Remix Console.dll',
+            ) ||
+            _looksLikeBundledAssetDllPath(
+              configuredUnrealBeforeDefault,
+              'Remix Console.dll',
+            ) ||
+            (!File(configuredUnrealBeforeDefault).existsSync() &&
+                _usesLegacyBundledDllName(
+                  configuredUnrealBeforeDefault,
+                  'Remix Console.dll',
+                )))) {
+      final remixConsolePath = await _ensureBundledDll(
+        bundledAssetPath: 'assets/dlls/Remix Console.dll',
+        bundledFileName: 'Remix Console.dll',
+        label: 'Remix unreal engine patcher',
+        overwriteFallbackCopy: forceResetBundledPaths,
+      );
+      if (remixConsolePath != null && remixConsolePath.trim().isNotEmpty) {
+        nextSettings = nextSettings.copyWith(
+          unrealEnginePatcherPath: remixConsolePath,
+        );
+        _unrealEnginePatcherController.text = remixConsolePath;
+        changed = true;
+      }
+    }
+
     final bundledUnrealPath = await _ensureBundledDll(
-      bundledAssetPath: 'assets/dlls/console.dll',
-      bundledFileName: 'console.dll',
+      bundledAssetPath: 'assets/dlls/Console.dll',
+      bundledFileName: 'Console.dll',
       label: 'unreal engine patcher',
       overwriteFallbackCopy: forceResetBundledPaths,
     );
     if (bundledUnrealPath != null && bundledUnrealPath.trim().isNotEmpty) {
-      final configuredUnreal = _settings.unrealEnginePatcherPath.trim();
+      final configuredUnreal = nextSettings.unrealEnginePatcherPath.trim();
       final unrealExists =
           configuredUnreal.isNotEmpty && File(configuredUnreal).existsSync();
       final looksBundledUnreal = _looksLikeBundledAssetDllPath(
         configuredUnreal,
-        'console.dll',
+        'Console.dll',
       );
       final bundledUnrealFromCurrentInstall =
-          _isBundledAssetDllFromCurrentInstall(configuredUnreal, 'console.dll');
+          _isBundledAssetDllFromCurrentInstall(configuredUnreal, 'Console.dll');
       final shouldAdoptBundledUnreal =
           configuredUnreal.isEmpty ||
           (configuredUnreal.isNotEmpty && !unrealExists) ||
+          _usesLegacyBundledDllCasing(configuredUnreal, 'Console.dll') ||
+          _usesLegacyBundledDllName(configuredUnreal, 'Console.dll') ||
           (looksBundledUnreal &&
               (!bundledUnrealFromCurrentInstall || forceResetBundledPaths));
       if (shouldAdoptBundledUnreal) {
@@ -3491,6 +3708,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (leftTrimmed.isEmpty || rightTrimmed.isEmpty) {
         return leftTrimmed == rightTrimmed;
       }
+      if (_basename(leftTrimmed) != _basename(rightTrimmed) &&
+          _bundledDllFileNameMatches(
+            _basename(leftTrimmed),
+            _basename(rightTrimmed),
+          )) {
+        return false;
+      }
       return _normalizePath(leftTrimmed) == _normalizePath(rightTrimmed);
     }
 
@@ -3503,8 +3727,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           right.authenticationPatcherPath,
         ) &&
         samePath(left.memoryPatcherPath, right.memoryPatcherPath) &&
-        samePath(left.gameServerFilePath, right.gameServerFilePath) &&
-        samePath(left.largePakPatcherFilePath, right.largePakPatcherFilePath);
+        samePath(left.gameServerFilePath, right.gameServerFilePath);
   }
 
   Future<List<_DllPreset>> _buildBundledDllPresetSeeds() async {
@@ -3522,19 +3745,21 @@ class _LauncherScreenState extends State<LauncherScreen>
       return path?.trim() ?? '';
     }
 
-    final consolePath = await defaultDllPath('console.dll');
+    final consolePath = await defaultDllPath('Console.dll');
     final telluriumAuthPath = await defaultDllPath('Tellurium.dll');
     final retracAuthPath = await bundledPath(
       _retracPakDefaultDllFileName,
       'Pak authentication patcher',
     );
-    final memoryPath = await defaultDllPath('memory.dll');
+    final memoryPath = await defaultDllPath('Memory.dll');
     final magnesiumPath = await defaultDllPath('Magnesium.dll');
+    final remixConsolePath = await defaultDllPath('Remix Console.dll');
+    final starfallAuthPath = await defaultDllPath('Starfall.dll');
+    final remixGameServerPath = await defaultDllPath('Remix.dll');
     final rebootGameServerPath = await bundledPath(
       'Reboot Ultimate V1 Gameserver.dll',
       'Reboot Ultimate V1 game server',
     );
-    final largePakPath = await defaultDllPath('LargePakPatch.dll');
     final now = DateTime.now().millisecondsSinceEpoch;
 
     return <_DllPreset>[
@@ -3546,7 +3771,17 @@ class _LauncherScreenState extends State<LauncherScreen>
         authenticationPatcherPath: telluriumAuthPath,
         memoryPatcherPath: memoryPath,
         gameServerFilePath: rebootGameServerPath,
-        largePakPatcherFilePath: largePakPath,
+        largePakPatcherFilePath: '',
+      ),
+      _DllPreset(
+        name: _remixDefaultPresetName,
+        createdAtEpochMs: now,
+        updatedAtEpochMs: now + 2,
+        unrealEnginePatcherPath: remixConsolePath,
+        authenticationPatcherPath: starfallAuthPath,
+        memoryPatcherPath: memoryPath,
+        gameServerFilePath: remixGameServerPath,
+        largePakPatcherFilePath: '',
       ),
       _DllPreset(
         name: _retracPakDefaultPresetName,
@@ -3556,7 +3791,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         authenticationPatcherPath: retracAuthPath,
         memoryPatcherPath: memoryPath,
         gameServerFilePath: magnesiumPath,
-        largePakPatcherFilePath: largePakPath,
+        largePakPatcherFilePath: '',
       ),
     ];
   }
@@ -3577,12 +3812,16 @@ class _LauncherScreenState extends State<LauncherScreen>
         _legacyRetracPakDefaultPresetName.toLowerCase(),
       };
     }
+    if (lowerName == _remixDefaultPresetName.toLowerCase()) {
+      return <String>{_remixDefaultPresetName.toLowerCase()};
+    }
     return <String>{lowerName};
   }
 
   bool _isBundledDefaultDllPresetName(String name) {
     final aliases = _bundledDefaultDllPresetAliases(name);
     return aliases.contains(_rebootUltimateDefaultPresetName.toLowerCase()) ||
+        aliases.contains(_remixDefaultPresetName.toLowerCase()) ||
         aliases.contains(_retracPakDefaultPresetName.toLowerCase());
   }
 
@@ -3822,7 +4061,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           await precacheImage(
             _launcherContentImageProvider(
               source,
-              fallbackAsset: 'assets/images/hero_banner.png',
+              fallbackAsset: 'assets/images/missingasset.webp',
             ),
             context,
           );
@@ -4124,12 +4363,18 @@ class _LauncherScreenState extends State<LauncherScreen>
     _authenticationPatcherController.text = _settings.authenticationPatcherPath;
     _memoryPatcherController.text = _settings.memoryPatcherPath;
     _gameServerFileController.text = _settings.gameServerFilePath;
-    _largePakPatcherController.text = _settings.largePakPatcherFilePath;
   }
 
   void _persistBackendFieldsFromControllers() {
     final parsedPort =
         int.tryParse(_backendPortController.text.trim()) ?? _defaultBackendPort;
+    if (_settings.backendConnectionType == BackendConnectionType.embedded) {
+      _settings = _settings.copyWith(
+        backendHost: _defaultBackendHost,
+        backendPort: _settings.embeddedBackendType.defaultPort,
+      );
+      return;
+    }
     if (_settings.backendConnectionType == BackendConnectionType.local) {
       _settings = _settings.copyWith(
         localBackendPort: parsedPort.clamp(1, 65535),
@@ -4157,7 +4402,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   String _effectiveBackendHost() {
-    if (_settings.backendConnectionType == BackendConnectionType.local) {
+    if (_settings.backendConnectionType != BackendConnectionType.remote) {
       return _defaultBackendHost;
     }
     final host = _settings.remoteBackendHost.trim();
@@ -4168,10 +4413,24 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   int _effectiveBackendPort() {
-    final port = _settings.backendConnectionType == BackendConnectionType.local
-        ? _settings.localBackendPort
-        : _settings.remoteBackendPort;
+    final port = switch (_settings.backendConnectionType) {
+      BackendConnectionType.local => _settings.localBackendPort,
+      BackendConnectionType.embedded =>
+        _settings.embeddedBackendType.defaultPort,
+      BackendConnectionType.remote => _settings.remoteBackendPort,
+    };
     return port > 0 ? port : _defaultBackendPort;
+  }
+
+  int _localBackendPortAfterLeavingEmbedded() {
+    final port = _settings.localBackendPort;
+    if (port <= 0 || port > 65535) return _defaultBackendPort;
+    if (_settings.backendConnectionType == BackendConnectionType.embedded &&
+        port == _settings.embeddedBackendType.defaultPort &&
+        port != _defaultBackendPort) {
+      return _defaultBackendPort;
+    }
+    return port;
   }
 
   int _effectiveGameServerPort() {
@@ -4464,9 +4723,38 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _setBackendConnectionType(BackendConnectionType type) async {
     if (_settings.backendConnectionType == type) return;
+    final switchingAwayFromEmbedded =
+        _settings.backendConnectionType == BackendConnectionType.embedded &&
+        type != BackendConnectionType.embedded;
+    if (switchingAwayFromEmbedded && _atlasBackendProcess != null) {
+      await _stopManagedBackend(showToast: false);
+    } else if (switchingAwayFromEmbedded) {
+      await _stopBackendTerminalWindow();
+      await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+      await _stopBackendProxy();
+      _setBackendOffline(toastIfChanged: false);
+    }
+
     _persistBackendFieldsFromControllers();
     setState(() {
-      _settings = _settings.copyWith(backendConnectionType: type);
+      final port = type == BackendConnectionType.embedded
+          ? _settings.embeddedBackendType.defaultPort
+          : type == BackendConnectionType.remote
+          ? _settings.remoteBackendPort
+          : _localBackendPortAfterLeavingEmbedded();
+      _settings = _settings.copyWith(
+        backendConnectionType: type,
+        backendHost: type == BackendConnectionType.remote
+            ? _settings.remoteBackendHost
+            : _defaultBackendHost,
+        backendPort: port,
+        localBackendPort: type == BackendConnectionType.local
+            ? port
+            : _settings.localBackendPort,
+      );
+      if (type == BackendConnectionType.embedded) {
+        _backendOnline = false;
+      }
       _backendHostController.text = type == BackendConnectionType.remote
           ? _settings.remoteBackendHost
           : '';
@@ -4474,6 +4762,31 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
+  }
+
+  Future<void> _setEmbeddedBackendType(EmbeddedBackendType type) async {
+    if (_atlasBackendProcess != null || _backendActionBusy) {
+      if (mounted) {
+        _toast('Stop the running embedded backend before switching backends');
+      }
+      return;
+    }
+    if (_settings.embeddedBackendType == type) return;
+
+    final port = type.defaultPort;
+    setState(() {
+      _settings = _settings.copyWith(
+        backendConnectionType: BackendConnectionType.embedded,
+        embeddedBackendType: type,
+        backendHost: _defaultBackendHost,
+        backendPort: port,
+      );
+      _backendOnline = false;
+      _backendHostController.text = '';
+      _backendPortController.text = port.toString();
+    });
+    await _saveSettings(toast: false, applyControllers: false);
+    await _refreshRuntime(force: true);
   }
 
   String _two(int value) => value.toString().padLeft(2, '0');
@@ -4531,15 +4844,39 @@ class _LauncherScreenState extends State<LauncherScreen>
     final completer = Completer<void>();
     _runtimeRefreshInFlight = completer.future;
     try {
+      if (_settings.backendConnectionType == BackendConnectionType.embedded) {
+        final process = _atlasBackendProcess;
+        if (process == null) {
+          await _stopBackendProxy();
+          _setBackendOffline(toastIfChanged: false);
+          return;
+        }
+        final exitCode = await _tryProcessExitCode(process);
+        if (exitCode != null) {
+          if (identical(_atlasBackendProcess, process)) {
+            _atlasBackendProcess = null;
+          }
+          await _stopBackendProxy();
+          _setBackendOffline(toastIfChanged: false);
+          return;
+        }
+
+        final embeddedPing = await _pingBackend(
+          _defaultBackendHost,
+          _effectiveBackendPort(),
+        );
+        if (embeddedPing == null) {
+          await _stopBackendProxy();
+          _setBackendOffline(toastIfChanged: false);
+          return;
+        }
+      } else {
+        await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+      }
+
       final proxyOk = await _syncBackendProxy();
       if (!proxyOk) {
-        if (mounted) {
-          final wasOnline = _backendOnline;
-          if (wasOnline) {
-            setState(() => _backendOnline = false);
-            _toastBackendUndetected();
-          }
-        }
+        _setBackendOffline(toastIfChanged: true);
         return;
       }
 
@@ -4566,13 +4903,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
         }
       } catch (_) {
-        if (mounted) {
-          final wasOnline = _backendOnline;
-          if (wasOnline) {
-            setState(() => _backendOnline = false);
-            _toastBackendUndetected();
-          }
-        }
+        _setBackendOffline(toastIfChanged: true);
       } finally {
         client.close(force: true);
       }
@@ -4582,6 +4913,18 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       _runtimeRefreshInFlight = null;
     }
+  }
+
+  void _setBackendOffline({required bool toastIfChanged}) {
+    final wasOnline = _backendOnline;
+    if (mounted) {
+      if (wasOnline) {
+        setState(() => _backendOnline = false);
+      }
+    } else {
+      _backendOnline = false;
+    }
+    if (toastIfChanged && wasOnline) _toastBackendUndetected();
   }
 
   void _toastBackendUndetected() {
@@ -4717,7 +5060,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final host = _effectiveBackendHost().trim();
     final port = _effectiveBackendPort();
 
-    if (_settings.backendConnectionType == BackendConnectionType.local) {
+    if (_settings.backendConnectionType != BackendConnectionType.remote) {
       if (port == _defaultBackendPort) {
         return Uri(scheme: 'http', host: _defaultBackendHost, port: port);
       }
@@ -5689,6 +6032,15 @@ class _LauncherScreenState extends State<LauncherScreen>
                                   const SizedBox(width: 8),
                                   FilledButton(
                                     onPressed: updating ? null : startUpdate,
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: const Color(0xFF1E88E5),
+                                      foregroundColor: Colors.white,
+                                      disabledBackgroundColor: const Color(
+                                        0xFF1E88E5,
+                                      ).withValues(alpha: 0.45),
+                                      disabledForegroundColor: Colors.white
+                                          .withValues(alpha: 0.72),
+                                    ),
                                     child: Text(
                                       updating ? 'Updating...' : 'Update now',
                                     ),
@@ -5983,17 +6335,27 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     process.stdout
         .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
-        .listen((line) {
-          _log(source, line);
-          onLine?.call(line, false);
-        });
+        .listen(
+          (line) {
+            _log(source, line);
+            onLine?.call(line, false);
+          },
+          onError: (Object error) {
+            _log(source, 'stdout stream error: $error');
+          },
+        );
     process.stderr
         .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
-        .listen((line) {
-          _log(source, line);
-          onLine?.call(line, true);
-        });
+        .listen(
+          (line) {
+            _log(source, line);
+            onLine?.call(line, true);
+          },
+          onError: (Object error) {
+            _log(source, 'stderr stream error: $error');
+          },
+        );
   }
 
   void _setUiStatus({
@@ -6186,7 +6548,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     // Show the most relevant status while launching. When both Fortnite and the
     // game server are active, show both during action phases so injections
-    // (like Large Pak Patcher) are visible.
+    // are visible.
     final gameStatus = _currentLibraryGameStatus();
     final serverStatus = _currentLibraryGameServerStatus();
 
@@ -6985,7 +7347,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       state.gameVersion,
       includeAuth: false,
       includeMemory: false,
-      includeLargePak: false,
       includeUnreal: false,
       includeGameServer: true,
     );
@@ -7030,9 +7391,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<bool> _pingGameServerPort(String hostname, int port) async {
-    final host = hostname.toLowerCase() == 'localhost'
-        ? '127.0.0.1'
-        : hostname;
+    final host = hostname.toLowerCase() == 'localhost' ? '127.0.0.1' : hostname;
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -7065,10 +7424,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final port = _effectiveGameServerPort();
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
-      final ping = _pingGameServerPort('127.0.0.1', port).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => false,
-      );
+      final ping = _pingGameServerPort(
+        '127.0.0.1',
+        port,
+      ).timeout(const Duration(seconds: 5), onTimeout: () => false);
       if (await ping) {
         _log('gameserver', 'Local game server responding on port $port.');
         return true;
@@ -7080,6 +7439,28 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   Future<void> _killExistingProcessByPort(int port, {int? exceptPid}) async {
     if (!Platform.isWindows) return;
+    final pids = await _listListeningPidsByPort(port);
+    if (exceptPid != null) pids.remove(exceptPid);
+
+    for (final pid in pids) {
+      try {
+        await Process.run('taskkill', [
+          '/F',
+          '/PID',
+          pid.toString(),
+        ], runInShell: true);
+        _log(
+          'gameserver',
+          'Killed process listening on port $port (pid $pid).',
+        );
+      } catch (_) {
+        // Ignore processes we can't terminate.
+      }
+    }
+  }
+
+  Future<Set<int>> _listListeningPidsByPort(int port) async {
+    if (!Platform.isWindows) return <int>{};
     final pids = <int>{};
     try {
       final result = await Process.run('netstat', ['-ano'], runInShell: true);
@@ -7097,28 +7478,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         if (!localAddress.endsWith(':$port')) continue;
         final pid = int.tryParse(pidRaw);
         if (pid == null) continue;
-        if (exceptPid != null && pid == exceptPid) continue;
         pids.add(pid);
       }
     } catch (_) {
-      return;
+      return <int>{};
     }
-
-    for (final pid in pids) {
-      try {
-        await Process.run('taskkill', [
-          '/F',
-          '/PID',
-          pid.toString(),
-        ], runInShell: true);
-        _log(
-          'gameserver',
-          'Killed process listening on port $port (pid $pid).',
-        );
-      } catch (_) {
-        // Ignore processes we can't terminate.
-      }
-    }
+    return pids;
   }
 
   void _handleFortniteExit(_FortniteProcessState state, int exitCode) {
@@ -7306,6 +7671,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     }
 
+    if (_settings.backendConnectionType == BackendConnectionType.embedded) {
+      final embeddedDir = _resolveBundledAssetDirectoryPath(
+        _settings.embeddedBackendType.bundledAssetDirectory,
+      );
+      if (embeddedDir != null &&
+          embeddedDir.trim().isNotEmpty &&
+          Directory(embeddedDir).existsSync()) {
+        roots.add(embeddedDir);
+      }
+    }
+
     final backendExe = await _findInstalledAtlasBackendExecutable();
     if (backendExe != null) {
       roots.add(File(backendExe).parent.path);
@@ -7327,20 +7703,19 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       try {
         final cloudDir = Directory(_joinPath([root, 'CloudStorage']));
         await cloudDir.create(recursive: true);
-        final defaultInput = File(_joinPath([cloudDir.path, 'DefaultInput.ini']));
+        final defaultInput = File(
+          _joinPath([cloudDir.path, 'DefaultInput.ini']),
+        );
         await defaultInput.writeAsString(consoleKeyIni, flush: true);
         _log('backend', 'Wrote console key config to ${defaultInput.path}.');
       } catch (error) {
-        _log(
-          'backend',
-          'Failed to write DefaultInput.ini under $root: $error',
-        );
+        _log('backend', 'Failed to write DefaultInput.ini under $root: $error');
       }
     }
   }
 
   bool _canAutoLaunchManagedBackend() {
-    return _settings.backendConnectionType == BackendConnectionType.local;
+    return _settings.backendConnectionType != BackendConnectionType.remote;
   }
 
   Future<void> _useDefaultPortForManagedBackendLaunch({
@@ -7374,7 +7749,212 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   Future<void> _launchManagedBackend({bool showProgressToast = true}) async {
+    if (_settings.backendConnectionType == BackendConnectionType.embedded) {
+      await _launchEmbeddedBackend(showProgressToast: showProgressToast);
+      return;
+    }
     await _launchManagedAtlasBackend(showProgressToast: showProgressToast);
+  }
+
+  Future<void> _stopManagedBackend({bool showToast = true}) async {
+    if (_backendActionBusy) return;
+    final process = _atlasBackendProcess;
+    if (process == null) return;
+    final isEmbedded =
+        _settings.backendConnectionType == BackendConnectionType.embedded;
+    final name = isEmbedded
+        ? _settings.embeddedBackendType.label
+        : 'ATLAS Backend';
+
+    if (mounted) {
+      setState(() {
+        _atlasBackendActionBusy = true;
+        _backendActionMessage = 'Stopping Backend...';
+      });
+    } else {
+      _atlasBackendActionBusy = true;
+      _backendActionMessage = 'Stopping Backend...';
+    }
+
+    try {
+      if (isEmbedded && identical(_atlasBackendProcess, process)) {
+        _atlasBackendProcess = null;
+        _setBackendOffline(toastIfChanged: false);
+      }
+      await _terminateProcessTree(process);
+      await _stopBackendTerminalWindow();
+      if (isEmbedded) {
+        await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+      }
+      if (identical(_atlasBackendProcess, process)) {
+        _atlasBackendProcess = null;
+      }
+      await _stopBackendProxy();
+      await _refreshRuntime(force: true);
+      if (showToast && mounted) _toast('$name stopped');
+    } catch (error) {
+      _log('backend', 'Failed to stop $name: $error');
+      if (showToast && mounted) _toast('Failed to stop $name');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _atlasBackendActionBusy = false;
+          _backendActionMessage = '';
+        });
+      } else {
+        _atlasBackendActionBusy = false;
+        _backendActionMessage = '';
+      }
+    }
+  }
+
+  Future<void> _terminateProcessTree(Process process) async {
+    if (Platform.isWindows) {
+      try {
+        await Process.run('taskkill', [
+          '/F',
+          '/T',
+          '/PID',
+          process.pid.toString(),
+        ], runInShell: true);
+        return;
+      } catch (_) {
+        // Fall back to direct process termination below.
+      }
+    }
+    process.kill(ProcessSignal.sigterm);
+  }
+
+  void _killManagedBackendProcessOnShutdown() {
+    final process = _atlasBackendProcess;
+    _killBackendTerminalWindowOnShutdown();
+    _atlasBackendProcess = null;
+    if (process != null && Platform.isWindows) {
+      try {
+        Process.runSync('taskkill', [
+          '/F',
+          '/T',
+          '/PID',
+          process.pid.toString(),
+        ], runInShell: true);
+      } catch (_) {
+        // Fall back to direct process termination below.
+      }
+    } else if (process != null) {
+      process.kill(ProcessSignal.sigterm);
+    }
+    _killOrphanedEmbeddedBackendProcessesOnShutdown();
+  }
+
+  Future<void> _stopBackendTerminalWindow() async {
+    final terminalPid = _backendTerminalPid;
+    _backendTerminalPid = null;
+    if (terminalPid == null || !Platform.isWindows) return;
+    try {
+      await Process.run('taskkill', [
+        '/F',
+        '/T',
+        '/PID',
+        terminalPid.toString(),
+      ], runInShell: true);
+    } catch (_) {
+      // Ignore terminal cleanup failures.
+    }
+  }
+
+  void _killBackendTerminalWindowOnShutdown() {
+    final terminalPid = _backendTerminalPid;
+    _backendTerminalPid = null;
+    if (terminalPid == null || !Platform.isWindows) return;
+    try {
+      Process.runSync('taskkill', [
+        '/F',
+        '/T',
+        '/PID',
+        terminalPid.toString(),
+      ], runInShell: true);
+    } catch (_) {
+      // Ignore terminal cleanup failures.
+    }
+  }
+
+  Future<void> _cleanupOrphanedEmbeddedBackendProcesses({
+    bool force = false,
+  }) async {
+    if (!Platform.isWindows) return;
+    final now = DateTime.now();
+    final lastRun = _lastEmbeddedOrphanCleanupAt;
+    if (!force &&
+        lastRun != null &&
+        now.difference(lastRun) < const Duration(seconds: 10)) {
+      return;
+    }
+    _lastEmbeddedOrphanCleanupAt = now;
+    try {
+      await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        _embeddedBackendCleanupPowerShellScript(),
+      ], runInShell: true).timeout(const Duration(seconds: 5));
+    } catch (error) {
+      _log('backend', 'Failed to clean up orphaned embedded backends: $error');
+    }
+  }
+
+  void _killOrphanedEmbeddedBackendProcessesOnShutdown() {
+    if (!Platform.isWindows) return;
+    try {
+      Process.runSync('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        _embeddedBackendCleanupPowerShellScript(),
+      ], runInShell: true);
+    } catch (_) {
+      // Ignore shutdown cleanup failures.
+    }
+  }
+
+  String _embeddedBackendCleanupPowerShellScript() {
+    return '''
+\$ownPid = \$PID
+\$backendNeedles = @(
+  '/assets/backend/lawinserver/index.js',
+  '/assets/backend/neonite_v2/app.js'
+)
+\$logRootNeedle = 'atlas_link_backend_'
+\$logNeedles = @('backend-log-terminal.cmd', 'backend-log-terminal.ps1', 'backend.log')
+\$backendExeNames = @('atlas_lawinserver.exe', 'atlas_neonitev2.exe')
+foreach (\$process in Get-CimInstance Win32_Process) {
+  \$targetPid = [int]\$process.ProcessId
+  if (\$targetPid -eq \$ownPid) { continue }
+  \$name = ([string]\$process.Name).ToLowerInvariant()
+  \$commandLine = [string]\$process.CommandLine
+  \$command = \$commandLine.Replace('\\', '/').ToLowerInvariant()
+  \$kill = \$false
+  if (\$name -eq 'node.exe') {
+    foreach (\$needle in \$backendNeedles) {
+      if (\$command.Contains(\$needle)) { \$kill = \$true }
+    }
+  }
+  foreach (\$backendExeName in \$backendExeNames) {
+    if (\$name -eq \$backendExeName) { \$kill = \$true }
+  }
+  if (\$name -eq 'cmd.exe' -or \$name -eq 'powershell.exe') {
+    if (\$command.Contains(\$logRootNeedle)) {
+      foreach (\$needle in \$logNeedles) {
+        if (\$command.Contains(\$needle)) { \$kill = \$true }
+      }
+    }
+  }
+  if (\$kill) {
+    try { taskkill /F /T /PID \$targetPid | Out-Null } catch {}
+  }
+}
+''';
   }
 
   bool get _backendActionBusy =>
@@ -7401,7 +7981,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     _setUiStatus(
       host: host,
-      message: 'Checking backend connection...',
+      message: 'Checking Backend Connection...',
       severity: _UiStatusSeverity.info,
     );
     await _refreshRuntime(force: true);
@@ -7413,19 +7993,23 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final shouldLaunchManagedBackend =
         _settings.launchBackendOnSessionStart &&
-        _settings.backendConnectionType == BackendConnectionType.local &&
+        _settings.backendConnectionType != BackendConnectionType.remote &&
         Platform.isWindows &&
         _canAutoLaunchManagedBackend();
     if (shouldLaunchManagedBackend) {
       final prefix = host ? 'Host' : 'Fortnite';
+      final managedBackendName =
+          _settings.backendConnectionType == BackendConnectionType.embedded
+          ? _settings.embeddedBackendType.label
+          : 'ATLAS Backend';
       _toastProgress(
-        '$prefix: Starting ATLAS Backend...',
+        '$prefix: Starting $managedBackendName...',
         progress: null,
         indeterminate: true,
       );
       _setUiStatus(
         host: host,
-        message: 'Launching ATLAS Backend...',
+        message: 'Launching $managedBackendName...',
         severity: _UiStatusSeverity.info,
       );
       await _launchManagedBackend(showProgressToast: false);
@@ -7472,7 +8056,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     final prefix = host ? 'Host' : 'Fortnite';
     _toastProgress(
-      '$prefix: Checking backend connection...',
+      '$prefix: Checking Backend Connection...',
       progress: null,
       indeterminate: true,
     );
@@ -8088,7 +8672,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     var deleteAftermathOnLaunch = _settings.deleteAftermathOnLaunch;
     var allowMultipleClients = _settings.allowMultipleGameClients;
     var launchBackend = _settings.launchBackendOnSessionStart;
-    var largePakPatcherEnabled = _settings.largePakPatcherEnabled;
     try {
       final shouldSave = await showGeneralDialog<bool>(
         context: context,
@@ -8428,22 +9011,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       ),
                                       const SizedBox(height: 8),
                                       settingTile(
-                                        icon: Icons.folder_zip_rounded,
-                                        title: 'Large Pak Patcher',
-                                        subtitle:
-                                            'Help large or custom pak files load correctly',
-                                        trailing: Switch(
-                                          value: largePakPatcherEnabled,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => largePakPatcherEnabled =
-                                                  value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
                                         icon: Icons.warning_amber_rounded,
                                         title: 'Delete GFSDK_Aftermath_Lib.dll',
                                         subtitle:
@@ -8528,7 +9095,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           deleteAftermathOnLaunch: deleteAftermathOnLaunch,
           hostPort: resolvedPort,
           launchBackendOnSessionStart: launchBackend,
-          largePakPatcherEnabled: largePakPatcherEnabled,
         );
       });
       await _saveSettings(toast: false);
@@ -8548,7 +9114,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }
 
   bool _shouldOfferGameServerPrompt() {
-    if (_settings.backendConnectionType != BackendConnectionType.local) {
+    if (_settings.backendConnectionType == BackendConnectionType.remote) {
       return false;
     }
     if (_gameServerProcess != null) return false;
@@ -8978,7 +9544,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         version.gameVersion,
         includeAuth: true,
         includeMemory: false,
-        includeLargePak: false,
         includeUnreal: false,
         includeGameServer: false,
       );
@@ -9213,8 +9778,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           ? additionalArg
           : additionalArg.substring(0, separatorIndex);
       final argValue =
-          separatorIndex == -1 ||
-              separatorIndex + 1 >= additionalArg.length
+          separatorIndex == -1 || separatorIndex + 1 >= additionalArg.length
           ? ''
           : additionalArg.substring(separatorIndex + 1);
       args[argName] = argValue;
@@ -9222,9 +9786,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
     return args.entries
         .map(
-          (entry) => entry.value.isEmpty
-              ? entry.key
-              : '${entry.key}=${entry.value}',
+          (entry) =>
+              entry.value.isEmpty ? entry.key : '${entry.key}=${entry.value}',
         )
         .toList(growable: false);
   }
@@ -9685,7 +10248,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     String gameVersion, {
     bool includeAuth = true,
     bool includeMemory = true,
-    bool includeLargePak = false,
     bool includeUnreal = true,
     bool includeGameServer = false,
   }) async {
@@ -9749,33 +10311,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
     }
 
-    if (includeLargePak) {
-      final pakPath = _settings.largePakPatcherFilePath.trim();
-      if (pakPath.isEmpty) {
-        _log('gameserver', 'Large pak patcher is enabled but not configured.');
-        parallelInjections.add(
-          Future.value(
-            const _InjectionAttempt(
-              name: 'large pak patcher',
-              required: false,
-              attempted: false,
-              success: false,
-              error: 'Not configured.',
-            ),
-          ),
-        );
-      } else {
-        parallelInjections.add(
-          _injectSinglePatcher(
-            gamePid: gamePid,
-            patcherPath: pakPath,
-            patcherName: 'large pak patcher',
-            required: false,
-          ),
-        );
-      }
-    }
-
     if (includeUnreal) {
       final unrealPath = _settings.unrealEnginePatcherPath.trim();
       final gameServerPath = _settings.gameServerFilePath.trim();
@@ -9785,7 +10320,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _log(
           'game',
           'Unreal engine patcher path matches game server path. '
-          'Configure separate DLLs for the unreal engine patcher and game server.',
+              'Configure separate DLLs for the unreal engine patcher and game server.',
         );
         parallelInjections.add(
           Future.value(
@@ -9915,6 +10450,606 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         error: error.toString(),
       );
     }
+  }
+
+  List<_BundledInjectorDll> _bundledInjectorDlls() {
+    final options = <_BundledInjectorDll>[
+      for (final spec in _bundledDllSpecs)
+        _BundledInjectorDll(
+          assetPath: spec.assetPath,
+          fileName: spec.fileName,
+          label: _titleCaseWords(spec.label),
+        ),
+      const _BundledInjectorDll(
+        assetPath: 'assets/dlls/Large Pak Patcher.dll',
+        fileName: 'Large Pak Patcher.dll',
+        label: 'Large Pak Patcher',
+      ),
+      _BundledInjectorDll(
+        assetPath: 'assets/dlls/$_retracPakDefaultDllFileName',
+        fileName: _retracPakDefaultDllFileName,
+        label: '14.40 Pak Authenticator',
+      ),
+      const _BundledInjectorDll(
+        assetPath: 'assets/dlls/Reboot Ultimate V1 Gameserver.dll',
+        fileName: 'Reboot Ultimate V1 Gameserver.dll',
+        label: 'Reboot Ultimate V1 Gameserver',
+      ),
+    ];
+
+    final seen = <String>{};
+    return options
+        .where((option) => seen.add(option.fileName.toLowerCase()))
+        .toList();
+  }
+
+  String _titleCaseWords(String value) {
+    return value
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .map((part) => part[0].toUpperCase() + part.substring(1))
+        .join(' ');
+  }
+
+  List<({int pid, String label})> _manualInjectionTargets() {
+    final targets = <({int pid, String label})>[];
+
+    void addState(_FortniteProcessState? state) {
+      if (state == null || state.killed || state.exited) return;
+      final type = state.host ? 'Host' : 'Client';
+      final name = state.clientName.trim().isEmpty
+          ? type
+          : state.clientName.trim();
+      targets.add((pid: state.pid, label: '$name - $type (${state.pid})'));
+    }
+
+    addState(_gameInstance);
+    for (final state in _extraGameInstances) {
+      addState(state);
+    }
+    addState(_gameServerInstance);
+    addState(_gameServerInstance?.child);
+
+    final seen = <int>{};
+    return targets.where((target) => seen.add(target.pid)).toList();
+  }
+
+  Future<void> _loadInjectorDllLibrary() async {
+    try {
+      if (!await _injectorDllLibraryFile.exists()) {
+        _injectorDllLibrary = <_SavedInjectorDll>[];
+        return;
+      }
+      final raw = await _injectorDllLibraryFile.readAsString();
+      final decoded = jsonDecode(raw);
+      final itemsRaw = decoded is Map ? decoded['dlls'] : decoded;
+      if (itemsRaw is! List) {
+        _injectorDllLibrary = <_SavedInjectorDll>[];
+        return;
+      }
+      final parsed = <_SavedInjectorDll>[];
+      for (final item in itemsRaw) {
+        if (item is Map<String, dynamic>) {
+          final dll = _SavedInjectorDll.fromJson(item);
+          if (dll.path.trim().isNotEmpty) parsed.add(dll);
+        } else if (item is Map) {
+          final dll = _SavedInjectorDll.fromJson(item.cast<String, dynamic>());
+          if (dll.path.trim().isNotEmpty) parsed.add(dll);
+        }
+      }
+      _injectorDllLibrary = _normalizedInjectorDllLibrary(parsed);
+    } catch (error) {
+      _injectorDllLibrary = <_SavedInjectorDll>[];
+      _log('settings', 'Failed to load injector DLL library: $error');
+    }
+  }
+
+  List<_SavedInjectorDll> _normalizedInjectorDllLibrary(
+    Iterable<_SavedInjectorDll> items,
+  ) {
+    final byPath = <String, _SavedInjectorDll>{};
+    for (final item in items) {
+      final path = item.path.trim();
+      if (path.isEmpty) continue;
+      final label = item.label.trim().isEmpty ? _basename(path) : item.label;
+      byPath[_normalizePath(path)] = item.copyWith(label: label, path: path);
+    }
+    final normalized = byPath.values.toList()
+      ..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+    return normalized;
+  }
+
+  Future<void> _saveInjectorDllLibrary(List<_SavedInjectorDll> items) async {
+    final normalized = _normalizedInjectorDllLibrary(items);
+    final payload = <String, dynamic>{
+      'dlls': normalized.map((item) => item.toJson()).toList(),
+    };
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
+    await _injectorDllLibraryFile.writeAsString(pretty, flush: true);
+    _injectorDllLibrary = normalized;
+  }
+
+  Future<String?> _resolveBundledInjectorDllPath(
+    _BundledInjectorDll option,
+  ) async {
+    final path = await _ensureBundledDll(
+      bundledAssetPath: option.assetPath,
+      bundledFileName: option.fileName,
+      label: option.label,
+      showFeedback: false,
+    );
+    return path?.trim().isEmpty ?? true ? null : path!.trim();
+  }
+
+  Future<_SavedInjectorDll?> _pickInjectorLibraryDll() async {
+    final path = await _pickSingleFile(
+      dialogTitle: 'Add DLL to Injector',
+      allowedExtensions: const ['dll'],
+    );
+    if (path == null || path.trim().isEmpty) return null;
+    return _SavedInjectorDll(label: _basename(path), path: path.trim());
+  }
+
+  Future<void> _showInjectorDialog() async {
+    if (!mounted) return;
+    await _loadInjectorDllLibrary();
+    if (!mounted) return;
+    final bundledOptions = _bundledInjectorDlls();
+    final targets = _manualInjectionTargets();
+    final injectorScrollController = ScrollController();
+    var customOptions = List<_SavedInjectorDll>.from(_injectorDllLibrary);
+    final selectedCustomDlls = <String>{};
+    final selectedBundledDlls = <String>{};
+    int? selectedPid = targets.isEmpty ? null : targets.first.pid;
+
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 220),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 620),
+                  child: StatefulBuilder(
+                    builder: (dialogContext, setDialogState) {
+                      final onSurface = Theme.of(
+                        dialogContext,
+                      ).colorScheme.onSurface;
+                      final secondary = Theme.of(
+                        dialogContext,
+                      ).colorScheme.secondary;
+                      final selectedCount =
+                          selectedCustomDlls.length +
+                          selectedBundledDlls.length;
+                      final canInject =
+                          selectedPid != null && selectedCount > 0;
+
+                      String customKey(_SavedInjectorDll option) {
+                        return _normalizePath(option.path);
+                      }
+
+                      String bundledKey(_BundledInjectorDll option) {
+                        return option.fileName.toLowerCase();
+                      }
+
+                      void toggleCustom(_SavedInjectorDll option) {
+                        final key = customKey(option);
+                        setDialogState(() {
+                          if (!selectedCustomDlls.add(key)) {
+                            selectedCustomDlls.remove(key);
+                          }
+                        });
+                      }
+
+                      void toggleBundled(_BundledInjectorDll option) {
+                        final key = bundledKey(option);
+                        setDialogState(() {
+                          if (!selectedBundledDlls.add(key)) {
+                            selectedBundledDlls.remove(key);
+                          }
+                        });
+                      }
+
+                      Future<void> injectSelected() async {
+                        final pid = selectedPid;
+                        if (pid == null || selectedCount == 0) return;
+
+                        final selected = <({String label, String path})>[];
+                        for (final option in customOptions) {
+                          if (!selectedCustomDlls.contains(customKey(option))) {
+                            continue;
+                          }
+                          selected.add((
+                            label: option.label,
+                            path: option.path,
+                          ));
+                        }
+                        for (final option in bundledOptions) {
+                          if (!selectedBundledDlls.contains(
+                            bundledKey(option),
+                          )) {
+                            continue;
+                          }
+                          final path = await _resolveBundledInjectorDllPath(
+                            option,
+                          );
+                          if (path == null || path.isEmpty) {
+                            selected.add((label: option.label, path: ''));
+                          } else {
+                            selected.add((label: option.label, path: path));
+                          }
+                        }
+
+                        if (!dialogContext.mounted) return;
+                        Navigator.of(dialogContext).pop();
+
+                        var succeeded = 0;
+                        for (final dll in selected) {
+                          final attempt = await _injectSinglePatcher(
+                            gamePid: pid,
+                            patcherPath: dll.path,
+                            patcherName: dll.label,
+                            required: false,
+                          );
+                          if (attempt.success) succeeded++;
+                        }
+                        if (!mounted) return;
+                        if (succeeded == selected.length) {
+                          _toast(
+                            selected.length == 1
+                                ? 'Injected ${selected.first.label}'
+                                : 'Injected ${selected.length} DLLs',
+                          );
+                        } else {
+                          _toast('Injected $succeeded/${selected.length} DLLs');
+                        }
+                      }
+
+                      Future<void> addCustomDll() async {
+                        final dll = await _pickInjectorLibraryDll();
+                        if (dll == null) return;
+                        final next = <_SavedInjectorDll>[...customOptions, dll];
+                        await _saveInjectorDllLibrary(next);
+                        if (!dialogContext.mounted) return;
+                        setDialogState(() {
+                          customOptions = List<_SavedInjectorDll>.from(
+                            _injectorDllLibrary,
+                          );
+                          selectedCustomDlls.add(customKey(dll));
+                        });
+                      }
+
+                      Future<void> removeCustomDll(
+                        _SavedInjectorDll option,
+                      ) async {
+                        final removePath = _normalizePath(option.path);
+                        final next = customOptions.where((item) {
+                          return _normalizePath(item.path) != removePath;
+                        }).toList();
+                        await _saveInjectorDllLibrary(next);
+                        if (!dialogContext.mounted) return;
+                        setDialogState(() {
+                          customOptions = List<_SavedInjectorDll>.from(
+                            _injectorDllLibrary,
+                          );
+                          selectedCustomDlls.remove(removePath);
+                        });
+                      }
+
+                      Widget sectionHeader(String label) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            label,
+                            style: TextStyle(
+                              color: onSurface.withValues(alpha: 0.62),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        );
+                      }
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 20),
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                        decoration: BoxDecoration(
+                          color: _dialogSurfaceColor(dialogContext),
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(
+                            color: _onSurface(dialogContext, 0.12),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _dialogShadowColor(dialogContext),
+                              blurRadius: 34,
+                              offset: const Offset(0, 18),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.science_rounded, color: secondary),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Injector',
+                                    style: Theme.of(dialogContext)
+                                        .textTheme
+                                        .headlineSmall
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close',
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              targets.isEmpty
+                                  ? 'Launch Fortnite before injecting a DLL.'
+                                  : 'Select a running process, then inject a bundled DLL or choose one from your files.',
+                              style: TextStyle(
+                                color: onSurface.withValues(alpha: 0.74),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            DropdownButtonFormField<int>(
+                              initialValue: selectedPid,
+                              decoration: _backendFieldDecoration(
+                                hintText: 'No running game found',
+                              ),
+                              items: targets.map((target) {
+                                return DropdownMenuItem<int>(
+                                  value: target.pid,
+                                  child: Text(target.label),
+                                );
+                              }).toList(),
+                              onChanged: targets.isEmpty
+                                  ? null
+                                  : (pid) =>
+                                        setDialogState(() => selectedPid = pid),
+                            ),
+                            const SizedBox(height: 14),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 360),
+                              child: Scrollbar(
+                                controller: injectorScrollController,
+                                child: ListView(
+                                  controller: injectorScrollController,
+                                  shrinkWrap: true,
+                                  primary: false,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: sectionHeader('Your DLLs'),
+                                        ),
+                                        TextButton.icon(
+                                          onPressed: () =>
+                                              unawaited(addCustomDll()),
+                                          icon: const Icon(
+                                            Icons.add_rounded,
+                                            size: 18,
+                                          ),
+                                          label: const Text('Add DLL'),
+                                        ),
+                                      ],
+                                    ),
+                                    if (customOptions.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 12,
+                                        ),
+                                        child: Text(
+                                          'No custom DLLs saved yet.',
+                                          style: TextStyle(
+                                            color: onSurface.withValues(
+                                              alpha: 0.56,
+                                            ),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      for (final option in customOptions) ...[
+                                        _injectorDllTile(
+                                          context: dialogContext,
+                                          title: option.label,
+                                          subtitle: option.path,
+                                          enabled: selectedPid != null,
+                                          selected: selectedCustomDlls.contains(
+                                            customKey(option),
+                                          ),
+                                          onTap: () => toggleCustom(option),
+                                          trailing: IconButton(
+                                            tooltip: 'Remove from library',
+                                            onPressed: () => unawaited(
+                                              removeCustomDll(option),
+                                            ),
+                                            icon: const Icon(
+                                              Icons.close_rounded,
+                                              size: 18,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                      ],
+                                    Divider(
+                                      height: 26,
+                                      color: onSurface.withValues(alpha: 0.16),
+                                    ),
+                                    sectionHeader('Bundled DLLs'),
+                                    for (final option in bundledOptions) ...[
+                                      _injectorDllTile(
+                                        context: dialogContext,
+                                        title: option.fileName,
+                                        subtitle: option.assetPath,
+                                        enabled: selectedPid != null,
+                                        selected: selectedBundledDlls.contains(
+                                          bundledKey(option),
+                                        ),
+                                        onTap: () => toggleBundled(option),
+                                      ),
+                                      const SizedBox(height: 8),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              children: [
+                                OutlinedButton(
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 12,
+                                    ),
+                                    shape: const StadiumBorder(),
+                                  ),
+                                  child: const Text('Cancel'),
+                                ),
+                                const Spacer(),
+                                FilledButton.icon(
+                                  onPressed: canInject
+                                      ? () => unawaited(injectSelected())
+                                      : null,
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 12,
+                                    ),
+                                    shape: const StadiumBorder(),
+                                  ),
+                                  icon: const Icon(Icons.science_rounded),
+                                  label: Text(
+                                    selectedCount <= 0
+                                        ? 'Inject'
+                                        : 'Inject ($selectedCount)',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: _dialogPopupTransition,
+      );
+    } finally {
+      injectorScrollController.dispose();
+    }
+  }
+
+  Widget _injectorDllTile({
+    required BuildContext context,
+    required String title,
+    required String subtitle,
+    required bool enabled,
+    required bool selected,
+    required VoidCallback onTap,
+    Widget? trailing,
+  }) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: selected
+                ? Theme.of(
+                    context,
+                  ).colorScheme.secondary.withValues(alpha: 0.16)
+                : onSurface.withValues(alpha: enabled ? 0.055 : 0.03),
+            border: Border.all(
+              color: selected
+                  ? Theme.of(
+                      context,
+                    ).colorScheme.secondary.withValues(alpha: 0.72)
+                  : onSurface.withValues(alpha: 0.11),
+            ),
+          ),
+          child: Row(
+            children: [
+              Checkbox(
+                value: selected,
+                onChanged: enabled ? (_) => onTap() : null,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: onSurface.withValues(
+                          alpha: enabled ? 0.94 : 0.42,
+                        ),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: onSurface.withValues(
+                          alpha: enabled ? 0.62 : 0.32,
+                        ),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[const SizedBox(width: 12), trailing],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   bool _isChapterOneVersion(String version) {
@@ -10465,9 +11600,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       phase('Importing', 0.38);
       phase('Reading version', 0.52);
-      final importInfo = await extractBuildImportInfo(
-        root,
-      );
+      final importInfo = await extractBuildImportInfo(root);
       phase('Splash image', 0.68);
       final splashImagePath = await _findBuildSplashImage(
         root,
@@ -12065,6 +13198,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   Future<void> _openInternalFiles() => _openPath(_dataDir.path);
 
+  Future<void> _openEmbeddedBackendFolder() async {
+    final backend = _settings.embeddedBackendType;
+    final directory = _resolveEmbeddedBackendWorkingDirectory(backend);
+    if (directory == null) {
+      _toast('${backend.label} backend folder was not found');
+      return;
+    }
+    await _openPath(directory);
+  }
+
   Future<void> _resetLauncher() async {
     if (!mounted) return;
     if (_gameAction != _GameActionState.idle ||
@@ -12438,7 +13581,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       final sharedRemoteAssets = remoteAssets.isEmpty ? null : remoteAssets;
 
       await _resetBundledDllPathToLatest(
-        spec: _bundledDllSpecByFileName('console.dll'),
+        spec: _bundledDllSpecByFileName('Console.dll'),
         applySetting: (settings, path) =>
             settings.copyWith(unrealEnginePatcherPath: path),
         controller: _unrealEnginePatcherController,
@@ -12456,7 +13599,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         refreshPresetSeedsAfter: false,
       );
       await _resetBundledDllPathToLatest(
-        spec: _bundledDllSpecByFileName('memory.dll'),
+        spec: _bundledDllSpecByFileName('Memory.dll'),
         applySetting: (settings, path) =>
             settings.copyWith(memoryPatcherPath: path),
         controller: _memoryPatcherController,
@@ -12469,15 +13612,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         applySetting: (settings, path) =>
             settings.copyWith(gameServerFilePath: path),
         controller: _gameServerFileController,
-        checkForUpdatesAfter: false,
-        remoteAssets: sharedRemoteAssets,
-        refreshPresetSeedsAfter: false,
-      );
-      await _resetBundledDllPathToLatest(
-        spec: _bundledDllSpecByFileName('LargePakPatch.dll'),
-        applySetting: (settings, path) =>
-            settings.copyWith(largePakPatcherFilePath: path),
-        controller: _largePakPatcherController,
         checkForUpdatesAfter: false,
         remoteAssets: sharedRemoteAssets,
         refreshPresetSeedsAfter: false,
@@ -12527,7 +13661,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       authenticationPatcherPath: _authenticationPatcherController.text.trim(),
       memoryPatcherPath: _memoryPatcherController.text.trim(),
       gameServerFilePath: _gameServerFileController.text.trim(),
-      largePakPatcherFilePath: _largePakPatcherController.text.trim(),
+      largePakPatcherFilePath: '',
     );
   }
 
@@ -12568,7 +13702,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         authenticationPatcherPath: resolvedPreset.authenticationPatcherPath,
         memoryPatcherPath: resolvedPreset.memoryPatcherPath,
         gameServerFilePath: resolvedPreset.gameServerFilePath,
-        largePakPatcherFilePath: resolvedPreset.largePakPatcherFilePath,
       );
       _unrealEnginePatcherController.text =
           resolvedPreset.unrealEnginePatcherPath;
@@ -12576,7 +13709,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           resolvedPreset.authenticationPatcherPath;
       _memoryPatcherController.text = resolvedPreset.memoryPatcherPath;
       _gameServerFileController.text = resolvedPreset.gameServerFilePath;
-      _largePakPatcherController.text = resolvedPreset.largePakPatcherFilePath;
     });
     await _saveSettings(toast: false, applyControllers: false);
     if (_isBundledDefaultDllPreset(preset)) {
@@ -12612,9 +13744,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     );
     final gameServerController = TextEditingController(
       text: preset.gameServerFilePath,
-    );
-    final largePakController = TextEditingController(
-      text: preset.largePakPatcherFilePath,
     );
     var errorText = '';
     var saving = false;
@@ -12701,8 +13830,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           authenticationPatcherPath: authController.text.trim(),
                           memoryPatcherPath: memoryController.text.trim(),
                           gameServerFilePath: gameServerController.text.trim(),
-                          largePakPatcherFilePath: largePakController.text
-                              .trim(),
+                          largePakPatcherFilePath: '',
                         );
                         if (!edited.hasAnyPath) {
                           setDialogState(() {
@@ -12914,11 +14042,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                       label: 'Game Server',
                                       controller: gameServerController,
                                     ),
-                                    const SizedBox(height: 10),
-                                    pathField(
-                                      label: 'Large Pak Patcher',
-                                      controller: largePakController,
-                                    ),
                                   ],
                                 ),
                               ),
@@ -12986,7 +14109,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       authController.dispose();
       memoryController.dispose();
       gameServerController.dispose();
-      largePakController.dispose();
     }
   }
 
@@ -13246,10 +14368,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           MapEntry(
                             'Game Server',
                             _gameServerFileController.text.trim(),
-                          ),
-                          MapEntry(
-                            'Large Pak Patcher',
-                            _largePakPatcherController.text.trim(),
                           ),
                         ];
                         final targetLabel = targetName.isEmpty
@@ -13519,10 +14637,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                               MapEntry(
                                                 'Game Server',
                                                 preset.gameServerFilePath,
-                                              ),
-                                              MapEntry(
-                                                'Large Pak Patcher',
-                                                preset.largePakPatcherFilePath,
                                               ),
                                             ].where((entry) {
                                               return entry.value
@@ -13860,7 +14974,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   Future<void> _clearUnrealEnginePatcher() async {
     await _resetBundledDllPathToLatest(
-      spec: _bundledDllSpecByFileName('console.dll'),
+      spec: _bundledDllSpecByFileName('Console.dll'),
       applySetting: (settings, path) =>
           settings.copyWith(unrealEnginePatcherPath: path),
       controller: _unrealEnginePatcherController,
@@ -13910,7 +15024,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   Future<void> _clearMemoryPatcher() async {
     await _resetBundledDllPathToLatest(
-      spec: _bundledDllSpecByFileName('memory.dll'),
+      spec: _bundledDllSpecByFileName('Memory.dll'),
       applySetting: (settings, path) =>
           settings.copyWith(memoryPatcherPath: path),
       controller: _memoryPatcherController,
@@ -13939,31 +15053,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       applySetting: (settings, path) =>
           settings.copyWith(gameServerFilePath: path),
       controller: _gameServerFileController,
-    );
-  }
-
-  Future<void> _pickLargePakPatcherFile() async {
-    final path = await _pickSingleFile(
-      dialogTitle: 'Select large pak patcher DLL',
-      allowedExtensions: const ['dll'],
-    );
-    if (path == null) return;
-    setState(() {
-      _settings = _settings.copyWith(largePakPatcherFilePath: path);
-      _largePakPatcherController.text = path;
-    });
-    await _saveSettings(toast: false);
-    unawaited(
-      _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
-    );
-  }
-
-  Future<void> _clearLargePakPatcherFile() async {
-    await _resetBundledDllPathToLatest(
-      spec: _bundledDllSpecByFileName('LargePakPatch.dll'),
-      applySetting: (settings, path) =>
-          settings.copyWith(largePakPatcherFilePath: path),
-      controller: _largePakPatcherController,
     );
   }
 
@@ -14119,14 +15208,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   ImageProvider<Object> _libraryCoverImage(VersionEntry? version) {
     if (version == null) {
-      return const AssetImage('assets/images/missingbuild.webp');
+      return const AssetImage('assets/images/missingasset.webp');
     }
 
     final selected = version.splashImagePath.trim();
     if (selected.isNotEmpty) {
       return FileImage(File(selected));
     }
-    return const AssetImage('assets/images/library_cover.png');
+    return const AssetImage('assets/images/missingasset.webp');
   }
 
   int _compareVersionStrings(String a, String b) {
@@ -14195,6 +15284,18 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
   }
 
+  int _imageCacheExtent(
+    double logicalExtent,
+    double devicePixelRatio, {
+    double qualityScale = 1.35,
+    int max = 4096,
+  }) {
+    return (logicalExtent * devicePixelRatio * qualityScale).round().clamp(
+      1,
+      max,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final blurSigma = _settings.backgroundBlur.clamp(0.0, 30.0).toDouble();
@@ -14233,7 +15334,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       // UI stays responsive.
                       enabled:
                           _gameAction == _GameActionState.idle &&
-                          !_gameServerLaunching,
+                          !_gameServerLaunching &&
+                          !_backgroundMotionPaused,
                       child: _AtlasParticleField(
                         opacity: _settings.backgroundParticlesOpacity
                             .clamp(0.0, 2.0)
@@ -14287,7 +15389,20 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                     !_libraryImportTipFadingOut,
                               ),
                               const SizedBox(height: 18),
-                              Expanded(child: _tabContent()),
+                              Expanded(
+                                child: NotificationListener<ScrollNotification>(
+                                  onNotification: (notification) {
+                                    if (notification
+                                            is ScrollStartNotification ||
+                                        notification
+                                            is ScrollUpdateNotification) {
+                                      _pauseBackgroundMotionBriefly();
+                                    }
+                                    return false;
+                                  },
+                                  child: RepaintBoundary(child: _tabContent()),
+                                ),
+                              ),
                             ],
                           );
                         },
@@ -14734,10 +15849,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         ),
       ),
     };
-    final leftAnimated = _animatedSwap(
-      switchKey: _tab,
-      duration: const Duration(milliseconds: 220),
-      layoutAlignment: Alignment.centerLeft,
+    final leftTitle = KeyedSubtree(
+      key: ValueKey<String>(
+        '${_tab.name}:${_tab == LauncherTab.home ? _selectedContentTabId ?? '' : ''}',
+      ),
       child: left,
     );
 
@@ -14795,7 +15910,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (showLeft) leftAnimated,
+          if (showLeft) leftTitle,
           if (showLeft && (showNav || right.children.isNotEmpty))
             const SizedBox(height: 12),
           if (showNav) Align(alignment: Alignment.center, child: nav),
@@ -14812,7 +15927,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         fit: StackFit.expand,
         children: [
           if (showLeft)
-            Align(alignment: Alignment.centerLeft, child: leftAnimated),
+            Align(alignment: Alignment.centerLeft, child: leftTitle),
           if (showNav) Align(alignment: Alignment.center, child: nav),
           if (right.children.isNotEmpty)
             Align(alignment: Alignment.centerRight, child: right),
@@ -15049,18 +16164,28 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   void _beginBackendTipPreviewIfNeeded() {
     _backendQuickTipOriginalType ??= _settings.backendConnectionType;
     _backendQuickTipOriginalHost ??= _settings.remoteBackendHost;
+    _backendQuickTipOriginalBackendPort ??= _settings.backendPort;
+    _backendQuickTipOriginalLocalPort ??= _settings.localBackendPort;
   }
 
   void _previewBackendTypeForTip(BackendConnectionType type) {
     _beginBackendTipPreviewIfNeeded();
     final originalHost =
         _backendQuickTipOriginalHost ?? _settings.remoteBackendHost;
+    final previewPort = type == BackendConnectionType.embedded
+        ? _settings.embeddedBackendType.defaultPort
+        : type == BackendConnectionType.remote
+        ? _settings.remoteBackendPort
+        : _backendQuickTipOriginalLocalPort ?? _settings.localBackendPort;
     setState(() {
-      _settings = _settings.copyWith(backendConnectionType: type);
+      _settings = _settings.copyWith(
+        backendConnectionType: type,
+        backendPort: previewPort,
+      );
       _backendHostController.text = type == BackendConnectionType.remote
           ? originalHost
           : '';
-      _backendPortController.text = _effectiveBackendPort().toString();
+      _backendPortController.text = previewPort.toString();
     });
   }
 
@@ -15072,6 +16197,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     setState(() {
       _settings = _settings.copyWith(
         backendConnectionType: originalType,
+        backendPort:
+            _backendQuickTipOriginalBackendPort ?? _settings.backendPort,
+        localBackendPort:
+            _backendQuickTipOriginalLocalPort ?? _settings.localBackendPort,
         remoteBackendHost: originalType == BackendConnectionType.remote
             ? originalHost
             : _settings.remoteBackendHost,
@@ -15082,6 +16211,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _backendPortController.text = _effectiveBackendPort().toString();
       _backendQuickTipOriginalType = null;
       _backendQuickTipOriginalHost = null;
+      _backendQuickTipOriginalBackendPort = null;
+      _backendQuickTipOriginalLocalPort = null;
     });
   }
 
@@ -15117,7 +16248,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       return;
     }
     if (_backendQuickTipStep == 1) {
+      _previewBackendTypeForTip(BackendConnectionType.embedded);
       setState(() => _backendQuickTipStep = 2);
+      return;
+    }
+    if (_backendQuickTipStep == 2) {
+      _previewBackendTypeForTip(BackendConnectionType.remote);
+      setState(() => _backendQuickTipStep = 3);
       return;
     }
     _completeBackendConnectionTip();
@@ -15125,13 +16262,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
   Widget _backendConnectionTipCard() {
     final secondary = Theme.of(context).colorScheme.secondary;
-    final stepTwo = _backendQuickTipStep == 1;
-    final stepThree = _backendQuickTipStep == 2;
+    final remoteStep = _backendQuickTipStep == 1;
+    final embeddedStep = _backendQuickTipStep == 2;
+    final savedStep = _backendQuickTipStep == 3;
 
     Widget stepContent;
-    if (!stepTwo && !stepThree) {
+    if (!embeddedStep && !remoteStep && !savedStep) {
       stepContent = Text(
-        'Running your own backend on this PC? Keep Type on Local and set Port to whatever your backend listens on (for example 5595 for Neonite). Link proxies Fortnite through 3551.',
+        'Running your own backend on this PC? Keep Type on Local and set Port to whatever your backend listens on.',
         style: TextStyle(
           fontSize: 12.5,
           height: 1.28,
@@ -15139,7 +16277,17 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           fontWeight: FontWeight.w600,
         ),
       );
-    } else if (stepTwo) {
+    } else if (embeddedStep) {
+      stepContent = Text(
+        'Having issues with ATLAS Backend? Switch Type to Embedded, choose LawinServer or NeoniteV2, then launch it. These bundled backends include their own Node runtime and packages.',
+        style: TextStyle(
+          fontSize: 12.5,
+          height: 1.28,
+          color: _onSurface(context, 0.86),
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    } else if (remoteStep) {
       stepContent = Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 4,
@@ -15183,7 +16331,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       );
     } else {
       stepContent = Text(
-        'You can save other backends too. Click the bookmark button next to Host to save an IP, then select a saved backend below to connect (Link will only connect if it\'s online).',
+        'You can save other backends too. Click the bookmark button next to Host to save an IP, then select a saved backend below to connect.',
         style: TextStyle(
           fontSize: 12.5,
           height: 1.28,
@@ -15229,7 +16377,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               ),
               const SizedBox(width: 8),
               Text(
-                '${_backendQuickTipStep + 1}/3',
+                '${_backendQuickTipStep + 1}/4',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -15238,10 +16386,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
               ),
               const Spacer(),
               IconButton(
-                tooltip: _backendQuickTipStep < 2 ? 'Next tip' : 'Got it',
+                tooltip: _backendQuickTipStep < 3 ? 'Next tip' : 'Got it',
                 onPressed: _advanceBackendConnectionTip,
                 icon: Icon(
-                  _backendQuickTipStep < 2
+                  _backendQuickTipStep < 3
                       ? Icons.arrow_forward_rounded
                       : Icons.check_rounded,
                   size: 16,
@@ -15363,8 +16511,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       _configuredDllPathMissing(_settings.unrealEnginePatcherPath) ||
       _configuredDllPathMissing(_settings.authenticationPatcherPath) ||
       _configuredDllPathMissing(_settings.memoryPatcherPath) ||
-      _configuredDllPathMissing(_settings.gameServerFilePath) ||
-      _configuredDllPathMissing(_settings.largePakPatcherFilePath);
+      _configuredDllPathMissing(_settings.gameServerFilePath);
 
   bool get _showSettingsAlertBadge =>
       _bundledDllDefaultsUpdateAvailable || _hasMissingConfiguredDllPaths;
@@ -15826,6 +16973,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         (settingsSection == null || _settingsSection == settingsSection)) {
       return;
     }
+    _pauseBackgroundMotionBriefly();
     final previousTab = _tab;
     final previousContentTabId = _selectedContentTabId;
     final normalizedContentTabId = (contentTabId ?? '').trim();
@@ -15942,7 +17090,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) {
     final heroImage = _launcherContentImageProvider(
       hero.image,
-      fallbackAsset: 'assets/images/hero_banner.png',
+      fallbackAsset: 'assets/images/missingasset.webp',
     );
 
     return ClipRRect(
@@ -15960,7 +17108,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 color: Colors.black,
                 child: _launcherContentHeroImage(
                   imageProvider: heroImage,
-                  fallbackAsset: 'assets/images/hero_banner.png',
+                  fallbackAsset: 'assets/images/missingasset.webp',
                 ),
               ),
             ),
@@ -16152,11 +17300,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     imageProvider: ResizeImage(
                       _launcherContentImageProvider(
                         card.image,
-                        fallbackAsset: 'assets/images/hero_banner.png',
+                        fallbackAsset: 'assets/images/missingasset.webp',
                       ),
                       width: 1200,
                     ),
-                    fallbackAsset: 'assets/images/hero_banner.png',
+                    fallbackAsset: 'assets/images/missingasset.webp',
                   ),
                 ),
               ),
@@ -16225,6 +17373,13 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   Widget _libraryTab() {
     final selected = _settings.selectedVersion;
     final selectedName = selected?.name ?? 'No Version Selected';
+    final selectedVersionLabel = selected == null
+        ? ''
+        : _formatLibraryVersionLabel(selected.gameVersion);
+    final selectedVersionEyebrow =
+        selectedVersionLabel.isEmpty || selectedVersionLabel == '?'
+        ? 'VERSION'
+        : 'VERSION $selectedVersionLabel';
     final coverImage = _libraryCoverImage(selected);
     final installedVersions = _sortedInstalledVersions();
     final searchQuery = _versionSearchQuery.trim().toLowerCase();
@@ -16260,9 +17415,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   final compact = constraints.maxWidth < 920;
                   final dpr = MediaQuery.of(context).devicePixelRatio;
                   final coverWidth = compact ? constraints.maxWidth : 250.0;
-                  final coverCacheWidth = (coverWidth * dpr).round().clamp(
-                    1,
-                    4096,
+                  final coverHeight = compact ? 300.0 : 300.0;
+                  final coverCacheWidth = _imageCacheExtent(
+                    max(coverWidth, coverHeight),
+                    dpr,
                   );
                   final ImageProvider<Object> heroCoverProvider =
                       selected == null
@@ -16273,14 +17429,16 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     child: Image(
                       image: heroCoverProvider,
                       width: compact ? double.infinity : 250,
-                      height: 300,
+                      height: coverHeight,
                       fit: BoxFit.cover,
+                      filterQuality: FilterQuality.medium,
                       errorBuilder: (context, error, stackTrace) {
                         return Image.asset(
-                          'assets/images/library_cover.png',
+                          'assets/images/missingasset.webp',
                           width: compact ? double.infinity : 250,
-                          height: 300,
+                          height: coverHeight,
                           fit: BoxFit.cover,
+                          filterQuality: FilterQuality.medium,
                         );
                       },
                     ),
@@ -16296,7 +17454,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'VERSION',
+                            selectedVersionEyebrow,
                             style: TextStyle(
                               color: _onSurface(context, 0.72),
                               fontWeight: FontWeight.w700,
@@ -16459,6 +17617,25 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                                     : () => _openPath(selected.location),
                                 icon: const Icon(Icons.folder_open_rounded),
                                 label: const Text('Open Folder'),
+                              ),
+                              Tooltip(
+                                message: 'Injector',
+                                child: OutlinedButton(
+                                  onPressed: () =>
+                                      unawaited(_showInjectorDialog()),
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(42, 42),
+                                    maximumSize: const Size(42, 42),
+                                    padding: EdgeInsets.zero,
+                                    shape: const CircleBorder(),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: const Icon(
+                                    Icons.science_rounded,
+                                    size: 18,
+                                  ),
+                                ),
                               ),
                               OutlinedButton(
                                 onPressed: _openHostOptionsDialog,
@@ -16895,6 +18072,11 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final visibleVersions = versions.take(3).toList();
     final width = splashSize + (max(visibleVersions.length - 1, 0) * overlap);
     final signature = visibleVersions.map((version) => version.id).join('|');
+    final imageCacheSize = _imageCacheExtent(
+      splashSize,
+      MediaQuery.of(context).devicePixelRatio,
+      max: 1024,
+    );
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 260),
@@ -16949,13 +18131,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                     child: Image(
                       image: ResizeImage(
                         _libraryCoverImage(visibleVersions[index]),
-                        width: 240,
+                        width: imageCacheSize,
                       ),
                       fit: BoxFit.cover,
+                      filterQuality: FilterQuality.medium,
                       errorBuilder: (context, error, stackTrace) {
                         return Image.asset(
-                          'assets/images/library_cover.png',
+                          'assets/images/missingasset.webp',
                           fit: BoxFit.cover,
+                          filterQuality: FilterQuality.medium,
                         );
                       },
                     ),
@@ -17057,7 +18241,6 @@ for (\$i = 0; \$i -lt 180; \$i++) {
   }) {
     final active = _activeVersionPlaySessions.containsKey(entry.id);
     final trackedSeconds = _effectiveVersionPlaySeconds(entry);
-    final imageProvider = ResizeImage(_libraryCoverImage(entry), width: 320);
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -17074,6 +18257,15 @@ for (\$i = 0; \$i -lt 180; \$i++) {
           const sectionSpacing = 18.0;
           const summarySpacing = 12.0;
           final mediaSize = compact ? min(136.0, constraints.maxWidth) : 128.0;
+          final mediaCacheSize = _imageCacheExtent(
+            mediaSize,
+            MediaQuery.of(context).devicePixelRatio,
+            max: 1024,
+          );
+          final imageProvider = ResizeImage(
+            _libraryCoverImage(entry),
+            width: mediaCacheSize,
+          );
           final titleStyle = TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.w800,
@@ -17144,12 +18336,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 width: mediaSize,
                 height: mediaSize,
                 fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
                 errorBuilder: (context, error, stackTrace) {
                   return Image.asset(
-                    'assets/images/library_cover.png',
+                    'assets/images/missingasset.webp',
                     width: mediaSize,
                     height: mediaSize,
                     fit: BoxFit.cover,
+                    filterQuality: FilterQuality.medium,
                   );
                 },
               ),
@@ -17864,7 +19058,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
       // Pre-cache the first batch of splash images so scrolling feels instant.
       final dpr = MediaQuery.of(context).devicePixelRatio;
-      final cacheWidth = (520 * dpr).round().clamp(1, 4096);
+      final cacheWidth = _imageCacheExtent(520, dpr, qualityScale: 1.0);
       final count = min(8, versions.length);
 
       unawaited(() async {
@@ -17902,7 +19096,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             ? constraints.maxWidth
             : 520.0;
         final bgCacheWidth = (maxWidth * dpr).round().clamp(1, 4096);
-        final thumbCache = (72 * dpr).round().clamp(1, 1024);
+        final thumbCache = _imageCacheExtent(72, dpr, max: 1024);
         final bgProvider = ResizeImage(splashImage, width: bgCacheWidth);
         final thumbProvider = ResizeImage(splashImage, width: thumbCache);
 
@@ -17968,7 +19162,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           filterQuality: FilterQuality.low,
                           errorBuilder: (context, error, stackTrace) {
                             return Image.asset(
-                              'assets/images/library_cover.png',
+                              'assets/images/missingasset.webp',
                               fit: BoxFit.cover,
                               filterQuality: FilterQuality.low,
                             );
@@ -18027,14 +19221,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                               width: 72,
                               height: 72,
                               fit: BoxFit.cover,
-                              filterQuality: FilterQuality.low,
+                              filterQuality: FilterQuality.medium,
                               errorBuilder: (context, error, stackTrace) {
                                 return Image.asset(
-                                  'assets/images/library_cover.png',
+                                  'assets/images/missingasset.webp',
                                   width: 72,
                                   height: 72,
                                   fit: BoxFit.cover,
-                                  filterQuality: FilterQuality.low,
+                                  filterQuality: FilterQuality.medium,
                                 );
                               },
                             ),
@@ -18189,7 +19383,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     final configuredEndpoint = '$hostLabel:$portLabel';
     final backendActionBusy = _backendActionBusy;
     final backendBusyLabel = _backendActionMessage.trim().isEmpty
-        ? 'Checking backend...'
+        ? 'Checking Backend...'
         : _backendActionMessage;
     final backendBusyStatus = backendBusyLabel.replaceAll('...', '').trim();
     final statusLabel = backendActionBusy
@@ -18197,13 +19391,19 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         : _backendOnline
         ? 'Connected on $configuredEndpoint'
         : 'Waiting on $configuredEndpoint';
+    final managedBackendName =
+        _settings.backendConnectionType == BackendConnectionType.embedded
+        ? _settings.embeddedBackendType.label
+        : 'ATLAS Backend';
     final backendLaunchLabel = _atlasBackendActionBusy
         ? backendBusyLabel
         : _atlasBackendProcess != null
-        ? 'ATLAS Backend running'
-        : 'Launch ATLAS Backend';
+        ? 'Stop Backend'
+        : 'Launch $managedBackendName';
     final canUseManagedBackend =
-        _settings.backendConnectionType == BackendConnectionType.local;
+        _settings.backendConnectionType != BackendConnectionType.remote;
+    final embeddedBackendSelectorLocked =
+        _atlasBackendProcess != null || _backendActionBusy;
 
     if (_showBackendConnectionTip &&
         _backendQuickTipStep == 0 &&
@@ -18220,7 +19420,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     }
 
     final shouldShrinkBackendPanel =
-        _settings.backendConnectionType == BackendConnectionType.local;
+        _settings.backendConnectionType != BackendConnectionType.remote;
     final backendPanel = _glass(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -18258,10 +19458,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                       const SizedBox(width: 10),
                       Text(
                         _backendOnline
-                            ? 'Backend reachable'
+                            ? 'Backend Reachable'
                             : backendActionBusy
                             ? backendBusyLabel.replaceAll('...', '')
-                            : 'Backend not detected',
+                            : 'Backend Not Detected',
                         style: TextStyle(
                           fontWeight: FontWeight.w700,
                           color: onSurface.withValues(alpha: 0.92),
@@ -18296,13 +19496,12 @@ for (\$i = 0; \$i -lt 180; \$i++) {
             _backendSettingTile(
               icon: Icons.settings_ethernet_rounded,
               title: 'Type',
-              subtitle:
-                  'The type of backend to use when logging into Fortnite',
+              subtitle: 'The type of backend to use when logging into Fortnite',
               trailing: _tipPulseGlowIf(
                 DropdownButtonFormField<BackendConnectionType>(
                   initialValue: _settings.backendConnectionType,
                   decoration: _backendFieldDecoration(),
-                  items: BackendConnectionType.values.map((type) {
+                  items: _backendConnectionTypeDropdownOrder.map((type) {
                     return DropdownMenuItem<BackendConnectionType>(
                       value: type,
                       child: Text(type.label),
@@ -18316,6 +19515,59 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 enabled: _showBackendConnectionTip && _backendQuickTipStep < 2,
               ),
             ),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.embedded)
+              const SizedBox(height: 8),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.embedded)
+              _backendSettingTile(
+                icon: Icons.inventory_2_rounded,
+                title: 'Alternative Backends',
+                subtitle:
+                    'Choose an alternative embedded backend provided in the launcher.',
+                trailingWidth: 290,
+                trailing: Row(
+                  children: [
+                    SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: IconButton(
+                        tooltip: 'Open backend folder',
+                        onPressed: () =>
+                            unawaited(_openEmbeddedBackendFolder()),
+                        icon: const Icon(Icons.folder_open_rounded, size: 20),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 240,
+                      child: _tipPulseGlowIf(
+                        DropdownButtonFormField<EmbeddedBackendType>(
+                          key: ValueKey(_settings.embeddedBackendType),
+                          initialValue: _settings.embeddedBackendType,
+                          decoration: _backendFieldDecoration(),
+                          items: EmbeddedBackendType.values.map((backend) {
+                            return DropdownMenuItem<EmbeddedBackendType>(
+                              value: backend,
+                              child: Text(backend.label),
+                            );
+                          }).toList(),
+                          onChanged: embeddedBackendSelectorLocked
+                              ? null
+                              : (backend) {
+                                  if (backend == null) return;
+                                  unawaited(_setEmbeddedBackendType(backend));
+                                },
+                        ),
+                        enabled:
+                            _showBackendConnectionTip &&
+                            _backendQuickTipStep == 2 &&
+                            !embeddedBackendSelectorLocked,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (_settings.backendConnectionType == BackendConnectionType.remote)
               const SizedBox(height: 8),
             if (_settings.backendConnectionType == BackendConnectionType.remote)
@@ -18353,7 +19605,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                           ),
                           enabled:
                               _showBackendConnectionTip &&
-                              _backendQuickTipStep == 2,
+                              _backendQuickTipStep == 3,
                         ),
                       ),
                   onChanged: (value) {
@@ -18369,40 +19621,68 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   },
                 ),
               ),
-            const SizedBox(height: 8),
-            _backendSettingTile(
-              icon: Icons.numbers_rounded,
-              title: 'Port',
-              subtitle: 'The port of the backend',
-              trailing: TextField(
-                controller: _backendPortController,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: _backendFieldDecoration(
-                  hintText: '3551',
+            if (_settings.backendConnectionType !=
+                BackendConnectionType.embedded)
+              const SizedBox(height: 8),
+            if (_settings.backendConnectionType !=
+                BackendConnectionType.embedded)
+              _backendSettingTile(
+                icon: Icons.numbers_rounded,
+                title: 'Port',
+                subtitle: 'The port of the backend',
+                trailing: TextField(
+                  controller: _backendPortController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: _backendFieldDecoration(hintText: '3551'),
+                  onChanged: (value) {
+                    final parsed = int.tryParse(value);
+                    if (parsed == null || parsed <= 0) return;
+                    setState(() {
+                      if (_settings.backendConnectionType !=
+                          BackendConnectionType.remote) {
+                        _settings = _settings.copyWith(
+                          localBackendPort: parsed,
+                          backendPort: parsed,
+                        );
+                      } else {
+                        _settings = _settings.copyWith(
+                          remoteBackendPort: parsed,
+                          backendPort: parsed,
+                        );
+                      }
+                    });
+                    unawaited(_saveSettings(toast: false));
+                    unawaited(_refreshRuntime());
+                  },
                 ),
-                onChanged: (value) {
-                  final parsed = int.tryParse(value);
-                  if (parsed == null || parsed <= 0) return;
-                  setState(() {
-                    if (_settings.backendConnectionType ==
-                        BackendConnectionType.local) {
-                      _settings = _settings.copyWith(
-                        localBackendPort: parsed,
-                        backendPort: parsed,
-                      );
-                    } else {
-                      _settings = _settings.copyWith(
-                        remoteBackendPort: parsed,
-                        backendPort: parsed,
-                      );
-                    }
-                  });
-                  unawaited(_saveSettings(toast: false));
-                  unawaited(_refreshRuntime());
-                },
               ),
-            ),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.embedded)
+              const SizedBox(height: 8),
+            if (_settings.backendConnectionType ==
+                BackendConnectionType.embedded)
+              _backendSettingTile(
+                icon: Icons.terminal_rounded,
+                title: 'Backend Terminal',
+                subtitle:
+                    "Show the backend's process terminal for logs and more.",
+                trailingWidth: 88,
+                trailing: Align(
+                  alignment: Alignment.centerRight,
+                  child: Switch(
+                    value: _settings.backendTerminalEnabled,
+                    onChanged: (value) {
+                      setState(() {
+                        _settings = _settings.copyWith(
+                          backendTerminalEnabled: value,
+                        );
+                      });
+                      unawaited(_saveSettings(toast: false));
+                    },
+                  ),
+                ),
+              ),
             const SizedBox(height: 12),
             LayoutBuilder(
               builder: (context, constraints) {
@@ -18410,8 +19690,10 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                 final backendLaunchEnabled =
                     canUseManagedBackend &&
                     !backendActionBusy &&
-                    _atlasBackendProcess == null &&
-                    !_backendOnline;
+                    (_settings.backendConnectionType ==
+                            BackendConnectionType.embedded ||
+                        _atlasBackendProcess != null ||
+                        !_backendOnline);
                 const buttonTextStyle = TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 15,
@@ -18419,7 +19701,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 
                 final launchButton = FilledButton.icon(
                   onPressed: backendLaunchEnabled
-                      ? _launchManagedBackend
+                      ? (_atlasBackendProcess != null
+                            ? _stopManagedBackend
+                            : _launchManagedBackend)
                       : null,
                   style: FilledButton.styleFrom(
                     backgroundColor: secondary.withValues(alpha: 0.92),
@@ -18434,7 +19718,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   ),
                   icon: Icon(
                     _atlasBackendProcess != null
-                        ? Icons.check_circle_rounded
+                        ? Icons.stop_rounded
                         : Icons.play_arrow_rounded,
                     size: 18,
                   ),
@@ -18458,7 +19742,7 @@ for (\$i = 0; \$i -lt 180; \$i++) {
                   label: Text(
                     _backendConnectionActionBusy
                         ? backendBusyLabel
-                        : 'Check backend',
+                        : 'Check Backend',
                   ),
                 );
 
@@ -18548,10 +19832,14 @@ for (\$i = 0; \$i -lt 180; \$i++) {
     await _useDefaultPortForManagedBackendLaunch(toast: showProgressToast);
     setState(() {
       _atlasBackendActionBusy = true;
-      _backendActionMessage = 'Checking backend...';
+      _backendActionMessage = 'Checking Backend...';
     });
     if (showProgressToast) {
-      _toastProgress('Checking backend...', progress: null, indeterminate: true);
+      _toastProgress(
+        'Checking Backend...',
+        progress: null,
+        indeterminate: true,
+      );
     }
     try {
       await _refreshRuntime(force: true);
@@ -18561,9 +19849,9 @@ for (\$i = 0; \$i -lt 180; \$i++) {
       }
 
       if (mounted) {
-        setState(() => _backendActionMessage = 'Starting backend...');
+        setState(() => _backendActionMessage = 'Starting Backend...');
       } else {
-        _backendActionMessage = 'Starting backend...';
+        _backendActionMessage = 'Starting Backend...';
       }
       if (showProgressToast) {
         _toastProgress(
@@ -18631,6 +19919,426 @@ for (\$i = 0; \$i -lt 180; \$i++) {
         _backendActionMessage = '';
       }
     }
+  }
+
+  Future<void> _launchEmbeddedBackend({bool showProgressToast = true}) async {
+    if (_backendActionBusy) return;
+    if (!Platform.isWindows) {
+      _toast('Launching embedded backends is only available on Windows');
+      return;
+    }
+    if (_atlasBackendProcess != null) {
+      _toast('${_settings.embeddedBackendType.label} is already running');
+      await _checkBackendNow();
+      return;
+    }
+    if (_settings.backendConnectionType != BackendConnectionType.embedded) {
+      _toast('Switch Backend Type to Embedded to launch an embedded backend');
+      return;
+    }
+
+    final selected = _settings.embeddedBackendType;
+    await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+    if (_effectiveBackendPort() != selected.defaultPort) {
+      setState(() {
+        _settings = _settings.copyWith(
+          backendHost: _defaultBackendHost,
+          backendPort: selected.defaultPort,
+        );
+        _backendPortController.text = selected.defaultPort.toString();
+      });
+      await _saveSettings(toast: false, applyControllers: false);
+      await _stopBackendProxy();
+    }
+
+    setState(() {
+      _atlasBackendActionBusy = true;
+      _backendActionMessage = 'Checking Backend...';
+    });
+    if (showProgressToast) {
+      _toastProgress(
+        'Checking Backend...',
+        progress: null,
+        indeterminate: true,
+      );
+    }
+
+    try {
+      await _refreshRuntime(force: true);
+      if (_backendOnline) {
+        _toast('${selected.label} is already running');
+        return;
+      }
+
+      final portOwners = await _listListeningPidsByPort(selected.defaultPort);
+      if (portOwners.isNotEmpty) {
+        final ownerList = portOwners.join(', ');
+        _log(
+          'backend',
+          'Cannot start ${selected.label}: port ${selected.defaultPort} is already used by pid(s) $ownerList.',
+        );
+        if (mounted) {
+          _toast(
+            'Port ${selected.defaultPort} is already in use. Stop the other backend first.',
+          );
+        }
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _backendActionMessage = 'Starting Backend...');
+      } else {
+        _backendActionMessage = 'Starting Backend...';
+      }
+      if (showProgressToast) {
+        _toastProgress(
+          'Starting ${selected.label}...',
+          progress: null,
+          indeterminate: true,
+        );
+      }
+
+      final process = await _startEmbeddedBackendProcess(selected);
+      _atlasBackendProcess = process;
+      final terminalLogFile = _settings.backendTerminalEnabled
+          ? await _openBackendLogTerminal(selected.label)
+          : null;
+      var terminalLogWrite = Future<void>.value();
+      _attachProcessLogs(
+        process,
+        source: 'backend',
+        onLine: (line, isError) {
+          final logFile = terminalLogFile;
+          if (logFile == null) return;
+          terminalLogWrite = terminalLogWrite
+              .then<void>(
+                (_) async => logFile.writeAsString(
+                  '$line\r\n',
+                  mode: FileMode.append,
+                  flush: true,
+                ),
+              )
+              .catchError((Object error) {
+                _log('backend', 'Backend terminal log write failed: $error');
+              });
+          unawaited(terminalLogWrite);
+        },
+      );
+      try {
+        process.exitCode.then((code) {
+          _log('backend', '${selected.label} exited with code $code.');
+          if (identical(_atlasBackendProcess, process)) {
+            if (mounted) {
+              setState(() => _atlasBackendProcess = null);
+            } else {
+              _atlasBackendProcess = null;
+            }
+          }
+          unawaited(_stopBackendTerminalWindow());
+        });
+      } on StateError catch (error) {
+        _log(
+          'backend',
+          '${selected.label} exit tracking is unavailable: $error',
+        );
+      }
+
+      if (mounted) {
+        setState(() => _backendActionMessage = 'Waiting for Backend...');
+      } else {
+        _backendActionMessage = 'Waiting for Backend...';
+      }
+      if (showProgressToast) {
+        _toastProgress(
+          'Waiting for ${selected.label}...',
+          progress: null,
+          indeterminate: true,
+        );
+      }
+
+      final detected = await _waitForEmbeddedBackendDetection(
+        process,
+        selected,
+      );
+      if (detected) {
+        if (mounted) _toast('${selected.label} launched');
+      } else {
+        await _cleanupFailedEmbeddedBackendLaunch(process, selected);
+      }
+    } catch (error) {
+      _log('backend', 'Failed to launch ${selected.label}: $error');
+      if (mounted) _toast('Failed to launch ${selected.label}');
+    } finally {
+      if (showProgressToast) _toastProgressDismiss();
+      if (mounted) {
+        setState(() {
+          _atlasBackendActionBusy = false;
+          _backendActionMessage = '';
+        });
+      } else {
+        _atlasBackendActionBusy = false;
+        _backendActionMessage = '';
+      }
+    }
+  }
+
+  Future<bool> _waitForEmbeddedBackendDetection(
+    Process process,
+    EmbeddedBackendType backend,
+  ) async {
+    const attempts = 60;
+    for (var attempt = 0; attempt < attempts; attempt += 1) {
+      final exitCode = await _tryProcessExitCode(process);
+      if (exitCode != null) {
+        _log(
+          'backend',
+          '${backend.label} exited before detection with code $exitCode.',
+        );
+        if (identical(_atlasBackendProcess, process)) {
+          if (mounted) {
+            setState(() => _atlasBackendProcess = null);
+          } else {
+            _atlasBackendProcess = null;
+          }
+        }
+        if (mounted) _toast('${backend.label} exited before it was detected');
+        return false;
+      }
+
+      await _refreshRuntime(force: true);
+      if (_backendOnline) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    final endpoint = '${_effectiveBackendHost()}:${_effectiveBackendPort()}';
+    _log(
+      'backend',
+      '${backend.label} started but was not detected on $endpoint.',
+    );
+    if (mounted) _toast('${backend.label} started but was not detected');
+    return false;
+  }
+
+  Future<void> _cleanupFailedEmbeddedBackendLaunch(
+    Process process,
+    EmbeddedBackendType backend,
+  ) async {
+    if (!identical(_atlasBackendProcess, process)) return;
+    _log('backend', 'Cleaning up failed ${backend.label} launch.');
+    await _terminateProcessTree(process);
+    await _stopBackendTerminalWindow();
+    await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+    await _stopBackendProxy();
+    if (mounted) {
+      setState(() => _atlasBackendProcess = null);
+    } else {
+      _atlasBackendProcess = null;
+    }
+    _setBackendOffline(toastIfChanged: false);
+  }
+
+  Future<int?> _tryProcessExitCode(Process process) async {
+    try {
+      return await process.exitCode.timeout(const Duration(milliseconds: 10));
+    } on TimeoutException {
+      return null;
+    } on StateError {
+      return null;
+    }
+  }
+
+  Future<Process> _startEmbeddedBackendProcess(
+    EmbeddedBackendType backend,
+  ) async {
+    final workingDir = _resolveEmbeddedBackendWorkingDirectory(backend);
+    if (workingDir == null) {
+      throw '${backend.label} bundled assets were not found or are missing dependencies.';
+    }
+    final executable = _resolveEmbeddedBackendExecutablePath(
+      backend,
+      workingDir,
+    );
+    if (executable == null || !File(executable).existsSync()) {
+      throw '${backend.label} embedded executable was not found.';
+    }
+
+    _log('backend', 'Starting ${backend.label} from $executable');
+    return Process.start(
+      executable,
+      <String>[pid.toString(), workingDir],
+      workingDirectory: workingDir,
+      environment: <String, String>{
+        ...Platform.environment,
+        'FORCE_COLOR': '1',
+        'TERM': 'xterm-256color',
+      },
+      includeParentEnvironment: false,
+    );
+  }
+
+  String? _resolveEmbeddedBackendExecutablePath(
+    EmbeddedBackendType backend,
+    String workingDir,
+  ) {
+    final backendRoot = Directory(workingDir).parent.path;
+    final exeName = switch (backend) {
+      EmbeddedBackendType.lawinServer => 'atlas_lawinserver.exe',
+      EmbeddedBackendType.neoniteV2 => 'atlas_neonitev2.exe',
+    };
+    final alongsideBackend = File(_joinPath([backendRoot, 'bin', exeName]));
+    if (alongsideBackend.existsSync()) return alongsideBackend.path;
+    return _resolveBundledAssetFilePath(backend.executableAssetPath);
+  }
+
+  String? _resolveEmbeddedBackendWorkingDirectory(EmbeddedBackendType backend) {
+    final normalized = backend.bundledAssetDirectory
+        .trim()
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'^/+'), '');
+    final parts = normalized
+        .split('/')
+        .where((part) => part.trim().isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return null;
+
+    final seen = <String>{};
+    String? partialCandidate;
+    for (final candidate in _bundledAssetPathCandidates(parts)) {
+      if (!seen.add(candidate.toLowerCase())) continue;
+      final directory = Directory(candidate);
+      if (!directory.existsSync()) continue;
+      partialCandidate ??= candidate;
+      if (_embeddedBackendDirectoryIsComplete(candidate, backend)) {
+        if (candidate != partialCandidate) {
+          _log(
+            'backend',
+            'Using complete ${backend.label} assets from $candidate instead of incomplete assets at $partialCandidate.',
+          );
+        }
+        return candidate;
+      }
+    }
+
+    if (partialCandidate != null) {
+      _log(
+        'backend',
+        '${backend.label} assets were found but dependencies are missing under $partialCandidate.',
+      );
+    }
+    return null;
+  }
+
+  bool _embeddedBackendDirectoryIsComplete(
+    String directory,
+    EmbeddedBackendType backend,
+  ) {
+    final app = File(_joinPath([directory, backend.startCommand]));
+    if (!app.existsSync()) return false;
+    final packageMarker = File(
+      _joinPath([
+        directory,
+        'node_modules',
+        backend.requiredNodePackage,
+        'package.json',
+      ]),
+    );
+    return packageMarker.existsSync();
+  }
+
+  Future<File?> _openBackendLogTerminal(String backendName) async {
+    if (!Platform.isWindows) return null;
+    final tempDir = await Directory.systemTemp.createTemp(
+      'atlas_link_backend_',
+    );
+    final terminalTitle = 'ATLAS Link - $backendName Logs';
+    final logFile = File(_joinPath([tempDir.path, 'backend.log']));
+    await logFile.writeAsString(
+      'ATLAS Link - $backendName backend logs\r\n',
+      flush: true,
+    );
+    final script = File(_joinPath([tempDir.path, 'backend-log-terminal.cmd']));
+    final viewerScript = File(
+      _joinPath([tempDir.path, 'backend-log-terminal.ps1']),
+    );
+    final logPath = _escapePowerShellSingleQuotedValue(logFile.path);
+    await viewerScript.writeAsString(r'''
+param(
+  [Parameter(Mandatory=$true)][int]$LauncherPid,
+  [Parameter(Mandatory=$true)][string]$LogPath
+)
+
+$offset = 0
+while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
+  if (Test-Path -LiteralPath $LogPath) {
+    $stream = $null
+    $reader = $null
+    try {
+      $stream = [System.IO.File]::Open(
+        $LogPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite
+      )
+      if ($offset -gt $stream.Length) {
+        $offset = 0
+      }
+      [void]$stream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+      $reader = New-Object System.IO.StreamReader($stream)
+      $text = $reader.ReadToEnd()
+      $offset = $stream.Position
+      if (-not [string]::IsNullOrEmpty($text)) {
+        [Console]::Write($text)
+      }
+    } catch {
+      # The backend may be rotating or closing the file; retry on the next tick.
+    } finally {
+      if ($null -ne $reader) { $reader.Dispose() }
+      if ($null -ne $stream) { $stream.Dispose() }
+    }
+  }
+  Start-Sleep -Milliseconds 250
+}
+''', flush: true);
+    final viewerPath = _escapePowerShellSingleQuotedValue(viewerScript.path);
+    final buffer = StringBuffer()
+      ..writeln('@echo off')
+      ..writeln('title $terminalTitle')
+      ..writeln(
+        'powershell -NoProfile -ExecutionPolicy Bypass -File "$viewerPath" -LauncherPid $pid -LogPath "$logPath"',
+      );
+
+    await script.writeAsString(buffer.toString(), flush: true);
+    try {
+      final terminalPid = await _startBackendTerminalScript(script.path);
+      _backendTerminalPid = terminalPid;
+    } catch (error) {
+      _log('backend', 'Failed to open backend terminal: $error');
+      return null;
+    }
+
+    return logFile;
+  }
+
+  Future<int?> _startBackendTerminalScript(String scriptPath) async {
+    final escapedScript = _escapePowerShellSingleQuotedValue(scriptPath);
+    final command =
+        "\$script = '$escapedScript'; "
+        "\$arguments = '/c \"' + \$script + '\"'; "
+        "Start-Process -FilePath 'cmd.exe' -ArgumentList \$arguments -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id";
+    final result = await Process.run('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      command,
+    ], runInShell: true);
+    final output = '${result.stdout}\n${result.stderr}';
+    final match = RegExp(r'\b\d+\b').firstMatch(output);
+    return match == null ? null : int.tryParse(match.group(0)!);
+  }
+
+  String _escapePowerShellSingleQuotedValue(String value) {
+    return value.replaceAll("'", "''");
   }
 
   Future<void> _rememberBackendExecutablePath(String exePath) async {
@@ -19733,7 +21441,7 @@ foreach ($app in $appPaths) {
   }
 
   Future<void> _checkBackendNowWithStatus({
-    String busyMessage = 'Checking backend...',
+    String busyMessage = 'Checking Backend...',
   }) async {
     if (_backendActionBusy) return;
     if (_settings.backendConnectionType == BackendConnectionType.remote) {
@@ -19783,6 +21491,7 @@ foreach ($app in $appPaths) {
       _settings = _settings.copyWith(
         backendRuntimeProvider: BackendRuntimeProvider.atlas,
         backendConnectionType: BackendConnectionType.local,
+        embeddedBackendType: EmbeddedBackendType.lawinServer,
         backendHost: _defaultBackendHost,
         backendPort: _defaultBackendPort,
         localBackendPort: _defaultBackendPort,
@@ -21774,7 +23483,7 @@ foreach ($app in $appPaths) {
                     controller: _unrealEnginePatcherController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'console.dll',
+                      'Console.dll',
                     ),
                     onChanged: (value) {
                       setState(() {
@@ -21823,7 +23532,7 @@ foreach ($app in $appPaths) {
                     controller: _memoryPatcherController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'memory.dll',
+                      'Memory.dll',
                     ),
                     onChanged: (value) {
                       setState(() {
@@ -21859,31 +23568,6 @@ foreach ($app in $appPaths) {
                     },
                     onPick: _pickGameServerFile,
                     onReset: _clearGameServerFile,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _backendSettingTile(
-                  icon: Icons.description_outlined,
-                  title: 'Large Pak Patcher',
-                  subtitle:
-                      'Injected after the game server to support large pak files',
-                  trailingWidth: 500,
-                  trailing: _dataPathPicker(
-                    controller: _largePakPatcherController,
-                    placeholder: 'No file selected',
-                    updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'largepakpatch.dll',
-                    ),
-                    onChanged: (value) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          largePakPatcherFilePath: value.trim(),
-                        );
-                      });
-                      unawaited(_saveSettings(toast: false));
-                    },
-                    onPick: _pickLargePakPatcherFile,
-                    onReset: _clearLargePakPatcherFile,
                   ),
                 ),
               ],
@@ -21928,6 +23612,38 @@ foreach ($app in $appPaths) {
               _CreditProjectLink(
                 label: 'Tellurium',
                 url: 'https://github.com/plooshi/Tellurium',
+              ),
+            ],
+          ),
+          _CreditProfileData(
+            name: 'Lawin',
+            handle: '@Lawin0129',
+            role: 'Embedded Backend #1',
+            githubUrl: 'https://github.com/Lawin0129',
+            discordUrl: 'https://discord.com/invite/KJ8UaHZ',
+            discordLabel: 'Join Lawin',
+            avatarUrl: 'https://github.com/Lawin0129.png?size=240',
+            description:
+                'Created LawinServer, one of the embedded backend options packaged with ATLAS.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'LawinServer',
+                url: 'https://github.com/Lawin0129/LawinServer',
+              ),
+            ],
+          ),
+          _CreditProfileData(
+            name: 'Hybrid',
+            handle: '@HybridFNBR',
+            role: 'Embedded Backend #2',
+            githubUrl: 'https://github.com/HybridFNBR',
+            avatarUrl: 'https://github.com/HybridFNBR.png?size=240',
+            description:
+                'Created Neonite, one of the embedded backend options packaged with ATLAS.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Neonite',
+                url: 'https://github.com/HybridFNBR/Neonite',
               ),
             ],
           ),
@@ -21989,9 +23705,10 @@ foreach ($app in $appPaths) {
                     return Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(child: cards[0]),
-                        const SizedBox(width: 16),
-                        Expanded(child: cards[1]),
+                        for (var i = 0; i < cards.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 16),
+                          Expanded(child: cards[i]),
+                        ],
                       ],
                     );
                   },
@@ -22147,6 +23864,7 @@ foreach ($app in $appPaths) {
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
           onTap: () {
+            if (_settingsSection != section) _pauseBackgroundMotionBriefly();
             setState(() => _settingsSection = section);
             _syncLibraryActionsNudgePulse();
             _syncLauncherDiscordPresence();
@@ -22421,20 +24139,21 @@ foreach ($app in $appPaths) {
                 icon: const FaIcon(FontAwesomeIcons.github, size: 18),
                 label: Text('View ${credit.handle}'),
               ),
-              FilledButton.icon(
-                onPressed: () => unawaited(_openUrl(credit.discordUrl)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF5865F2),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 14,
+              if (credit.discordUrl != null && credit.discordLabel != null)
+                FilledButton.icon(
+                  onPressed: () => unawaited(_openUrl(credit.discordUrl!)),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF5865F2),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 14,
+                    ),
+                    shape: const StadiumBorder(),
                   ),
-                  shape: const StadiumBorder(),
+                  icon: const Icon(Icons.discord_rounded, size: 18),
+                  label: Text(credit.discordLabel!),
                 ),
-                icon: const Icon(Icons.discord_rounded, size: 18),
-                label: Text(credit.discordLabel),
-              ),
             ],
           ),
         ],
@@ -23489,19 +25208,19 @@ class _CreditProfileData {
     required this.handle,
     required this.role,
     required this.githubUrl,
-    required this.discordUrl,
-    required this.discordLabel,
     required this.avatarUrl,
     required this.description,
     required this.projects,
+    this.discordUrl,
+    this.discordLabel,
   });
 
   final String name;
   final String handle;
   final String role;
   final String githubUrl;
-  final String discordUrl;
-  final String discordLabel;
+  final String? discordUrl;
+  final String? discordLabel;
   final String avatarUrl;
   final String description;
   final List<_CreditProjectLink> projects;
@@ -23859,6 +25578,42 @@ class _BundledDllSpec {
 
   String get normalizedAssetPath =>
       assetPath.trim().replaceAll('\\', '/').replaceFirst(RegExp(r'^/+'), '');
+}
+
+class _BundledInjectorDll {
+  const _BundledInjectorDll({
+    required this.assetPath,
+    required this.fileName,
+    required this.label,
+  });
+
+  final String assetPath;
+  final String fileName;
+  final String label;
+}
+
+class _SavedInjectorDll {
+  const _SavedInjectorDll({required this.label, required this.path});
+
+  final String label;
+  final String path;
+
+  _SavedInjectorDll copyWith({String? label, String? path}) {
+    return _SavedInjectorDll(
+      label: label ?? this.label,
+      path: path ?? this.path,
+    );
+  }
+
+  factory _SavedInjectorDll.fromJson(Map<String, dynamic> json) {
+    final path = (json['path'] ?? json['Path'] ?? '').toString();
+    final label = (json['label'] ?? json['Label'] ?? '').toString();
+    return _SavedInjectorDll(label: label, path: path);
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{'label': label, 'path': path};
+  }
 }
 
 class _BundledDllRemoteAsset {
@@ -24248,7 +26003,6 @@ class _DllPreset {
     yield authenticationPatcherPath;
     yield memoryPatcherPath;
     yield gameServerFilePath;
-    yield largePakPatcherFilePath;
   }
 
   bool get hasAnyPath => configuredPaths.any((path) => path.trim().isNotEmpty);
@@ -24355,12 +26109,14 @@ class LauncherSettings {
     required this.backendStartCommand,
     required this.backendRuntimeProvider,
     required this.backendConnectionType,
+    required this.embeddedBackendType,
     required this.backendHost,
     required this.backendPort,
     required this.localBackendPort,
     required this.remoteBackendHost,
     required this.remoteBackendPort,
     required this.launchBackendOnSessionStart,
+    required this.backendTerminalEnabled,
     required this.largePakPatcherEnabled,
     required this.hostUsername,
     required this.playCustomLaunchArgs,
@@ -24405,12 +26161,14 @@ class LauncherSettings {
   final String backendStartCommand;
   final BackendRuntimeProvider backendRuntimeProvider;
   final BackendConnectionType backendConnectionType;
+  final EmbeddedBackendType embeddedBackendType;
   final String backendHost;
   final int backendPort;
   final int localBackendPort;
   final String remoteBackendHost;
   final int remoteBackendPort;
   final bool launchBackendOnSessionStart;
+  final bool backendTerminalEnabled;
   final bool largePakPatcherEnabled;
   final String hostUsername;
   final String playCustomLaunchArgs;
@@ -24519,12 +26277,14 @@ class LauncherSettings {
     String? backendStartCommand,
     BackendRuntimeProvider? backendRuntimeProvider,
     BackendConnectionType? backendConnectionType,
+    EmbeddedBackendType? embeddedBackendType,
     String? backendHost,
     int? backendPort,
     int? localBackendPort,
     String? remoteBackendHost,
     int? remoteBackendPort,
     bool? launchBackendOnSessionStart,
+    bool? backendTerminalEnabled,
     bool? largePakPatcherEnabled,
     String? hostUsername,
     String? playCustomLaunchArgs,
@@ -24582,6 +26342,7 @@ class LauncherSettings {
           backendRuntimeProvider ?? this.backendRuntimeProvider,
       backendConnectionType:
           backendConnectionType ?? this.backendConnectionType,
+      embeddedBackendType: embeddedBackendType ?? this.embeddedBackendType,
       backendHost: backendHost ?? this.backendHost,
       backendPort: backendPort ?? this.backendPort,
       localBackendPort: localBackendPort ?? this.localBackendPort,
@@ -24589,6 +26350,8 @@ class LauncherSettings {
       remoteBackendPort: remoteBackendPort ?? this.remoteBackendPort,
       launchBackendOnSessionStart:
           launchBackendOnSessionStart ?? this.launchBackendOnSessionStart,
+      backendTerminalEnabled:
+          backendTerminalEnabled ?? this.backendTerminalEnabled,
       largePakPatcherEnabled:
           largePakPatcherEnabled ?? this.largePakPatcherEnabled,
       hostUsername: hostUsername ?? this.hostUsername,
@@ -24645,12 +26408,14 @@ class LauncherSettings {
       backendStartCommand: 'node app.js',
       backendRuntimeProvider: BackendRuntimeProvider.atlas,
       backendConnectionType: BackendConnectionType.local,
+      embeddedBackendType: EmbeddedBackendType.lawinServer,
       backendHost: '127.0.0.1',
       backendPort: 3551,
       localBackendPort: 3551,
       remoteBackendHost: '',
       remoteBackendPort: 3551,
       launchBackendOnSessionStart: true,
+      backendTerminalEnabled: false,
       largePakPatcherEnabled: false,
       hostUsername: 'host',
       playCustomLaunchArgs: '',
@@ -24702,7 +26467,16 @@ class LauncherSettings {
     BackendConnectionType asBackendType(dynamic value) {
       final raw = (value ?? '').toString().toLowerCase().trim();
       if (raw == 'remote') return BackendConnectionType.remote;
+      if (raw == 'embedded') return BackendConnectionType.embedded;
       return BackendConnectionType.local;
+    }
+
+    EmbeddedBackendType asEmbeddedBackendType(dynamic value) {
+      final raw = (value ?? '').toString().toLowerCase().trim();
+      if (raw == 'neonitev2' || raw == 'neonite_v2' || raw == 'neonite') {
+        return EmbeddedBackendType.neoniteV2;
+      }
+      return EmbeddedBackendType.lawinServer;
     }
 
     BackendRuntimeProvider asBackendRuntimeProvider(dynamic value) {
@@ -24790,6 +26564,9 @@ class LauncherSettings {
           json['backendType'] ??
           json['BackendConnectionType'] ??
           json['BackendType'],
+    );
+    final resolvedEmbeddedBackendType = asEmbeddedBackendType(
+      json['embeddedBackendType'] ?? json['EmbeddedBackendType'],
     );
     final legacyBackendPort = asInt(json['backendPort'], 3551);
     final legacyBackendHost = (json['backendHost'] ?? '').toString();
@@ -24892,19 +26669,23 @@ class LauncherSettings {
             json['BackendRuntimeProvider'],
       ),
       backendConnectionType: resolvedBackendConnectionType,
+      embeddedBackendType: resolvedEmbeddedBackendType,
       backendHost: legacyBackendHost,
       backendPort: legacyBackendPort,
       localBackendPort: asInt(
         json['localBackendPort'],
-        resolvedBackendConnectionType == BackendConnectionType.local
+        resolvedBackendConnectionType == BackendConnectionType.embedded
+            ? resolvedEmbeddedBackendType.defaultPort
+            : resolvedBackendConnectionType == BackendConnectionType.local
             ? legacyBackendPort
             : 3551,
       ),
-      remoteBackendHost: (json['remoteBackendHost'] ??
-              (resolvedBackendConnectionType == BackendConnectionType.remote
-                  ? legacyBackendHost
-                  : ''))
-          .toString(),
+      remoteBackendHost:
+          (json['remoteBackendHost'] ??
+                  (resolvedBackendConnectionType == BackendConnectionType.remote
+                      ? legacyBackendHost
+                      : ''))
+              .toString(),
       remoteBackendPort: asInt(
         json['remoteBackendPort'],
         resolvedBackendConnectionType == BackendConnectionType.remote
@@ -24915,6 +26696,7 @@ class LauncherSettings {
         json['launchBackendOnSessionStart'] ?? json['launchBackend'],
         true,
       ),
+      backendTerminalEnabled: asBool(json['backendTerminalEnabled'], false),
       largePakPatcherEnabled: asBool(
         json['largePakPatcherEnabled'] ?? json['largePakPatcher'],
         false,
@@ -25007,18 +26789,20 @@ class LauncherSettings {
       'backendStartCommand': backendStartCommand,
       'backendRuntimeProvider': backendRuntimeProvider.name,
       'backendConnectionType': backendConnectionType.name,
-      'backendHost':
-          backendConnectionType == BackendConnectionType.remote
-              ? remoteBackendHost
-              : '127.0.0.1',
-      'backendPort':
-          backendConnectionType == BackendConnectionType.local
-              ? localBackendPort
-              : remoteBackendPort,
+      'embeddedBackendType': embeddedBackendType.name,
+      'backendHost': backendConnectionType == BackendConnectionType.remote
+          ? remoteBackendHost
+          : '127.0.0.1',
+      'backendPort': switch (backendConnectionType) {
+        BackendConnectionType.local => localBackendPort,
+        BackendConnectionType.embedded => embeddedBackendType.defaultPort,
+        BackendConnectionType.remote => remoteBackendPort,
+      },
       'localBackendPort': localBackendPort,
       'remoteBackendHost': remoteBackendHost,
       'remoteBackendPort': remoteBackendPort,
       'launchBackendOnSessionStart': launchBackendOnSessionStart,
+      'backendTerminalEnabled': backendTerminalEnabled,
       'largePakPatcherEnabled': largePakPatcherEnabled,
       'hostUsername': hostUsername,
       'playCustomLaunchArgs': playCustomLaunchArgs,

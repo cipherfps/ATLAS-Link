@@ -1,0 +1,11 @@
+<% /* Note: This email is designed to be used within an email layout (e.g. `views/layouts/layout-email.ejs`) */ %>
+<div style="padding: 25px; margin-top:10px; background-color: #14acc2; border-top-left-radius: 6px; border-top-right-radius: 6px; border: 1px solid #0c8da0;">
+  <h2 style="text-align: center; color: #ffffff; margin:0px; font-size: 34px;">TODO: Give this email a short title</h2>
+</div>
+<div style="background-color: #ffffff; padding: 25px; margin-bottom: 25px; color: #303030; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; border: 1px solid #cccccc;">
+  <p style="margin-bottom: 35px;">Dear user,</p>
+  <p><strong>TODO: Implement this email template.</strong></p>
+  <p>Remember: Many email inbox clients only support inline styles-- no stylesheets!  <em>(If you didn't already know that, we're really, really sorry we had to be the ones to break it to you.)</em></p>
+  <p>If you're unsure about what to do next, get help <a style="color: #14acc2" href="https://sailsjs.com/support" target="_blank">here</a>.</p>
+  <p style="margin-bottom: 35px;">Finally, here's an <a style="color: #14acc2" href="<%= url.resolve(sails.config.custom.baseUrl, '/whatever/you/want/TODO') %>">example of a custom link somewhere on your server</a>.</p>
+</div>

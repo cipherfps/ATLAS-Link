@@ -14,6 +14,10 @@ Desktop.ini
 .refs/
 .tmp_atlas_backend/
 node_modules/
+!atlas_link_flutter/assets/backend/neonite_v2/node_modules/
+!atlas_link_flutter/assets/backend/neonite_v2/node_modules/**
+!atlas_link_flutter/assets/backend/lawinserver/node_modules/
+!atlas_link_flutter/assets/backend/lawinserver/node_modules/**
 
 # Logs / temp
 *.log

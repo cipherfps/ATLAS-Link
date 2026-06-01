@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.3.0
+version: 1.3.1
 
 environment:
   sdk: ^3.10.8
@@ -84,6 +84,36 @@ flutter:
   assets:
     - assets/images/
     - assets/dlls/
+    - assets/backend/
+    - assets/backend/bin/
+    - assets/backend/node/
+    - assets/backend/lawinserver/
+    - assets/backend/lawinserver/CloudStorage/
+    - assets/backend/lawinserver/Config/
+    - assets/backend/lawinserver/profiles/
+    - assets/backend/lawinserver/public/
+    - assets/backend/lawinserver/public/images/
+    - assets/backend/lawinserver/responses/
+    - assets/backend/lawinserver/responses/Athena/
+    - assets/backend/lawinserver/responses/Athena/BattlePass/
+    - assets/backend/lawinserver/responses/Athena/Discovery/
+    - assets/backend/lawinserver/responses/Campaign/
+    - assets/backend/lawinserver/responses/CloudDir/
+    - assets/backend/lawinserver/structure/
+    - assets/backend/neonite_v2/
+    - assets/backend/neonite_v2/api/
+    - assets/backend/neonite_v2/api/controllers/
+    - assets/backend/neonite_v2/config/
+    - assets/backend/neonite_v2/discovery/
+    - assets/backend/neonite_v2/discovery/mnemonic_overwrite/
+    - assets/backend/neonite_v2/discovery/mnemonic_overwrite/figment/
+    - assets/backend/neonite_v2/hotfixes/
+    - assets/backend/neonite_v2/LauncherAssets/
+    - assets/backend/neonite_v2/profile_template/
+    - assets/backend/neonite_v2/profile_template/profiles/
+    - assets/backend/neonite_v2/responses/
+    - assets/backend/neonite_v2/responses/catalog/
+    - assets/backend/neonite_v2/structs/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

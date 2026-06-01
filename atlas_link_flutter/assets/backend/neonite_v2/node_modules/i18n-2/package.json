@@ -1,0 +1,30 @@
+{
+  "name": "i18n-2",
+  "description": "lightweight simple translation module with dynamic json storage",
+  "version": "0.7.3",
+  "homepage": "http://github.com/jeresig/i18n-node-2",
+  "repository": {
+    "type": "git",
+    "url": "http://github.com/jeresig/i18n-node-2.git"
+  },
+  "author": "John Resig <jeresig@gmail.com>",
+  "main": "./index",
+  "directories": {
+    "lib": "."
+  },
+  "dependencies": {
+    "debug": "^3.1.0",
+    "sprintf-js": "^1.1.1"
+  },
+  "devDependencies": {
+    "expresso": ">=0.9.2",
+    "js-yaml": "^3.4.3"
+  },
+  "engines": {
+    "node": ">=0.4.0"
+  },
+  "scripts": {
+    "test": "expresso test/*"
+  },
+  "license": "MIT"
+}

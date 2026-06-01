@@ -27,6 +27,10 @@ if /I "%MODE%"=="run" (
 )
 
 if /I "%MODE%"=="build" (
+  echo [ATLAS-Link Flutter] Building embedded backend executables...
+  powershell -ExecutionPolicy Bypass -File "tool\build_backend_exes.ps1"
+  if errorlevel 1 exit /b %errorlevel%
+
   echo [ATLAS-Link Flutter] Building Windows release...
   call flutter.bat build windows
   if errorlevel 1 exit /b %errorlevel%
@@ -36,6 +40,14 @@ if /I "%MODE%"=="build" (
     echo [ATLAS-Link Flutter] Included update-notes.md in release output.
   ) else (
     echo [ATLAS-Link Flutter] update-notes.md not found at repo root.
+  )
+  if exist "assets\backend" (
+    if exist "build\windows\x64\runner\Release\data\flutter_assets\assets\backend" (
+      rmdir /s /q "build\windows\x64\runner\Release\data\flutter_assets\assets\backend"
+    )
+    robocopy "assets\backend" "build\windows\x64\runner\Release\data\flutter_assets\assets\backend" /E /NFL /NDL /NJH /NJS /NP >nul
+    if errorlevel 8 exit /b 1
+    echo [ATLAS-Link Flutter] Included embedded backend assets in release output.
   )
   exit /b 0
 )

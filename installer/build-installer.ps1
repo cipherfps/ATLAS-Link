@@ -182,6 +182,22 @@ function Get-ReleaseExecutableName {
   return $exe.Name
 }
 
+function New-InstallerSourceStage {
+  param([string]$ReleaseDir)
+
+  $stageRoot = Join-Path $env:TEMP "ATLAS-Link\installer-source"
+  Remove-DirWithRetry -Path $stageRoot
+  New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+
+  & robocopy $ReleaseDir $stageRoot /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+  $robocopyExitCode = $LASTEXITCODE
+  if ($robocopyExitCode -ge 8) {
+    throw "Failed to stage installer source with robocopy (exit code $robocopyExitCode)"
+  }
+
+  return $stageRoot
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 $flutterDir = Join-Path $repoRoot "atlas_link_flutter"
@@ -208,6 +224,15 @@ $version = Get-PubspecVersion -PubspecPath $pubspecPath
 Write-Step "Resolved app version: $version"
 
 if (-not $SkipFlutterBuild) {
+  Write-Step "Building embedded backend executables"
+  Push-Location $flutterDir
+  try {
+    powershell -ExecutionPolicy Bypass -File "tool\build_backend_exes.ps1"
+  }
+  finally {
+    Pop-Location
+  }
+
   if (-not $SkipFlutterClean) {
     Write-Step "Running flutter clean"
 
@@ -263,6 +288,17 @@ if (-not (Test-Path $releaseDir)) {
 if (Test-Path $updateNotes) {
   Copy-Item -Path $updateNotes -Destination (Join-Path $releaseDir "update-notes.md") -Force
   Write-Step "Copied update-notes.md into release output"
+}
+
+$backendAssetsSource = Join-Path $flutterDir "assets\backend"
+$backendAssetsDest = Join-Path $releaseDir "data\flutter_assets\assets\backend"
+if (Test-Path $backendAssetsSource) {
+  if (Test-Path $backendAssetsDest) {
+    Remove-Item -LiteralPath $backendAssetsDest -Recurse -Force
+  }
+  New-Item -ItemType Directory -Path (Split-Path $backendAssetsDest -Parent) -Force | Out-Null
+  Copy-Item -Path $backendAssetsSource -Destination (Split-Path $backendAssetsDest -Parent) -Recurse -Force
+  Write-Step "Copied embedded backend assets into release output"
 }
 
 $executableName = Get-ReleaseExecutableName -ReleaseDir $releaseDir
@@ -331,9 +367,12 @@ Install Inno Setup 6 from https://jrsoftware.org/isinfo.php and rerun:
 
 Write-Step "Compiling installer with ISCC: $isccPath"
 
+$installerSourceDir = New-InstallerSourceStage -ReleaseDir $releaseDir
+Write-Step "Staged installer source: $installerSourceDir"
+
 $isccArgs = @(
   "/DMyAppVersion=$version",
-  "/DSourceDir=$releaseDir",
+  "/DSourceDir=$installerSourceDir",
   "/DExecutableName=$executableName",
   "/DOutputDir=$distDir",
   "/DOutputBaseFilename=$outputBaseFilename",

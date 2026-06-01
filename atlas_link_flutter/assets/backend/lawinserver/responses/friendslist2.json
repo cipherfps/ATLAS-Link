@@ -1,0 +1,38 @@
+{
+  "friends": [
+    {
+      "accountId": "host",
+      "groups": [],
+      "mutual": 0,
+      "alias": "",
+      "note": "",
+      "favorite": false,
+      "created": "2026-05-31T18:56:48.517Z"
+    },
+    {
+      "accountId": "cipher",
+      "groups": [],
+      "mutual": 0,
+      "alias": "",
+      "note": "",
+      "favorite": false,
+      "created": "2026-05-31T18:56:59.508Z"
+    },
+    {
+      "accountId": "client2",
+      "groups": [],
+      "mutual": 0,
+      "alias": "",
+      "note": "",
+      "favorite": false,
+      "created": "2026-06-01T18:05:56.034Z"
+    }
+  ],
+  "incoming": [],
+  "outgoing": [],
+  "suggested": [],
+  "blocklist": [],
+  "settings": {
+    "acceptInvites": "public"
+  }
+}

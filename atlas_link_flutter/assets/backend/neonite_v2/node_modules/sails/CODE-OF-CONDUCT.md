@@ -1,0 +1,1 @@
+> The Code of Conduct now lives in the 'Contributing' section of the documentation: [http://sailsjs.com/documentation/contributing/code-of-conduct](http://sailsjs.com/documentation/contributing/code-of-conduct)

@@ -25,6 +25,25 @@ void main() {
       );
     });
 
+    test('proxies embedded custom ports through the default redirect port', () {
+      expect(
+        BackendProxyRouting.proxyRequired(
+          connectionType: BackendConnectionType.embedded,
+          host: '127.0.0.1',
+          port: 5595,
+        ),
+        isTrue,
+      );
+      expect(
+        BackendProxyRouting.proxyRequired(
+          connectionType: BackendConnectionType.embedded,
+          host: '127.0.0.1',
+          port: 3551,
+        ),
+        isFalse,
+      );
+    });
+
     test('proxies remote external hosts on default and custom ports', () {
       expect(
         BackendProxyRouting.proxyRequired(

@@ -1,4 +1,4 @@
-<!-- version: 1.3.0 -->
+<!-- version: 1.3.1 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,7 +15,10 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fixed backend detections for custom ports
-- Visual clarity on pinging backends
+- Added Two Embedded Optional Backends: LawinServer & Neonite
+- New Default DLL Preset: Remix
+- Added Injector Library
+- Fixed Visual Issues
+- Updated Assets
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
