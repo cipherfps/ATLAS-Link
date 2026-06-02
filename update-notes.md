@@ -15,10 +15,11 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added Two Embedded Optional Backends: LawinServer & Neonite
-- New Default DLL Preset: Remix
-- Added Injector Library
-- Fixed Visual Issues
-- Updated Assets
+- Added a favorite button on the version cards
+- Added a filter button to sort between low-high, high-low and favorite versions
+- Removed Light Mode (yucky)
+- Injector allows multiple DLLs to be selected in files and has a search bar
+- Changed build/version download button to have an option of archives
+- Changed some visuals
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

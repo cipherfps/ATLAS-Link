@@ -1,0 +1,65 @@
+ATLAS Link Attribution License v1.0
+
+Copyright (c) 2026 cipherfps and ATLAS Link contributors.
+
+This license applies to the ATLAS Link project files, documentation, branding,
+and original changes made by the ATLAS Link contributors, except where another
+license, notice, or copyright statement applies.
+
+ATLAS Link is a fork of Reboot Launcher by Auties00. Third-party projects,
+libraries, embedded backends, dependencies, assets, and inherited source code
+remain subject to their own licenses and copyright holders. Nothing in this
+license removes or replaces those rights.
+
+Permission is granted to use, copy, modify, build, and distribute this project,
+subject to all of the following conditions:
+
+1. Attribution must be preserved.
+
+   Any public copy, fork, modified version, release, installer, website, or
+   repository based on ATLAS Link must keep visible credit to ATLAS Link and its
+   contributors, and must keep credit to Reboot Launcher and Auties00 where that
+   credit already appears.
+
+2. Rebranding must not hide origin.
+
+   You may customize names, logos, UI, assets, and branding, but you may not
+   distribute a substantially similar version of ATLAS Link in a way that hides
+   that it is based on ATLAS Link. Public redistributions must include a clear
+   notice such as:
+
+     "Based on ATLAS Link by cipherfps and contributors."
+
+   This notice must appear in at least one reasonably visible location, such as
+   the README, release page, website, installer notes, credits screen, or about
+   screen.
+
+3. Do not imply endorsement.
+
+   You may not claim that your modified version is official, endorsed,
+   sponsored, or maintained by the ATLAS Link contributors unless you have
+   written permission.
+
+4. Keep license and notices.
+
+   This license file and any copyright, credit, or notice files included with
+   ATLAS Link must remain included in source distributions. Binary or installer
+   distributions must include this license or provide an accessible link to it.
+
+5. Third-party licenses still apply.
+
+   If a third-party component has stricter or different license requirements,
+   those requirements control for that component. You are responsible for
+   complying with all third-party licenses before distributing a copy or
+   modified version.
+
+6. No warranty.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+   FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+   IN THE SOFTWARE.
+

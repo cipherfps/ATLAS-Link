@@ -170,7 +170,6 @@ class AtlasBackendInstallSupport {
 }
 
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
-const _fallbackAcrylicColorLight = Color(0x36F2F6FF);
 
 RandomAccessFile? _singleInstanceLockHandle;
 
@@ -269,34 +268,8 @@ Future<void> main() async {
   runApp(const AtlasLauncherApp());
 }
 
-class AtlasLauncherApp extends StatefulWidget {
+class AtlasLauncherApp extends StatelessWidget {
   const AtlasLauncherApp({super.key});
-
-  @override
-  State<AtlasLauncherApp> createState() => _AtlasLauncherAppState();
-}
-
-class _AtlasLauncherAppState extends State<AtlasLauncherApp> {
-  ThemeMode _themeMode = ThemeMode.dark;
-
-  Future<void> _applyWindowThemeEffect(ThemeMode mode) async {
-    if (!Platform.isWindows) return;
-    final color = mode == ThemeMode.dark
-        ? _fallbackAcrylicColorDark
-        : _fallbackAcrylicColorLight;
-    try {
-      await Window.setEffect(effect: WindowEffect.acrylic, color: color);
-    } catch (_) {
-      // Ignore unsupported configurations and continue with native fallback.
-    }
-  }
-
-  void _setDarkMode(bool enabled) {
-    final nextMode = enabled ? ThemeMode.dark : ThemeMode.light;
-    if (_themeMode == nextMode) return;
-    setState(() => _themeMode = nextMode);
-    unawaited(_applyWindowThemeEffect(nextMode));
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -362,73 +335,14 @@ class _AtlasLauncherAppState extends State<AtlasLauncherApp> {
       ),
     );
 
-    final lightTheme = ThemeData(
-      brightness: Brightness.light,
-      useMaterial3: true,
-      fontFamily: 'Segoe UI',
-      scaffoldBackgroundColor: const Color(0xFFF2F4F7),
-      colorScheme: const ColorScheme.light(
-        primary: seed,
-        secondary: accentBlue,
-        surface: Color(0xFFF7F9FC),
-        onSurface: Color(0xFF121724),
-      ),
-      sliderTheme: SliderThemeData(
-        activeTrackColor: accentBlue,
-        inactiveTrackColor: accentBlue.withValues(alpha: 0.2),
-        thumbColor: accentBlue,
-        overlayColor: accentBlue.withValues(alpha: 0.2),
-        valueIndicatorColor: accentBlue,
-        valueIndicatorTextStyle: const TextStyle(color: Colors.white),
-      ),
-      elevatedButtonTheme: ElevatedButtonThemeData(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: accentBlue,
-          foregroundColor: Colors.white,
-        ),
-      ),
-      switchTheme: SwitchThemeData(
-        thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return accentBlue;
-          return Colors.grey.shade400;
-        }),
-        trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
-            return accentBlue.withValues(alpha: 0.55);
-          }
-          return Colors.black.withValues(alpha: 0.2);
-        }),
-      ),
-      textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(foregroundColor: accentBlue),
-      ),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(foregroundColor: accentBlue),
-      ),
-      textTheme: const TextTheme(
-        headlineLarge: TextStyle(
-          fontSize: 36,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.4,
-        ),
-        headlineMedium: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
-        titleLarge: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-        bodyLarge: TextStyle(fontSize: 16, height: 1.4),
-        bodyMedium: TextStyle(fontSize: 14, height: 1.4),
-      ),
-      snackBarTheme: const SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-
     return MaterialApp(
       title: 'ATLAS Link',
       debugShowCheckedModeBanner: false,
       scrollBehavior: const _AtlasScrollBehavior(),
-      theme: lightTheme,
+      theme: darkTheme,
       darkTheme: darkTheme,
-      themeMode: _themeMode,
-      home: LauncherScreen(onDarkModeChanged: _setDarkMode),
+      themeMode: ThemeMode.dark,
+      home: const LauncherScreen(),
     );
   }
 }
@@ -697,6 +611,10 @@ enum _LauncherContentRefreshOutcome {
   defaultsFallback,
 }
 
+enum _LibrarySortMode { highestFirst, lowestFirst, favoritesFirst }
+
+enum _StatsSortMode { highestTimeFirst, lowestTimeFirst, favoritesFirst }
+
 class _UiStatus {
   const _UiStatus(this.message, this.severity);
 
@@ -777,9 +695,7 @@ class _LaunchAuthCredentials {
 }
 
 class LauncherScreen extends StatefulWidget {
-  const LauncherScreen({super.key, required this.onDarkModeChanged});
-
-  final ValueChanged<bool> onDarkModeChanged;
+  const LauncherScreen({super.key});
 
   @override
   State<LauncherScreen> createState() => _LauncherScreenState();
@@ -787,8 +703,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.3.1';
-  static const String _launcherBuildLabel = 'Stable 1.3.1';
+  static const String _launcherVersion = '1.3.2';
+  static const String _launcherBuildLabel = 'Stable 1.3.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -968,7 +884,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   int _homeHeroIndex = 0;
 
   List<VersionEntry>? _sortedVersionsSource;
+  _LibrarySortMode _sortedVersionsSortModeSource =
+      _LibrarySortMode.highestFirst;
   List<VersionEntry> _sortedVersionsCache = const <VersionEntry>[];
+  _LibrarySortMode _librarySortMode = _LibrarySortMode.highestFirst;
+  _StatsSortMode _statsSortMode = _StatsSortMode.highestTimeFirst;
 
   String? _librarySplashPrefetchSignature;
   bool _librarySplashPrefetchQueued = false;
@@ -1235,7 +1155,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       // Apply loaded settings (blur/background/particles) immediately so the
       // startup overlay doesn't appear to "add extra blur" before settings load.
       if (mounted) {
-        widget.onDarkModeChanged(_settings.darkModeEnabled);
         setState(() {});
       }
       _log('launcher', 'ATLAS Link initialized.');
@@ -3879,10 +3798,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
 
       final merged = _settings.copyWith(
-        darkModeEnabled: asBool(
-          data['darkModeEnabled'] ?? data['darkMode'] ?? data['DarkMode'],
-          _settings.darkModeEnabled,
-        ),
         popupBackgroundBlurEnabled: asBool(
           data['popupBackgroundBlurEnabled'] ??
               data['popupBackgroundBlur'] ??
@@ -6027,7 +5942,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                                 notes: notes,
                                               );
                                             },
-                                      child: const Text('Update notes'),
+                                      child: const Text('Update Notes'),
                                     ),
                                   const SizedBox(width: 8),
                                   FilledButton(
@@ -6042,7 +5957,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                                           .withValues(alpha: 0.72),
                                     ),
                                     child: Text(
-                                      updating ? 'Updating...' : 'Update now',
+                                      updating ? 'Updating...' : 'Update Now',
                                     ),
                                   ),
                                 ],
@@ -8515,16 +8430,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 const SizedBox(height: 14),
                                 Row(
                                   children: [
-                                    OutlinedButton(
+                                    _dialogCancelButton(
+                                      dialogContext,
                                       onPressed: () => dismissDialogSafely(),
-                                      style: OutlinedButton.styleFrom(
-                                        shape: const StadiumBorder(),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 18,
-                                          vertical: 12,
-                                        ),
-                                      ),
-                                      child: const Text('Cancel'),
                                     ),
                                     const Spacer(),
                                     FilledButton(
@@ -9033,16 +8941,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             const SizedBox(height: 14),
                             Row(
                               children: [
-                                OutlinedButton(
+                                _dialogCancelButton(
+                                  dialogContext,
                                   onPressed: () => dismissDialogSafely(false),
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 18,
-                                      vertical: 12,
-                                    ),
-                                    shape: const StadiumBorder(),
-                                  ),
-                                  child: const Text('Cancel'),
                                 ),
                                 const Spacer(),
                                 FilledButton(
@@ -10582,13 +10483,21 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return path?.trim().isEmpty ?? true ? null : path!.trim();
   }
 
-  Future<_SavedInjectorDll?> _pickInjectorLibraryDll() async {
-    final path = await _pickSingleFile(
-      dialogTitle: 'Add DLL to Injector',
+  Future<List<_SavedInjectorDll>> _pickInjectorLibraryDlls() async {
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
       allowedExtensions: const ['dll'],
+      dialogTitle: 'Add DLLs to Injector',
+      allowMultiple: true,
     );
-    if (path == null || path.trim().isEmpty) return null;
-    return _SavedInjectorDll(label: _basename(path), path: path.trim());
+    if (picked == null) return const <_SavedInjectorDll>[];
+    final dlls = <_SavedInjectorDll>[];
+    for (final file in picked.files) {
+      final path = file.path?.trim();
+      if (path == null || path.isEmpty) continue;
+      dlls.add(_SavedInjectorDll(label: _basename(path), path: path));
+    }
+    return _normalizedInjectorDllLibrary(dlls);
   }
 
   Future<void> _showInjectorDialog() async {
@@ -10598,7 +10507,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final bundledOptions = _bundledInjectorDlls();
     final targets = _manualInjectionTargets();
     final injectorScrollController = ScrollController();
+    final injectorSearchController = TextEditingController();
     var customOptions = List<_SavedInjectorDll>.from(_injectorDllLibrary);
+    var injectorSearchQuery = '';
     final selectedCustomDlls = <String>{};
     final selectedBundledDlls = <String>{};
     int? selectedPid = targets.isEmpty ? null : targets.first.pid;
@@ -10632,6 +10543,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           selectedBundledDlls.length;
                       final canInject =
                           selectedPid != null && selectedCount > 0;
+                      final normalizedSearch = injectorSearchQuery
+                          .trim()
+                          .toLowerCase();
+                      final visibleCustomOptions = normalizedSearch.isEmpty
+                          ? customOptions
+                          : customOptions.where((option) {
+                              return option.label.toLowerCase().contains(
+                                    normalizedSearch,
+                                  ) ||
+                                  _basename(
+                                    option.path,
+                                  ).toLowerCase().contains(normalizedSearch);
+                            }).toList();
 
                       String customKey(_SavedInjectorDll option) {
                         return _normalizePath(option.path);
@@ -10715,16 +10639,23 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       }
 
                       Future<void> addCustomDll() async {
-                        final dll = await _pickInjectorLibraryDll();
-                        if (dll == null) return;
-                        final next = <_SavedInjectorDll>[...customOptions, dll];
+                        final dlls = await _pickInjectorLibraryDlls();
+                        if (dlls.isEmpty) return;
+                        final next = <_SavedInjectorDll>[
+                          ...customOptions,
+                          ...dlls,
+                        ];
                         await _saveInjectorDllLibrary(next);
                         if (!dialogContext.mounted) return;
                         setDialogState(() {
+                          injectorSearchController.clear();
+                          injectorSearchQuery = '';
                           customOptions = List<_SavedInjectorDll>.from(
                             _injectorDllLibrary,
                           );
-                          selectedCustomDlls.add(customKey(dll));
+                          for (final dll in dlls) {
+                            selectedCustomDlls.add(customKey(dll));
+                          }
                         });
                       }
 
@@ -10758,6 +10689,53 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           ),
                         );
                       }
+
+                      final searchInput = TextField(
+                        controller: injectorSearchController,
+                        onChanged: (value) {
+                          setDialogState(() => injectorSearchQuery = value);
+                        },
+                        decoration:
+                            _backendFieldDecoration(
+                              hintText: 'Search DLLs by name',
+                            ).copyWith(
+                              prefixIcon: Icon(
+                                Icons.search_rounded,
+                                size: 18,
+                                color: onSurface.withValues(alpha: 0.72),
+                              ),
+                              suffixIconConstraints:
+                                  const BoxConstraints.tightFor(
+                                    width: 40,
+                                    height: 40,
+                                  ),
+                              suffixIcon: injectorSearchQuery.trim().isEmpty
+                                  ? null
+                                  : SizedBox(
+                                      width: 40,
+                                      height: 40,
+                                      child: IconButton(
+                                        tooltip: 'Clear search',
+                                        padding: EdgeInsets.zero,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 40,
+                                              height: 40,
+                                            ),
+                                        onPressed: () {
+                                          injectorSearchController.clear();
+                                          setDialogState(
+                                            () => injectorSearchQuery = '',
+                                          );
+                                        },
+                                        icon: const Icon(
+                                          Icons.close_rounded,
+                                          size: 18,
+                                        ),
+                                      ),
+                                    ),
+                            ),
+                      );
 
                       return Container(
                         margin: const EdgeInsets.symmetric(horizontal: 20),
@@ -10833,102 +10811,125 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               constraints: const BoxConstraints(maxHeight: 360),
                               child: Scrollbar(
                                 controller: injectorScrollController,
-                                child: ListView(
-                                  controller: injectorScrollController,
-                                  shrinkWrap: true,
-                                  primary: false,
-                                  children: [
-                                    Row(
+                                child: Padding(
+                                  padding: const EdgeInsets.only(right: 12),
+                                  child: ScrollConfiguration(
+                                    behavior: ScrollConfiguration.of(
+                                      dialogContext,
+                                    ).copyWith(scrollbars: false),
+                                    child: ListView(
+                                      controller: injectorScrollController,
+                                      shrinkWrap: true,
+                                      primary: false,
                                       children: [
-                                        Expanded(
-                                          child: sectionHeader('Your DLLs'),
+                                        Row(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Expanded(
+                                              child: sectionHeader('Your DLLs'),
+                                            ),
+                                            TextButton.icon(
+                                              onPressed: () =>
+                                                  unawaited(addCustomDll()),
+                                              icon: const Icon(
+                                                Icons.add_rounded,
+                                                size: 18,
+                                              ),
+                                              label: const Text('Add DLLs'),
+                                            ),
+                                          ],
                                         ),
-                                        TextButton.icon(
-                                          onPressed: () =>
-                                              unawaited(addCustomDll()),
-                                          icon: const Icon(
-                                            Icons.add_rounded,
-                                            size: 18,
+                                        const SizedBox(height: 6),
+                                        searchInput,
+                                        const SizedBox(height: 10),
+                                        if (customOptions.isEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 12,
+                                            ),
+                                            child: Text(
+                                              'No custom DLLs saved yet.',
+                                              style: TextStyle(
+                                                color: onSurface.withValues(
+                                                  alpha: 0.56,
+                                                ),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          )
+                                        else if (visibleCustomOptions.isEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 12,
+                                            ),
+                                            child: Text(
+                                              'No DLLs match your search.',
+                                              style: TextStyle(
+                                                color: onSurface.withValues(
+                                                  alpha: 0.56,
+                                                ),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          )
+                                        else
+                                          for (final option
+                                              in visibleCustomOptions) ...[
+                                            _injectorDllTile(
+                                              context: dialogContext,
+                                              title: option.label,
+                                              subtitle: option.path,
+                                              enabled: selectedPid != null,
+                                              selected: selectedCustomDlls
+                                                  .contains(customKey(option)),
+                                              onTap: () => toggleCustom(option),
+                                              trailing: IconButton(
+                                                tooltip: 'Remove from library',
+                                                onPressed: () => unawaited(
+                                                  removeCustomDll(option),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.close_rounded,
+                                                  size: 18,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                          ],
+                                        Divider(
+                                          height: 26,
+                                          color: onSurface.withValues(
+                                            alpha: 0.16,
                                           ),
-                                          label: const Text('Add DLL'),
                                         ),
+                                        sectionHeader('Bundled DLLs'),
+                                        for (final option
+                                            in bundledOptions) ...[
+                                          _injectorDllTile(
+                                            context: dialogContext,
+                                            title: option.fileName,
+                                            subtitle: option.assetPath,
+                                            enabled: selectedPid != null,
+                                            selected: selectedBundledDlls
+                                                .contains(bundledKey(option)),
+                                            onTap: () => toggleBundled(option),
+                                          ),
+                                          const SizedBox(height: 8),
+                                        ],
                                       ],
                                     ),
-                                    if (customOptions.isEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.only(
-                                          bottom: 12,
-                                        ),
-                                        child: Text(
-                                          'No custom DLLs saved yet.',
-                                          style: TextStyle(
-                                            color: onSurface.withValues(
-                                              alpha: 0.56,
-                                            ),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      )
-                                    else
-                                      for (final option in customOptions) ...[
-                                        _injectorDllTile(
-                                          context: dialogContext,
-                                          title: option.label,
-                                          subtitle: option.path,
-                                          enabled: selectedPid != null,
-                                          selected: selectedCustomDlls.contains(
-                                            customKey(option),
-                                          ),
-                                          onTap: () => toggleCustom(option),
-                                          trailing: IconButton(
-                                            tooltip: 'Remove from library',
-                                            onPressed: () => unawaited(
-                                              removeCustomDll(option),
-                                            ),
-                                            icon: const Icon(
-                                              Icons.close_rounded,
-                                              size: 18,
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                      ],
-                                    Divider(
-                                      height: 26,
-                                      color: onSurface.withValues(alpha: 0.16),
-                                    ),
-                                    sectionHeader('Bundled DLLs'),
-                                    for (final option in bundledOptions) ...[
-                                      _injectorDllTile(
-                                        context: dialogContext,
-                                        title: option.fileName,
-                                        subtitle: option.assetPath,
-                                        enabled: selectedPid != null,
-                                        selected: selectedBundledDlls.contains(
-                                          bundledKey(option),
-                                        ),
-                                        onTap: () => toggleBundled(option),
-                                      ),
-                                      const SizedBox(height: 8),
-                                    ],
-                                  ],
+                                  ),
                                 ),
                               ),
                             ),
                             const SizedBox(height: 14),
                             Row(
                               children: [
-                                OutlinedButton(
+                                _dialogCancelButton(
+                                  dialogContext,
                                   onPressed: () =>
                                       Navigator.of(dialogContext).pop(),
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 18,
-                                      vertical: 12,
-                                    ),
-                                    shape: const StadiumBorder(),
-                                  ),
-                                  child: const Text('Cancel'),
                                 ),
                                 const Spacer(),
                                 FilledButton.icon(
@@ -10968,6 +10969,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         transitionBuilder: _dialogPopupTransition,
       );
     } finally {
+      injectorSearchController.dispose();
       injectorScrollController.dispose();
     }
   }
@@ -11740,6 +11742,21 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     }, title: 'Updating build');
   }
 
+  void _toggleVersionFavorite(String id) {
+    setState(() {
+      _settings = _settings.copyWith(
+        versions: _settings.versions
+            .map(
+              (version) => version.id == id
+                  ? version.copyWith(isFavorite: !version.isFavorite)
+                  : version,
+            )
+            .toList(),
+      );
+    });
+    unawaited(_saveSettings(toast: false));
+  }
+
   Future<_BuildImportRequest?> _promptImportBuildDialog({
     String title = 'Import Installation',
     String description =
@@ -11861,17 +11878,24 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               children: [
                                 Row(
                                   children: [
-                                    Icon(
+                                    _dialogHeaderIconBadge(
+                                      dialogContext,
                                       headerIcon,
-                                      color: _onSurface(dialogContext, 0.94),
                                     ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      title,
-                                      style: TextStyle(
-                                        fontSize: 34,
-                                        fontWeight: FontWeight.w700,
-                                        color: _onSurface(dialogContext, 0.96),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Text(
+                                        title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 34,
+                                          fontWeight: FontWeight.w700,
+                                          color: _onSurface(
+                                            dialogContext,
+                                            0.96,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ],
@@ -12481,29 +12505,16 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                           ),
                                         ),
                                       const Spacer(),
-                                      OutlinedButton(
+                                      _dialogCancelButton(
+                                        dialogContext,
                                         onPressed: dismissDialogSafely,
-                                        style: OutlinedButton.styleFrom(
-                                          shape: const StadiumBorder(),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 16,
-                                            vertical: 11,
-                                          ),
-                                          side: BorderSide(
-                                            color: _onSurface(
-                                              dialogContext,
-                                              0.14,
-                                            ),
-                                          ),
-                                        ),
-                                        child: const Text('Cancel'),
                                       ),
                                     ],
                                   ),
                                 ] else ...[
                                   Row(
                                     children: [
-                                      if (allowBulkImport)
+                                      if (allowBulkImport) ...[
                                         TextButton.icon(
                                           onPressed: () => setDialogState(() {
                                             validation = '';
@@ -12514,25 +12525,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                           ),
                                           label: const Text('Back'),
                                         ),
-                                      const Spacer(),
-                                      OutlinedButton(
-                                        onPressed: dismissDialogSafely,
-                                        style: OutlinedButton.styleFrom(
-                                          shape: const StadiumBorder(),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 16,
-                                            vertical: 11,
-                                          ),
-                                          side: BorderSide(
-                                            color: _onSurface(
-                                              dialogContext,
-                                              0.14,
-                                            ),
-                                          ),
+                                        const Spacer(),
+                                        _dialogCancelButton(
+                                          dialogContext,
+                                          onPressed: dismissDialogSafely,
                                         ),
-                                        child: const Text('Cancel'),
-                                      ),
-                                      const SizedBox(width: 8),
+                                        const SizedBox(width: 8),
+                                      ] else ...[
+                                        _dialogCancelButton(
+                                          dialogContext,
+                                          onPressed: dismissDialogSafely,
+                                        ),
+                                        const Spacer(),
+                                      ],
                                       FilledButton.icon(
                                         onPressed: () {
                                           final name = nameController.text
@@ -12936,14 +12941,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         ),
                         const SizedBox(height: 16),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            TextButton(
+                            _dialogCancelButton(
+                              dialogContext,
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(false),
-                              child: const Text('Cancel'),
                             ),
-                            const SizedBox(width: 8),
+                            const Spacer(),
                             FilledButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(true),
@@ -13071,14 +13075,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         ),
                         const SizedBox(height: 16),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            TextButton(
+                            _dialogCancelButton(
+                              dialogContext,
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(false),
-                              child: const Text('Cancel'),
                             ),
-                            const SizedBox(width: 8),
+                            const Spacer(),
                             FilledButton(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(true),
@@ -13268,14 +13271,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         ),
                         const SizedBox(height: 16),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            TextButton(
+                            _dialogCancelButton(
+                              dialogContext,
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(false),
-                              child: const Text('Cancel'),
                             ),
-                            const SizedBox(width: 8),
+                            const Spacer(),
                             FilledButton.icon(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(true),
@@ -13512,7 +13514,6 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
     _librarySearchController.clear();
 
-    if (mounted) widget.onDarkModeChanged(_settings.darkModeEnabled);
     _syncControllers();
     _shellEntranceController.stop();
     _shellEntranceController.value = _showStartup ? 0.0 : 1.0;
@@ -14063,13 +14064,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                TextButton(
+                                _dialogCancelButton(
+                                  dialogContext,
                                   onPressed: saving
                                       ? null
                                       : () => Navigator.of(
                                           dialogContext,
                                         ).maybePop(),
-                                  child: const Text('Cancel'),
                                 ),
                                 const SizedBox(width: 8),
                                 FilledButton.icon(
@@ -15492,7 +15493,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                'Quick tip',
+                                'Quick Tip',
                                 style: TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w800,
@@ -15610,7 +15611,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                             ),
                                             _buildVersionTag(
                                               context,
-                                              label: 'v32.11',
+                                              label: 'v30.00',
                                               accent: Theme.of(
                                                 context,
                                               ).colorScheme.secondary,
@@ -15735,18 +15736,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             unawaited(
               _dismissLibraryImportTip(onDismissedAction: _importVersion),
             );
-          }),
+          }, tooltip: 'Import'),
         ),
         const SizedBox(width: 8),
         _libraryPulseGlow(
           _titleActionButton(Icons.download_rounded, () {
             unawaited(
               _dismissLibraryImportTip(
-                onDismissedAction: () =>
-                    _openUrl('https://fortforge.dev/builds'),
+                onDismissedAction: _showBuildDownloadMenu,
               ),
             );
-          }),
+          }, tooltip: 'Download'),
         ),
       ],
     );
@@ -15878,13 +15878,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           if (showOtherRightControls) ...[
             IconButton(
               onPressed: _handleRefreshPressed,
-              tooltip: 'Refresh / check updates',
+              tooltip: 'Check For Updates',
               icon: const Icon(Icons.refresh_rounded),
             ),
             const SizedBox(width: 8),
             IconButton(
               onPressed: _showQuickTipForCurrentTab,
-              tooltip: 'Show quick tips',
+              tooltip: 'Show Quick Tips',
               icon: const Icon(Icons.help_outline_rounded),
             ),
             const SizedBox(width: 8),
@@ -16158,7 +16158,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       _syncLibraryActionsNudgePulse();
       return;
     }
-    _toast('No quick tips are available on this page');
+    _toast('No "Quick Tips" are available on this page');
   }
 
   void _beginBackendTipPreviewIfNeeded() {
@@ -16368,7 +16368,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
               const SizedBox(width: 8),
               Text(
-                'Quick tip',
+                'Quick Tip',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w800,
@@ -16448,7 +16448,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
               const SizedBox(width: 8),
               Text(
-                'Quick tip',
+                'Quick Tip',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w800,
@@ -16520,11 +16520,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final hasUpdate = _bundledDllDefaultsUpdateAvailable;
     final hasMissing = _hasMissingConfiguredDllPaths;
     if (hasUpdate && hasMissing) {
-      return 'Data management (DLL updates and missing DLL warnings)';
+      return 'Data Management (DLL Updates and Missing DLL Warnings)';
     }
-    if (hasUpdate) return 'Data management (DLL update available)';
-    if (hasMissing) return 'Data management (missing DLL warning)';
-    return 'Data management';
+    if (hasUpdate) return 'Data Management (DLL Update Available)';
+    if (hasMissing) return 'Data Management (Missing DLL Warning)';
+    return 'Data Management';
   }
 
   Widget _settingsActionIcon() {
@@ -16563,8 +16563,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
-  Widget _titleActionButton(IconData icon, VoidCallback onTap) {
-    return _HoverScale(
+  Widget _titleActionButton(
+    IconData icon,
+    VoidCallback onTap, {
+    String? tooltip,
+  }) {
+    final button = _HoverScale(
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: onTap,
@@ -16577,6 +16581,278 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             color: _onSurface(context, 0.11),
           ),
           child: Icon(icon, color: _onSurface(context, 0.92)),
+        ),
+      ),
+    );
+    if (tooltip == null) return button;
+    return Tooltip(message: tooltip, child: button);
+  }
+
+  Widget _dialogHeaderIconBadge(BuildContext dialogContext, IconData icon) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    return Container(
+      width: 42,
+      height: 42,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: secondary.withValues(alpha: 0.16),
+        border: Border.all(color: _onSurface(dialogContext, 0.1)),
+      ),
+      child: Icon(icon, size: 20, color: secondary),
+    );
+  }
+
+  Widget _dialogCancelButton(
+    BuildContext dialogContext, {
+    required VoidCallback? onPressed,
+  }) {
+    return OutlinedButton(
+      onPressed: onPressed,
+      style: OutlinedButton.styleFrom(
+        shape: const StadiumBorder(),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+        side: BorderSide(color: _onSurface(dialogContext, 0.14)),
+      ),
+      child: const Text('Cancel'),
+    );
+  }
+
+  Future<void> _showBuildDownloadMenu() async {
+    if (!mounted) return;
+    const sources =
+        <({String title, String description, String assetPath, String url})>[
+          (
+            title: 'FortForge',
+            description: 'https://builds.fortforge.dev/builds',
+            assetPath: 'assets/images/fortforge.png',
+            url: 'https://builds.fortforge.dev/builds',
+          ),
+          (
+            title: 'Carbon',
+            description: 'https://builds.cbn.lol/builds',
+            assetPath: 'assets/images/carbon.png',
+            url: 'https://builds.cbn.lol/builds',
+          ),
+          (
+            title: 'Helix',
+            description: 'https://fn-archive.vercel.app/',
+            assetPath: 'assets/images/helix.png',
+            url: 'https://fn-archive.vercel.app/',
+          ),
+        ];
+
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Build sources',
+      barrierColor: Colors.transparent,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 560),
+                margin: const EdgeInsets.symmetric(horizontal: 24),
+                padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(dialogContext),
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: _onSurface(dialogContext, 0.12)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _dialogShadowColor(dialogContext),
+                      blurRadius: 34,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        _dialogHeaderIconBadge(
+                          dialogContext,
+                          Icons.download_rounded,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Build Archives',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 34,
+                              fontWeight: FontWeight.w700,
+                              color: _onSurface(dialogContext, 0.96),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Close',
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                          icon: const Icon(Icons.close_rounded),
+                          color: onSurface.withValues(alpha: 0.8),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Choose a site to browse available versions and builds.',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: _onSurface(dialogContext, 0.74),
+                        height: 1.25,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (
+                          var index = 0;
+                          index < sources.length;
+                          index++
+                        ) ...[
+                          if (index > 0) const SizedBox(height: 10),
+                          _buildDownloadSourceRow(
+                            dialogContext,
+                            title: sources[index].title,
+                            description: sources[index].description,
+                            assetPath: sources[index].assetPath,
+                            url: sources[index].url,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+  }
+
+  Widget _buildDownloadSourceRow(
+    BuildContext dialogContext, {
+    required String title,
+    required String description,
+    required String assetPath,
+    required String url,
+  }) {
+    final enabled = url.trim().isNotEmpty;
+    final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+    return _HoverScale(
+      scale: enabled ? 1.01 : 1.0,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.58,
+        child: Material(
+          color: _adaptiveScrimColor(
+            dialogContext,
+            darkAlpha: 0.08,
+            lightAlpha: 0.14,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: _onSurface(dialogContext, 0.12)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () {
+              if (!enabled) {
+                _toast('$title link has not been added yet');
+                return;
+              }
+              Navigator.of(dialogContext).pop();
+              unawaited(_openUrl(url));
+            },
+            child: Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(minHeight: 82),
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 54,
+                    height: 54,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      color: _adaptiveScrimColor(
+                        dialogContext,
+                        darkAlpha: 0.14,
+                        lightAlpha: 0.20,
+                      ),
+                      border: Border.all(
+                        color: _onSurface(dialogContext, 0.12),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Image.asset(
+                        assetPath,
+                        width: 54,
+                        height: 54,
+                        fit: BoxFit.cover,
+                        filterQuality: FilterQuality.medium,
+                        errorBuilder: (context, error, stackTrace) => Icon(
+                          Icons.public_rounded,
+                          color: _onSurface(dialogContext, 0.82),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: onSurface.withValues(alpha: 0.95),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.25,
+                            fontWeight: FontWeight.w600,
+                            color: onSurface.withValues(alpha: 0.68),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Icon(
+                    enabled
+                        ? Icons.open_in_new_rounded
+                        : Icons.lock_outline_rounded,
+                    size: 18,
+                    color: onSurface.withValues(alpha: 0.72),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -16675,58 +16951,55 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       })
       item,
     ) {
-      return Tooltip(
-        message: item.label,
-        child: _HoverScale(
-          scale: 1.04,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(navTabRadius),
-            overlayColor: transparentOverlay,
-            splashFactory: NoSplash.splashFactory,
-            splashColor: Colors.transparent,
-            highlightColor: Colors.transparent,
-            hoverColor: Colors.transparent,
-            focusColor: Colors.transparent,
-            onTap: item.onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              constraints: BoxConstraints.tightFor(width: navTabWidth),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(navTabRadius),
-                color: item.selected ? selectedBackground : Colors.transparent,
-                gradient: item.selected
-                    ? LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [selectedGradientTop, selectedGradientBottom],
-                      )
-                    : null,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    item.icon,
-                    size: 19,
-                    color: _onSurface(context, item.selected ? 1 : 0.70),
+      return _HoverScale(
+        scale: 1.04,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(navTabRadius),
+          overlayColor: transparentOverlay,
+          splashFactory: NoSplash.splashFactory,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          onTap: item.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            constraints: BoxConstraints.tightFor(width: navTabWidth),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(navTabRadius),
+              color: item.selected ? selectedBackground : Colors.transparent,
+              gradient: item.selected
+                  ? LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [selectedGradientTop, selectedGradientBottom],
+                    )
+                  : null,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  item.icon,
+                  size: 19,
+                  color: _onSurface(context, item.selected ? 1 : 0.70),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  item.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: item.selected
+                        ? FontWeight.w700
+                        : FontWeight.w500,
+                    color: _onSurface(context, item.selected ? 1 : 0.75),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    item.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: item.selected
-                          ? FontWeight.w700
-                          : FontWeight.w500,
-                      color: _onSurface(context, item.selected ? 1 : 0.75),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -16838,21 +17111,24 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     color: _onSurface(context, 0.18),
                   ),
                   const SizedBox(width: 5),
-                  InkWell(
-                    borderRadius: BorderRadius.circular(999),
-                    overlayColor: transparentOverlay,
-                    splashFactory: NoSplash.splashFactory,
-                    splashColor: Colors.transparent,
-                    highlightColor: Colors.transparent,
-                    hoverColor: Colors.transparent,
-                    focusColor: Colors.transparent,
-                    onTap: () => unawaited(
-                      _switchMenu(
-                        LauncherTab.general,
-                        settingsSection: SettingsSection.profile,
+                  Tooltip(
+                    message: 'Profile',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(999),
+                      overlayColor: transparentOverlay,
+                      splashFactory: NoSplash.splashFactory,
+                      splashColor: Colors.transparent,
+                      highlightColor: Colors.transparent,
+                      hoverColor: Colors.transparent,
+                      focusColor: Colors.transparent,
+                      onTap: () => unawaited(
+                        _switchMenu(
+                          LauncherTab.general,
+                          settingsSection: SettingsSection.profile,
+                        ),
                       ),
+                      child: _barProfileAvatar(radius: 17),
                     ),
-                    child: _barProfileAvatar(radius: 17),
                   ),
                 ],
               ),
@@ -17356,18 +17632,82 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   List<VersionEntry> _sortedInstalledVersions() {
     final source = _settings.versions;
-    if (identical(_sortedVersionsSource, source)) return _sortedVersionsCache;
+    if (identical(_sortedVersionsSource, source) &&
+        _sortedVersionsSortModeSource == _librarySortMode) {
+      return _sortedVersionsCache;
+    }
 
     final sorted = List<VersionEntry>.from(source)
       ..sort((a, b) {
-        final byVersion = _compareVersionStrings(b.gameVersion, a.gameVersion);
+        if (_librarySortMode == _LibrarySortMode.favoritesFirst) {
+          final byFavorite = (b.isFavorite ? 1 : 0).compareTo(
+            a.isFavorite ? 1 : 0,
+          );
+          if (byFavorite != 0) return byFavorite;
+        }
+        final byVersion = _librarySortMode == _LibrarySortMode.lowestFirst
+            ? _compareVersionStrings(a.gameVersion, b.gameVersion)
+            : _compareVersionStrings(b.gameVersion, a.gameVersion);
         if (byVersion != 0) return byVersion;
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
 
     _sortedVersionsSource = source;
+    _sortedVersionsSortModeSource = _librarySortMode;
     _sortedVersionsCache = sorted;
     return sorted;
+  }
+
+  void _advanceLibrarySortMode() {
+    setState(() {
+      _librarySortMode = switch (_librarySortMode) {
+        _LibrarySortMode.highestFirst => _LibrarySortMode.lowestFirst,
+        _LibrarySortMode.lowestFirst => _LibrarySortMode.favoritesFirst,
+        _LibrarySortMode.favoritesFirst => _LibrarySortMode.highestFirst,
+      };
+    });
+  }
+
+  IconData get _librarySortIcon {
+    return switch (_librarySortMode) {
+      _LibrarySortMode.highestFirst => Icons.filter_list_rounded,
+      _LibrarySortMode.lowestFirst => Icons.filter_list_rounded,
+      _LibrarySortMode.favoritesFirst => Icons.star_rounded,
+    };
+  }
+
+  String get _librarySortTooltip {
+    return switch (_librarySortMode) {
+      _LibrarySortMode.highestFirst => 'Filter: highest at top',
+      _LibrarySortMode.lowestFirst => 'Filter: lowest at top',
+      _LibrarySortMode.favoritesFirst => 'Filter: favorites only',
+    };
+  }
+
+  void _advanceStatsSortMode() {
+    setState(() {
+      _statsSortMode = switch (_statsSortMode) {
+        _StatsSortMode.highestTimeFirst => _StatsSortMode.lowestTimeFirst,
+        _StatsSortMode.lowestTimeFirst => _StatsSortMode.favoritesFirst,
+        _StatsSortMode.favoritesFirst => _StatsSortMode.highestTimeFirst,
+      };
+    });
+  }
+
+  IconData get _statsSortIcon {
+    return switch (_statsSortMode) {
+      _StatsSortMode.highestTimeFirst => Icons.filter_list_rounded,
+      _StatsSortMode.lowestTimeFirst => Icons.filter_list_rounded,
+      _StatsSortMode.favoritesFirst => Icons.star_rounded,
+    };
+  }
+
+  String get _statsSortTooltip {
+    return switch (_statsSortMode) {
+      _StatsSortMode.highestTimeFirst => 'Filter: highest time at top',
+      _StatsSortMode.lowestTimeFirst => 'Filter: lowest time at top',
+      _StatsSortMode.favoritesFirst => 'Filter: favorites only',
+    };
   }
 
   Widget _libraryTab() {
@@ -17381,7 +17721,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         ? 'VERSION'
         : 'VERSION $selectedVersionLabel';
     final coverImage = _libraryCoverImage(selected);
-    final installedVersions = _sortedInstalledVersions();
+    final allInstalledVersions = _sortedInstalledVersions();
+    final showingFavoriteLibrary =
+        _librarySortMode == _LibrarySortMode.favoritesFirst;
+    final hasFavoriteVersions = _settings.versions.any(
+      (entry) => entry.isFavorite,
+    );
+    final installedVersions = showingFavoriteLibrary
+        ? allInstalledVersions.where((entry) => entry.isFavorite).toList()
+        : allInstalledVersions;
     final searchQuery = _versionSearchQuery.trim().toLowerCase();
     final filteredVersions = searchQuery.isEmpty
         ? installedVersions
@@ -17392,7 +17740,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     _queueLibrarySplashPrefetch(
       filteredVersions,
       signature:
-          '${identityHashCode(installedVersions)}|$searchQuery|${filteredVersions.length}',
+          '${identityHashCode(allInstalledVersions)}|${_librarySortMode.name}|$searchQuery|${filteredVersions.length}',
     );
     final hasRunningGameClient = _hasRunningGameClient;
     final launchActsAsClose =
@@ -17637,19 +17985,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   ),
                                 ),
                               ),
-                              OutlinedButton(
-                                onPressed: _openHostOptionsDialog,
-                                style: OutlinedButton.styleFrom(
-                                  minimumSize: const Size(42, 42),
-                                  maximumSize: const Size(42, 42),
-                                  padding: EdgeInsets.zero,
-                                  shape: const CircleBorder(),
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                ),
-                                child: const Icon(
-                                  Icons.more_horiz_rounded,
-                                  size: 18,
+                              Tooltip(
+                                message: 'Launch Options',
+                                child: OutlinedButton(
+                                  onPressed: _openHostOptionsDialog,
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(42, 42),
+                                    maximumSize: const Size(42, 42),
+                                    padding: EdgeInsets.zero,
+                                    shape: const CircleBorder(),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: const Icon(
+                                    Icons.more_horiz_rounded,
+                                    size: 18,
+                                  ),
                                 ),
                               ),
                             ],
@@ -17775,6 +18126,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         tooltip: 'Clear all versions',
         onTap: () => unawaited(_clearAllVersions()),
       );
+      final sortButton = _versionCardAction(
+        icon: _librarySortIcon,
+        tooltip: _librarySortTooltip,
+        iconRotation: _librarySortMode == _LibrarySortMode.lowestFirst ? pi : 0,
+        onTap: _advanceLibrarySortMode,
+      );
 
       return LayoutBuilder(
         builder: (context, constraints) {
@@ -17792,6 +18149,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   children: [
                     Expanded(child: searchInput),
                     const SizedBox(width: 8),
+                    sortButton,
+                    const SizedBox(width: 8),
                     clearAllButton,
                   ],
                 ),
@@ -17808,6 +18167,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 ),
               ),
               SizedBox(width: 300, child: searchInput),
+              const SizedBox(width: 8),
+              sortButton,
               const SizedBox(width: 8),
               clearAllButton,
             ],
@@ -17838,7 +18199,73 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               slivers: [
                 SliverToBoxAdapter(child: installedHeaderContent()),
                 const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                if (filteredVersions.isEmpty)
+                if (showingFavoriteLibrary && !hasFavoriteVersions)
+                  SliverToBoxAdapter(
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        color: _adaptiveScrimColor(
+                          context,
+                          darkAlpha: 0.08,
+                          lightAlpha: 0.16,
+                        ),
+                        border: Border.all(color: _onSurface(context, 0.08)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              color: _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.1,
+                                lightAlpha: 0.18,
+                              ),
+                              border: Border.all(
+                                color: _onSurface(context, 0.1),
+                              ),
+                            ),
+                            child: Icon(
+                              Icons.star_border_rounded,
+                              color: _onSurface(context, 0.9),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'No Favorited Versions Yet',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: _onSurface(context, 0.94),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'You have no favorited versions yet. Favorite one first.',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    height: 1.25,
+                                    fontWeight: FontWeight.w600,
+                                    color: _onSurface(context, 0.72),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else if (filteredVersions.isEmpty)
                   SliverToBoxAdapter(
                     child: Container(
                       width: double.infinity,
@@ -17941,8 +18368,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       slivers: [
         SliverToBoxAdapter(child: topPanel),
         const SliverToBoxAdapter(child: SizedBox(height: 14)),
-        if (installedVersions.isEmpty) SliverToBoxAdapter(child: emptyPanel),
-        if (installedVersions.isNotEmpty) ...[
+        if (allInstalledVersions.isEmpty) SliverToBoxAdapter(child: emptyPanel),
+        if (allInstalledVersions.isNotEmpty) ...[
           installedVersionsPanel,
           const SliverToBoxAdapter(child: SizedBox(height: 14)),
         ],
@@ -18420,23 +18847,58 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       stream: liveTicker,
       initialData: 0,
       builder: (context, _) {
-        final importedVersions = List<VersionEntry>.from(_settings.versions)
-          ..sort((a, b) {
-            final byPlay = _effectiveVersionPlaySeconds(
-              b,
-            ).compareTo(_effectiveVersionPlaySeconds(a));
-            if (byPlay != 0) return byPlay;
-            final byVersion = _compareVersionStrings(
-              b.gameVersion,
-              a.gameVersion,
+        int compareByTrackedTime(
+          VersionEntry a,
+          VersionEntry b, {
+          required bool lowestFirst,
+        }) {
+          final byPlay = lowestFirst
+              ? _effectiveVersionPlaySeconds(
+                  a,
+                ).compareTo(_effectiveVersionPlaySeconds(b))
+              : _effectiveVersionPlaySeconds(
+                  b,
+                ).compareTo(_effectiveVersionPlaySeconds(a));
+          if (byPlay != 0) return byPlay;
+          final byVersion = _compareVersionStrings(
+            b.gameVersion,
+            a.gameVersion,
+          );
+          if (byVersion != 0) return byVersion;
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        }
+
+        int compareStatsVersions(VersionEntry a, VersionEntry b) {
+          if (_statsSortMode == _StatsSortMode.favoritesFirst) {
+            final byFavorite = (b.isFavorite ? 1 : 0).compareTo(
+              a.isFavorite ? 1 : 0,
             );
-            if (byVersion != 0) return byVersion;
-            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-          });
+            if (byFavorite != 0) return byFavorite;
+          }
+          return compareByTrackedTime(
+            a,
+            b,
+            lowestFirst: _statsSortMode == _StatsSortMode.lowestTimeFirst,
+          );
+        }
+
+        final importedVersions = List<VersionEntry>.from(_settings.versions);
+        final versionsByHighestTime = List<VersionEntry>.from(importedVersions)
+          ..sort((a, b) => compareByTrackedTime(a, b, lowestFirst: false));
+        final sortedTrackedVersions = List<VersionEntry>.from(importedVersions)
+          ..sort(compareStatsVersions);
         final totalTrackedSeconds = _effectiveTotalAtlasPlaySeconds();
-        final trackedVersions = importedVersions
+        final allTrackedVersions = sortedTrackedVersions
             .where(_hasTrackedPlaytime)
             .toList();
+        final hasFavoriteVersions = importedVersions.any(
+          (entry) => entry.isFavorite,
+        );
+        final showingFavoriteStats =
+            _statsSortMode == _StatsSortMode.favoritesFirst;
+        final trackedVersions = showingFavoriteStats
+            ? allTrackedVersions.where((entry) => entry.isFavorite).toList()
+            : allTrackedVersions;
         final statsSearchQuery = _statsSearchQuery.trim().toLowerCase();
         final filteredTrackedVersions = statsSearchQuery.isEmpty
             ? trackedVersions
@@ -18448,7 +18910,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   .toList();
 
         VersionEntry? mostPlayedVersion;
-        for (final version in importedVersions) {
+        for (final version in versionsByHighestTime) {
           if (_effectiveVersionPlaySeconds(version) > 0 ||
               _activeVersionPlaySessions.containsKey(version.id)) {
             mostPlayedVersion = version;
@@ -18502,7 +18964,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       (liveTrackingActive ? 14 + inlineSplashWidth : 0);
                   final statusLabel = liveTrackingActive
                       ? 'Tracking your current session live.'
-                      : trackedVersions.isEmpty
+                      : allTrackedVersions.isEmpty
                       ? 'Playtime starts tracking the next time you launch an imported build.'
                       : 'Total tracked time across every imported ATLAS build.';
 
@@ -18696,8 +19158,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       child: _statsSummaryCard(
                         icon: Icons.schedule_rounded,
                         label: 'Tracked Builds',
-                        value: '${trackedVersions.length}',
-                        subtitle: trackedVersions.isEmpty
+                        value: '${allTrackedVersions.length}',
+                        subtitle: allTrackedVersions.isEmpty
                             ? 'No completed sessions yet.'
                             : 'Builds with tracked ATLAS time.',
                       ),
@@ -18783,16 +19245,27 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     tooltip: 'Clear all tracked time',
                     onTap: () => unawaited(_clearAllTrackedTime()),
                   );
+                  final statsSortButton = _versionCardAction(
+                    icon: _statsSortIcon,
+                    tooltip: _statsSortTooltip,
+                    iconRotation:
+                        _statsSortMode == _StatsSortMode.lowestTimeFirst
+                        ? pi
+                        : 0,
+                    onTap: _advanceStatsSortMode,
+                  );
                   final compactHeader = constraints.maxWidth < 880;
                   final searchClusterWidth = compactHeader
-                      ? min(420.0, constraints.maxWidth)
-                      : min(380.0, max(320.0, constraints.maxWidth * 0.28));
+                      ? min(460.0, constraints.maxWidth)
+                      : min(430.0, max(350.0, constraints.maxWidth * 0.32));
                   final searchCluster = SizedBox(
                     width: searchClusterWidth,
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         Expanded(child: searchInput),
+                        const SizedBox(width: 8),
+                        statsSortButton,
                         const SizedBox(width: 8),
                         clearTimeButton,
                       ],
@@ -18870,7 +19343,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     children: [
                       header,
                       const SizedBox(height: 14),
-                      if (trackedVersions.isEmpty)
+                      if (allTrackedVersions.isEmpty)
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.all(18),
@@ -18927,6 +19400,138 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                       importedVersions.isEmpty
                                           ? 'Import an existing build in Library, then launch it from Link to start tracking stats here.'
                                           : 'Launch an imported build and its tracked playtime will start showing up here.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (showingFavoriteStats && !hasFavoriteVersions)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.star_border_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'No Favorited Versions Yet',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'You have no favorited versions yet. Favorite one first.',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        height: 1.25,
+                                        fontWeight: FontWeight.w600,
+                                        color: _onSurface(context, 0.72),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (showingFavoriteStats && trackedVersions.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: _adaptiveScrimColor(
+                              context,
+                              darkAlpha: 0.08,
+                              lightAlpha: 0.16,
+                            ),
+                            border: Border.all(
+                              color: _onSurface(context, 0.08),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  color: _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.1,
+                                    lightAlpha: 0.18,
+                                  ),
+                                  border: Border.all(
+                                    color: _onSurface(context, 0.1),
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.star_rounded,
+                                  color: _onSurface(context, 0.9),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'No Favorited Tracked Time Yet',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: _onSurface(context, 0.94),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Your favorited versions will show here after they have tracked playtime.',
                                       style: TextStyle(
                                         fontSize: 14,
                                         height: 1.25,
@@ -19084,6 +19689,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   Widget _installedVersionCard(VersionEntry entry) {
     final active = _settings.selectedVersionId == entry.id;
+    final favorite = entry.isFavorite;
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
     final splashImage = _libraryCoverImage(entry);
@@ -19301,6 +19907,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             const SizedBox(width: 8),
                           ],
                           _versionCardAction(
+                            icon: favorite
+                                ? Icons.star_rounded
+                                : Icons.star_border_rounded,
+                            tooltip: favorite
+                                ? 'Remove favorite'
+                                : 'Favorite build',
+                            iconColor: favorite
+                                ? const Color(0xFFFACC15)
+                                : Colors.white,
+                            onTap: () => _toggleVersionFavorite(entry.id),
+                          ),
+                          const SizedBox(width: 6),
+                          _versionCardAction(
                             icon: Icons.edit_rounded,
                             tooltip: 'Edit build',
                             onTap: () => _editVersion(entry),
@@ -19328,14 +19947,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     required IconData icon,
     required String tooltip,
     required VoidCallback? onTap,
+    double iconRotation = 0,
+    Color? iconColor,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     return Tooltip(
       message: tooltip,
       child: IconButton(
         onPressed: onTap,
-        icon: Icon(icon, size: 18),
-        color: onSurface.withValues(alpha: 0.92),
+        icon: Transform.rotate(
+          angle: iconRotation,
+          child: Icon(icon, size: 18),
+        ),
+        color: iconColor ?? onSurface.withValues(alpha: 0.92),
         style: IconButton.styleFrom(
           minimumSize: const Size(32, 32),
           padding: const EdgeInsets.all(6),
@@ -20464,10 +21088,10 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            TextButton(
+                            _dialogCancelButton(
+                              dialogContext,
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop('cancel'),
-                              child: const Text('Cancel'),
                             ),
                             const SizedBox(width: 10),
                             FilledButton.icon(
@@ -21843,11 +22467,11 @@ foreach ($app in $appPaths) {
                                     Row(
                                       mainAxisAlignment: MainAxisAlignment.end,
                                       children: [
-                                        TextButton(
+                                        _dialogCancelButton(
+                                          dialogContext,
                                           onPressed: () => Navigator.of(
                                             dialogContext,
                                           ).pop(null),
-                                          child: const Text('Cancel'),
                                         ),
                                         const SizedBox(width: 10),
                                         FilledButton.icon(
@@ -22047,10 +22671,10 @@ foreach ($app in $appPaths) {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                TextButton(
+                                _dialogCancelButton(
+                                  dialogContext,
                                   onPressed: () =>
                                       Navigator.of(dialogContext).pop(null),
-                                  child: const Text('Cancel'),
                                 ),
                                 const SizedBox(width: 10),
                                 FilledButton.icon(
@@ -23021,19 +23645,6 @@ foreach ($app in $appPaths) {
                 ),
                 const SizedBox(height: 16),
                 SwitchListTile(
-                  value: _settings.darkModeEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(darkModeEnabled: value);
-                    });
-                    widget.onDarkModeChanged(value);
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Dark mode'),
-                  subtitle: const Text('Toggle between dark and light themes.'),
-                ),
-                const SizedBox(height: 8),
-                SwitchListTile(
                   value: _settings.popupBackgroundBlurEnabled,
                   onChanged: (value) {
                     setState(() {
@@ -23043,7 +23654,7 @@ foreach ($app in $appPaths) {
                     });
                     unawaited(_saveSettings(toast: false));
                   },
-                  title: const Text('Popup background blur'),
+                  title: const Text('Popup Background Blur'),
                   subtitle: const Text('Blur the background behind popups.'),
                 ),
                 const SizedBox(height: 8),
@@ -23066,26 +23677,10 @@ foreach ($app in $appPaths) {
                     'Display your status for ATLAS on Discord.',
                   ),
                 ),
-                const SizedBox(height: 8),
-                SwitchListTile(
-                  value: _settings.startupAnimationEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        startupAnimationEnabled: value,
-                      );
-                    });
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Startup animation'),
-                  subtitle: const Text(
-                    'Play the intro animation when ATLAS launches.',
-                  ),
-                ),
                 const SizedBox(height: 12),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Background image'),
+                  title: const Text('Background Image'),
                   subtitle: Text(
                     _settings.backgroundImagePath.isEmpty
                         ? 'Default background'
@@ -23105,14 +23700,14 @@ foreach ($app in $appPaths) {
                       const SizedBox(width: 8),
                       ElevatedButton(
                         onPressed: _pickBackground,
-                        child: const Text('Choose image'),
+                        child: const Text('Choose Image'),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Background blur (${_settings.backgroundBlur.toStringAsFixed(0)})',
+                  'Background Blur (${_settings.backgroundBlur.toStringAsFixed(0)})',
                 ),
                 const SizedBox(height: 6),
                 LayoutBuilder(
@@ -23161,7 +23756,7 @@ foreach ($app in $appPaths) {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Background particles (${(_settings.backgroundParticlesOpacity * 100).round()}%)',
+                  'Background Particles (${(_settings.backgroundParticlesOpacity * 100).round()}%)',
                 ),
                 const SizedBox(height: 6),
                 LayoutBuilder(
@@ -23225,6 +23820,22 @@ foreach ($app in $appPaths) {
               children: [
                 Text('Startup', style: sectionTitleStyle),
                 const SizedBox(height: 16),
+                SwitchListTile(
+                  value: _settings.startupAnimationEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        startupAnimationEnabled: value,
+                      );
+                    });
+                    unawaited(_saveSettings(toast: false));
+                  },
+                  title: const Text('Startup Animation'),
+                  subtitle: const Text(
+                    'Play the intro animation when ATLAS launches.',
+                  ),
+                ),
+                const SizedBox(height: 8),
                 SwitchListTile(
                   value: _settings.updateDefaultDllsOnLaunchEnabled,
                   onChanged: (value) {
@@ -23661,7 +24272,7 @@ foreach ($app in $appPaths) {
                 OutlinedButton.icon(
                   onPressed: _showLatestLauncherUpdateNotes,
                   icon: const Icon(Icons.auto_awesome_rounded),
-                  label: const Text('Update notes'),
+                  label: const Text('Update Notes'),
                 ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
@@ -23917,14 +24528,14 @@ foreach ($app in $appPaths) {
               title: 'Appearance',
             ),
             tile(
-              section: SettingsSection.dataManagement,
-              icon: Icons.storage_rounded,
-              title: 'Data Management',
-            ),
-            tile(
               section: SettingsSection.startup,
               icon: Icons.power_settings_new_rounded,
               title: 'Startup',
+            ),
+            tile(
+              section: SettingsSection.dataManagement,
+              icon: Icons.storage_rounded,
+              title: 'Data Management',
             ),
             tile(
               section: SettingsSection.support,
@@ -26096,7 +26707,6 @@ class LauncherSettings {
     required this.profileSetupComplete,
     required this.libraryActionsNudgeComplete,
     required this.backendConnectionTipComplete,
-    required this.darkModeEnabled,
     required this.popupBackgroundBlurEnabled,
     required this.discordRpcEnabled,
     required this.backgroundImagePath,
@@ -26148,7 +26758,6 @@ class LauncherSettings {
   final bool profileSetupComplete;
   final bool libraryActionsNudgeComplete;
   final bool backendConnectionTipComplete;
-  final bool darkModeEnabled;
   final bool popupBackgroundBlurEnabled;
   final bool discordRpcEnabled;
   final String backgroundImagePath;
@@ -26212,6 +26821,7 @@ class LauncherSettings {
         'accountPassword',
         'ProfileAuthQuickTipComplete',
         'ProfileSetupComplete',
+        'darkModeEnabled',
         'darkMode',
         'DarkMode',
         'popupBackgroundBlur',
@@ -26264,7 +26874,6 @@ class LauncherSettings {
     bool? profileSetupComplete,
     bool? libraryActionsNudgeComplete,
     bool? backendConnectionTipComplete,
-    bool? darkModeEnabled,
     bool? popupBackgroundBlurEnabled,
     bool? discordRpcEnabled,
     String? backgroundImagePath,
@@ -26320,7 +26929,6 @@ class LauncherSettings {
           libraryActionsNudgeComplete ?? this.libraryActionsNudgeComplete,
       backendConnectionTipComplete:
           backendConnectionTipComplete ?? this.backendConnectionTipComplete,
-      darkModeEnabled: darkModeEnabled ?? this.darkModeEnabled,
       popupBackgroundBlurEnabled:
           popupBackgroundBlurEnabled ?? this.popupBackgroundBlurEnabled,
       discordRpcEnabled: discordRpcEnabled ?? this.discordRpcEnabled,
@@ -26395,7 +27003,6 @@ class LauncherSettings {
       profileSetupComplete: false,
       libraryActionsNudgeComplete: false,
       backendConnectionTipComplete: false,
-      darkModeEnabled: true,
       popupBackgroundBlurEnabled: true,
       discordRpcEnabled: true,
       backgroundImagePath: '',
@@ -26607,10 +27214,6 @@ class LauncherSettings {
         json['backendConnectionTipComplete'],
         true,
       ),
-      darkModeEnabled: asBool(
-        json['darkModeEnabled'] ?? json['darkMode'] ?? json['DarkMode'],
-        true,
-      ),
       popupBackgroundBlurEnabled: asBool(
         json['popupBackgroundBlurEnabled'] ??
             json['popupBackgroundBlur'] ??
@@ -26776,7 +27379,6 @@ class LauncherSettings {
       'profileSetupComplete': profileSetupComplete,
       'libraryActionsNudgeComplete': libraryActionsNudgeComplete,
       'backendConnectionTipComplete': backendConnectionTipComplete,
-      'darkModeEnabled': darkModeEnabled,
       'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
       'discordRpcEnabled': discordRpcEnabled,
       'backgroundImagePath': backgroundImagePath,
@@ -26874,6 +27476,7 @@ class VersionEntry {
     this.splashImagePath = '',
     this.playTimeSeconds = 0,
     this.lastPlayedAtEpochMs = 0,
+    this.isFavorite = false,
   });
 
   final String id;
@@ -26885,6 +27488,7 @@ class VersionEntry {
   final String splashImagePath;
   final int playTimeSeconds;
   final int lastPlayedAtEpochMs;
+  final bool isFavorite;
 
   VersionEntry copyWith({
     String? id,
@@ -26897,6 +27501,7 @@ class VersionEntry {
     String? splashImagePath,
     int? playTimeSeconds,
     int? lastPlayedAtEpochMs,
+    bool? isFavorite,
   }) {
     return VersionEntry(
       id: id ?? this.id,
@@ -26910,6 +27515,7 @@ class VersionEntry {
       splashImagePath: splashImagePath ?? this.splashImagePath,
       playTimeSeconds: playTimeSeconds ?? this.playTimeSeconds,
       lastPlayedAtEpochMs: lastPlayedAtEpochMs ?? this.lastPlayedAtEpochMs,
+      isFavorite: isFavorite ?? this.isFavorite,
     );
   }
 
@@ -26929,6 +27535,17 @@ class VersionEntry {
       return null;
     }
 
+    bool asBool(dynamic value, bool fallback) {
+      if (value is bool) return value;
+      if (value is num) return value != 0;
+      if (value is String) {
+        final lowered = value.toLowerCase();
+        if (lowered == 'true' || lowered == '1') return true;
+        if (lowered == 'false' || lowered == '0') return false;
+      }
+      return fallback;
+    }
+
     return VersionEntry(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
@@ -26946,6 +27563,10 @@ class VersionEntry {
         json['lastPlayedAtEpochMs'] ?? json['lastPlayedAt'],
         0,
       ),
+      isFavorite: asBool(
+        json['isFavorite'] ?? json['favorite'] ?? json['favorited'],
+        false,
+      ),
     );
   }
 
@@ -26960,6 +27581,7 @@ class VersionEntry {
       'splashImagePath': splashImagePath,
       'playTimeSeconds': playTimeSeconds,
       'lastPlayedAtEpochMs': lastPlayedAtEpochMs,
+      'isFavorite': isFavorite,
     };
   }
 }
