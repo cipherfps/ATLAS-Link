@@ -1,4 +1,4 @@
-<!-- version: 1.3.1 -->
+<!-- version: 1.4.0 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,11 +15,11 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added a favorite button on the version cards
-- Added a filter button to sort between low-high, high-low and favorite versions
-- Removed Light Mode (yucky)
-- Injector allows multiple DLLs to be selected in files and has a search bar
-- Changed build/version download button to have an option of archives
-- Changed some visuals
+- Added Optional Embedded Backend Installs
+- Fixed Launcher Lag on Start Up
+- Changed Some Visual Elements
+- Fixed Window Resizing Issues
+- Lowered Set-Up Size
+- Added Mods Tab
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

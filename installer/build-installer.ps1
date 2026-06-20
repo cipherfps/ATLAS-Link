@@ -2,7 +2,8 @@
 param(
   [switch]$SkipFlutterBuild,
   [switch]$SkipFlutterClean,
-  [switch]$SkipInnoCompile
+  [switch]$SkipInnoCompile,
+  [switch]$SkipBackendZips
 )
 
 $ErrorActionPreference = "Stop"
@@ -198,6 +199,45 @@ function New-InstallerSourceStage {
   return $stageRoot
 }
 
+function New-BackendPayloadZip {
+  param(
+    [Parameter(Mandatory=$true)][string]$BackendAssetsDir,
+    [Parameter(Mandatory=$true)][string]$BackendFolderName,
+    [Parameter(Mandatory=$true)][string]$WrapperExeName,
+    [Parameter(Mandatory=$true)][string]$OutputZip
+  )
+
+  # The downloadable payload mirrors the on-disk backend layout so the launcher
+  # can extract it straight into ...\assets\backend\: <backendFolder>\, node\, bin\<exe>.
+  $backendFolder = Join-Path $BackendAssetsDir $BackendFolderName
+  $nodeFolder = Join-Path $BackendAssetsDir "node"
+  $wrapperExe = Join-Path (Join-Path $BackendAssetsDir "bin") $WrapperExeName
+
+  foreach ($required in @($backendFolder, $nodeFolder, $wrapperExe)) {
+    if (-not (Test-Path $required)) {
+      throw "Cannot build backend payload zip; missing required path: $required"
+    }
+  }
+
+  # Compress the backend and node folders directly from source rather than
+  # mirroring the whole tree to a temp folder first. The extra mirror step is
+  # slow and fragile (it can trip over deep node_modules paths / OneDrive
+  # on-demand placeholders). Only the single wrapper exe needs staging so it
+  # lands under bin/ in the archive root.
+  $tmpBinParent = Join-Path $env:TEMP ("ATLAS-Link\backend-bin-" + $BackendFolderName)
+  $tmpBin = Join-Path $tmpBinParent "bin"
+  Remove-DirWithRetry -Path $tmpBinParent
+  New-Item -ItemType Directory -Path $tmpBin -Force | Out-Null
+  Copy-Item -Path $wrapperExe -Destination $tmpBin -Force
+
+  Remove-FileWithRetry -Path $OutputZip
+  $items = @($backendFolder, $nodeFolder, $tmpBin)
+  Compress-Archive -Path $items -DestinationPath $OutputZip -CompressionLevel Optimal -Force
+  Remove-DirWithRetry -Path $tmpBinParent
+
+  Write-Step "Built backend payload zip: $OutputZip"
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 $flutterDir = Join-Path $repoRoot "atlas_link_flutter"
@@ -299,6 +339,33 @@ if (Test-Path $backendAssetsSource) {
   New-Item -ItemType Directory -Path (Split-Path $backendAssetsDest -Parent) -Force | Out-Null
   Copy-Item -Path $backendAssetsSource -Destination (Split-Path $backendAssetsDest -Parent) -Recurse -Force
   Write-Step "Copied embedded backend assets into release output"
+}
+
+if (-not $SkipBackendZips) {
+  if (Test-Path $backendAssetsSource) {
+    # These zips are committed to the repo under backends/ and served to the
+    # installer + launcher via GitHub's raw URL. They are intentionally NOT
+    # bundled into the setup, which keeps the installer small.
+    $backendsDir = Join-Path $repoRoot "backends"
+    New-Item -ItemType Directory -Force -Path $backendsDir | Out-Null
+    Write-Step "Building downloadable backend payload zips into $backendsDir"
+    New-BackendPayloadZip `
+      -BackendAssetsDir $backendAssetsSource `
+      -BackendFolderName "neonite_v2" `
+      -WrapperExeName "atlas_neonitev2.exe" `
+      -OutputZip (Join-Path $backendsDir "neonitev2-backend.zip")
+    New-BackendPayloadZip `
+      -BackendAssetsDir $backendAssetsSource `
+      -BackendFolderName "lawinserver" `
+      -WrapperExeName "atlas_lawinserver.exe" `
+      -OutputZip (Join-Path $backendsDir "lawinserver-backend.zip")
+  }
+  else {
+    Write-Step "Skipping backend payload zips (no backend assets at $backendAssetsSource)"
+  }
+}
+else {
+  Write-Step "Skipping backend payload zips (-SkipBackendZips)"
 }
 
 $executableName = Get-ReleaseExecutableName -ReleaseDir $releaseDir

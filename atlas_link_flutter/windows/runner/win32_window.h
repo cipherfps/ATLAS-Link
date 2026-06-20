@@ -48,6 +48,9 @@ class Win32Window {
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();
 
+  // Sets the smallest logical size the user can resize the window to.
+  void SetMinimumSize(const Size& size);
+
   // Release OS resources associated with window.
   void Destroy();
 
@@ -106,6 +109,8 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  Size minimum_size_ = Size(1100, 720);
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

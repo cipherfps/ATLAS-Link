@@ -48,6 +48,9 @@ OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
+; Enables native extraction of the downloaded backend .zip payloads
+; (Flags: external extractarchive) during install.
+ArchiveExtraction=full
 WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
@@ -75,7 +78,16 @@ ReadyLabel2b=Click Install to continue with the installation.
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The embedded backend payloads are NOT bundled in the installer (keeps the
+; setup small). Backends ticked on the additions page are downloaded to {tmp}
+; in NextButtonClick and extracted here. skipifsourcedoesntexist lets the
+; install proceed if a download was skipped or failed (the launcher can still
+; install the backend later from the Backend tab).
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "data\flutter_assets\assets\backend\*"
+; NeoniteV2 backend payload (neonite_v2\, node\, bin\atlas_neonitev2.exe)
+Source: "{tmp}\neonitev2-backend.zip"; DestDir: "{app}\data\flutter_assets\assets\backend"; Flags: external extractarchive recursesubdirs ignoreversion skipifsourcedoesntexist; Check: WantNeonite
+; LawinServer backend payload (lawinserver\, node\, bin\atlas_lawinserver.exe)
+Source: "{tmp}\lawinserver-backend.zip"; DestDir: "{app}\data\flutter_assets\assets\backend"; Flags: external extractarchive recursesubdirs ignoreversion skipifsourcedoesntexist; Check: WantLawin
 #if VcRedistPath != ""
 Source: "{#VcRedistPath}"; DestDir: "{tmp}"; DestName: "vc_redist.x64.exe"; Flags: deleteafterinstall
 #endif
@@ -91,11 +103,38 @@ Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; S
 Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+const
+  NeoniteBackendUrl =
+    'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/backends/neonitev2-backend.zip';
+  LawinBackendUrl =
+    'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/backends/lawinserver-backend.zip';
+
 var
   DefenderOptionsPage: TWizardPage;
   DefenderIntroLabel: TNewStaticText;
   DefenderDetailsLabel: TNewStaticText;
   DefenderExclusionsCheckBox: TNewCheckBox;
+  BackendOptionsPage: TWizardPage;
+  BackendIntroLabel: TNewStaticText;
+  BackendDetailsLabel: TNewStaticText;
+  NeoniteCheckBox: TNewCheckBox;
+  LawinCheckBox: TNewCheckBox;
+  BackendDownloadPage: TDownloadWizardPage;
+
+function WantNeonite: Boolean;
+begin
+  Result := Assigned(NeoniteCheckBox) and NeoniteCheckBox.Checked;
+end;
+
+function WantLawin: Boolean;
+begin
+  Result := Assigned(LawinCheckBox) and LawinCheckBox.Checked;
+end;
+
+function WantEitherBackend: Boolean;
+begin
+  Result := WantNeonite or WantLawin;
+end;
 
 function IsVCRedistInstalled: Boolean;
 var
@@ -179,6 +218,100 @@ begin
   DefenderExclusionsCheckBox.Checked := True;
   DefenderExclusionsCheckBox.Caption :=
     'Add ATLAS Link''s bundled DLL folder to Windows Defender exclusions';
+
+  BackendOptionsPage := CreateCustomPage(
+    DefenderOptionsPage.ID,
+    'Additional backends',
+    'Choose which embedded backends to install with ATLAS Link.'
+  );
+
+  BackendIntroLabel := TNewStaticText.Create(BackendOptionsPage);
+  BackendIntroLabel.Parent := BackendOptionsPage.Surface;
+  BackendIntroLabel.Left := 0;
+  BackendIntroLabel.Top := 0;
+  BackendIntroLabel.Width := BackendOptionsPage.SurfaceWidth;
+  BackendIntroLabel.AutoSize := False;
+  BackendIntroLabel.WordWrap := True;
+  BackendIntroLabel.Font.Style := [fsBold];
+  BackendIntroLabel.Caption :=
+    'ATLAS Link can bundle NeoniteV2 and/or LawinServer so you can host a backend locally.';
+  WizardForm.AdjustLabelHeight(BackendIntroLabel);
+
+  BackendDetailsLabel := TNewStaticText.Create(BackendOptionsPage);
+  BackendDetailsLabel.Parent := BackendOptionsPage.Surface;
+  BackendDetailsLabel.Left := 0;
+  BackendDetailsLabel.Top :=
+    BackendIntroLabel.Top + BackendIntroLabel.Height + ScaleY(12);
+  BackendDetailsLabel.Width := BackendOptionsPage.SurfaceWidth;
+  BackendDetailsLabel.AutoSize := False;
+  BackendDetailsLabel.WordWrap := True;
+  BackendDetailsLabel.Caption :=
+    'Selected backends are downloaded from GitHub during installation (an internet connection is required while installing), so the installer itself stays small. Leave both unchecked for the fastest install - you can download either backend later from the Backend tab inside ATLAS Link.';
+  WizardForm.AdjustLabelHeight(BackendDetailsLabel);
+
+  NeoniteCheckBox := TNewCheckBox.Create(BackendOptionsPage);
+  NeoniteCheckBox.Parent := BackendOptionsPage.Surface;
+  NeoniteCheckBox.Left := 0;
+  NeoniteCheckBox.Top :=
+    BackendDetailsLabel.Top + BackendDetailsLabel.Height + ScaleY(16);
+  NeoniteCheckBox.Width := BackendOptionsPage.SurfaceWidth;
+  NeoniteCheckBox.Height := ScaleY(24);
+  NeoniteCheckBox.Checked := False;
+  NeoniteCheckBox.Caption := 'Install NeoniteV2 backend';
+
+  LawinCheckBox := TNewCheckBox.Create(BackendOptionsPage);
+  LawinCheckBox.Parent := BackendOptionsPage.Surface;
+  LawinCheckBox.Left := 0;
+  LawinCheckBox.Top :=
+    NeoniteCheckBox.Top + NeoniteCheckBox.Height + ScaleY(8);
+  LawinCheckBox.Width := BackendOptionsPage.SurfaceWidth;
+  LawinCheckBox.Height := ScaleY(24);
+  LawinCheckBox.Checked := False;
+  LawinCheckBox.Caption := 'Install LawinServer backend';
+
+  BackendDownloadPage :=
+    CreateDownloadPage('Downloading backends', 'Fetching the selected ATLAS Link backends...', nil);
+  BackendDownloadPage.ShowBaseNameInsteadOfUrl := True;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+
+  // Download the selected backend payloads to {tmp} right after the user
+  // commits to install (the Ready page). The [Files] section then extracts
+  // whatever was downloaded. Failures are non-fatal so the rest of ATLAS Link
+  // still installs; the missing backend can be downloaded later in-app.
+  if CurPageID <> wpReady then
+    Exit;
+  if not WantEitherBackend then
+    Exit;
+
+  BackendDownloadPage.Clear;
+  if WantNeonite then
+    BackendDownloadPage.Add(NeoniteBackendUrl, 'neonitev2-backend.zip', '');
+  if WantLawin then
+    BackendDownloadPage.Add(LawinBackendUrl, 'lawinserver-backend.zip', '');
+
+  BackendDownloadPage.Show;
+  try
+    try
+      BackendDownloadPage.Download;
+    except
+      if BackendDownloadPage.AbortedByUser then begin
+        Result := False;
+      end else begin
+        SuppressibleMsgBox(
+          'The selected backend(s) could not be downloaded right now:' + #13#10 +
+          AddPeriod(GetExceptionMessage) + #13#10#13#10 +
+          'Setup will continue. You can install the backend later from the Backend tab inside ATLAS Link.',
+          mbInformation, MB_OK, IDOK);
+        Result := True;
+      end;
+    end;
+  finally
+    BackendDownloadPage.Hide;
+  end;
 end;
 
 procedure ApplyDefenderExclusions;

@@ -16,6 +16,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:media_kit/media_kit.dart' as media_kit;
+import 'package:media_kit_video/media_kit_video.dart' as media_kit_video;
 import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
@@ -172,6 +174,13 @@ class AtlasBackendInstallSupport {
 const _fallbackAcrylicColorDark = Color(0x260A0E14);
 
 RandomAccessFile? _singleInstanceLockHandle;
+bool _firstFrameDeferred = false;
+
+void _allowDeferredFirstFrame() {
+  if (!_firstFrameDeferred) return;
+  _firstFrameDeferred = false;
+  WidgetsBinding.instance.allowFirstFrame();
+}
 
 Future<void> _releaseSingleInstanceLock() async {
   final handle = _singleInstanceLockHandle;
@@ -245,8 +254,25 @@ Future<bool> _acquireSingleInstanceLock() async {
   }
 }
 
+/// flutter_acrylic's acrylic blur-behind only behaves correctly on Windows 11.
+/// On Windows 10 it renders a translucent "glossy" outline and makes the window
+/// lag/glide while being dragged, so the blur effect is skipped there.
+bool _isWindows11OrLater() {
+  if (!Platform.isWindows) return false;
+  final match = RegExp(
+    r'Build (\d+)',
+  ).firstMatch(Platform.operatingSystemVersion);
+  if (match == null) return false;
+  final build = int.tryParse(match.group(1) ?? '') ?? 0;
+  // Windows 11 is build 22000 and later; everything below is Windows 10 or older.
+  return build >= 22000;
+}
+
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final binding = WidgetsFlutterBinding.ensureInitialized();
+  media_kit.MediaKit.ensureInitialized();
+  binding.deferFirstFrame();
+  _firstFrameDeferred = true;
   final lockAcquired = await _acquireSingleInstanceLock();
   if (!lockAcquired) {
     exit(0);
@@ -256,7 +282,9 @@ Future<void> main() async {
     try {
       await Window.initialize();
       await Window.setEffect(
-        effect: WindowEffect.acrylic,
+        effect: _isWindows11OrLater()
+            ? WindowEffect.acrylic
+            : WindowEffect.disabled,
         color: _fallbackAcrylicColorDark,
       );
       await Window.makeTitlebarTransparent();
@@ -384,7 +412,21 @@ class _SmoothScrollPhysics extends ScrollPhysics {
   }
 }
 
-enum LauncherTab { home, library, stats, backend, general }
+enum LauncherTab { home, library, mods, stats, backend, general }
+
+enum _ModsInstalledFilter { all, installed }
+
+enum _AtlasModType {
+  pak('Paks', 'Pak'),
+  dll('DLLs', 'DLL');
+
+  const _AtlasModType(this.folderName, this.label);
+
+  final String folderName;
+  final String label;
+}
+
+enum _AtlasModMediaType { image, video }
 
 enum SettingsSection {
   profile,
@@ -517,6 +559,26 @@ extension _EmbeddedBackendTypeDetails on EmbeddedBackendType {
       case EmbeddedBackendType.neoniteV2:
         return 'sails';
     }
+  }
+
+  /// File name of this backend's downloadable payload zip (its folder + the
+  /// shared Node runtime + its wrapper exe). Used as the temp download name.
+  String get downloadAssetName {
+    switch (this) {
+      case EmbeddedBackendType.lawinServer:
+        return 'lawinserver-backend.zip';
+      case EmbeddedBackendType.neoniteV2:
+        return 'neonitev2-backend.zip';
+    }
+  }
+
+  /// Direct URL the payload is fetched from. The zips are committed to the repo
+  /// under backends/ and served via GitHub's raw endpoint, so this is a fixed
+  /// URL (no GitHub release/API lookup needed).
+  String get downloadUrl {
+    const base =
+        'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/backends';
+    return '$base/$downloadAssetName';
   }
 }
 
@@ -703,8 +765,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.3.2';
-  static const String _launcherBuildLabel = 'Stable 1.3.2';
+  static const String _launcherVersion = '1.4.0';
+  static const String _launcherBuildLabel = 'Stable 1.4.0';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -713,7 +775,6 @@ class _LauncherScreenState extends State<LauncherScreen>
   static const String _defaultBackendHost =
       BackendProxyRouting.defaultBackendHost;
   static const int _defaultBackendPort = BackendProxyRouting.defaultBackendPort;
-  static const String _defaultExternalBackendStartCommand = 'node app.js';
   static const int _defaultGameServerPort = 7777;
   static const String _legacyLaunchFltoken = '3db3ba5dcbd2e16703f3978d';
   static const String _legacyLaunchCalderaToken =
@@ -749,6 +810,11 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/launcher-content.json';
   static const String _launcherContentAssetBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/';
+  static const String _atlasResourcesOwner = 'cipherfps';
+  static const String _atlasResourcesRepo = 'ATLAS-Resources';
+  static const String _atlasResourcesRef = 'main';
+  static const String _atlasResourcesRepository =
+      'https://github.com/cipherfps/ATLAS-Resources';
   static const String _launcherDiscordApplicationId = '1465348345122914335';
   static const String _launcherDiscordLargeImageKey = 'atlas-icon';
   static const String _launcherDiscordLargeImageText =
@@ -865,7 +931,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _librarySearchController = TextEditingController();
   final _statsSearchController = TextEditingController();
   final _savedBackendSearchController = TextEditingController();
+  final _modsSearchController = TextEditingController();
   final ScrollController _libraryScrollController = ScrollController();
+  final ScrollController _modsScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
   final _authenticationPatcherController = TextEditingController();
   final _memoryPatcherController = TextEditingController();
@@ -897,6 +965,9 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   bool _showStartup = true;
   bool _startupConfigResolved = false;
+  // Guard for older startup paths where the intro could finish before
+  // bootstrap resolved config.
+  bool _startupAnimationFinishedEarly = false;
   bool _backendOnline = false;
   DateTime? _lastBackendUndetectedToastAt;
   DateTime? _lastBackendCheckingToastAt;
@@ -920,6 +991,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _backendConnectionActionBusy = false;
   String _backendActionMessage = '';
   int? _backendTerminalPid;
+  EmbeddedBackendType? _downloadingBackend;
   DateTime? _lastEmbeddedOrphanCleanupAt;
   bool _backgroundMotionPaused = false;
   _GameActionState _gameAction = _GameActionState.idle;
@@ -946,6 +1018,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   String _versionSearchQuery = '';
   String _statsSearchQuery = '';
   String _savedBackendSearchQuery = '';
+  String _modsSearchQuery = '';
+  final Map<String, ({bool online, DateTime checkedAt})>
+  _savedBackendStatusCache = <String, ({bool online, DateTime checkedAt})>{};
+  final Set<String> _savedBackendStatusRefreshInFlight = <String>{};
 
   Process? _gameProcess;
   Process? _gameServerProcess;
@@ -1014,12 +1090,22 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _settingsFile;
   late File _installStateFile;
   late File _launcherContentCacheFile;
+  late File _modsLibraryCacheFile;
   late File _dllPresetsFile;
   late File _injectorDllLibraryFile;
+  late File _installedModsFile;
   late File _logFile;
   bool _storageReady = false;
   List<_DllPreset> _dllPresets = <_DllPreset>[];
   List<_SavedInjectorDll> _injectorDllLibrary = <_SavedInjectorDll>[];
+  List<_AtlasModEntry> _modsLibrary = <_AtlasModEntry>[];
+  Map<String, _InstalledAtlasMod> _installedModsById =
+      <String, _InstalledAtlasMod>{};
+  _AtlasModType _modsType = _AtlasModType.pak;
+  _ModsInstalledFilter _modsInstalledFilter = _ModsInstalledFilter.all;
+  bool _modsLoading = false;
+  String _modsLoadError = '';
+  Future<void>? _modsRefreshInFlight;
   int _dllPresetSeedVersion = 0;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
@@ -1081,7 +1167,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     _librarySearchController.dispose();
     _statsSearchController.dispose();
     _savedBackendSearchController.dispose();
+    _modsSearchController.dispose();
     _libraryScrollController.dispose();
+    _modsScrollController.dispose();
     _unrealEnginePatcherController.dispose();
     _authenticationPatcherController.dispose();
     _memoryPatcherController.dispose();
@@ -1110,6 +1198,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       await _loadInstallState();
       await _loadSettings();
       await _loadDllPresets();
+      await _loadInstalledMods();
       await _loadLauncherContent();
       await _reconcileInstallState();
       final priorLauncherVersion = _installState.lastSeenLauncherVersion.trim();
@@ -1125,16 +1214,32 @@ class _LauncherScreenState extends State<LauncherScreen>
         );
         launcherUpdated = false;
       }
+      // Decode the resolved background image before revealing it. Switching the
+      // build from the loading base color straight to the user's custom image
+      // (a FileImage read from disk) otherwise shows a brief black gap while it
+      // decodes, which read as "default background -> black -> user background".
       if (mounted) {
+        try {
+          await precacheImage(_backgroundImage(), context);
+        } catch (_) {
+          // Ignore precache failures; the opaque base color remains until the
+          // image finishes loading on its own.
+        }
+      }
+      if (mounted) {
+        _syncControllers();
         setState(() {
           _showStartup = _settings.startupAnimationEnabled;
           _startupConfigResolved = true;
         });
         if (!_showStartup) {
           _shellEntranceController.value = 1.0;
+        } else if (_startupAnimationFinishedEarly) {
+          // The intro already completed while we were still loading; reveal now.
+          _finishStartupAnimation();
         }
+        _allowDeferredFirstFrame();
       }
-      _syncControllers();
       await _applyBundledDllDefaults(forceResetBundledPaths: launcherUpdated);
       await _ensureBundledDllPresetSeeds();
       await _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle();
@@ -1180,6 +1285,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           _startupConfigResolved = true;
         });
         _shellEntranceController.value = 1.0;
+        _allowDeferredFirstFrame();
         _startRuntimeRefreshLoopIfNeeded();
       }
       _syncLauncherDiscordPresence();
@@ -1243,6 +1349,13 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   void _finishStartupAnimation() {
     if (!mounted || !_showStartup) return;
+    // The intro can finish before bootstrap has loaded settings (e.g. on a slow
+    // first launch). Defer revealing the app until config is resolved so it
+    // doesn't flash default state; _bootstrap re-triggers this on resolve.
+    if (!_startupConfigResolved) {
+      _startupAnimationFinishedEarly = true;
+      return;
+    }
     setState(() {
       _showStartup = false;
     });
@@ -2320,9 +2433,15 @@ class _LauncherScreenState extends State<LauncherScreen>
     _launcherContentCacheFile = File(
       _joinPath([_dataDir.path, 'launcher_content_cache.json']),
     );
+    _modsLibraryCacheFile = File(
+      _joinPath([_dataDir.path, 'mods_library_cache.json']),
+    );
     _dllPresetsFile = File(_joinPath([_dataDir.path, 'dll_presets.json']));
     _injectorDllLibraryFile = File(
       _joinPath([_dataDir.path, 'injector_dlls.json']),
+    );
+    _installedModsFile = File(
+      _joinPath([_dataDir.path, 'installed_mods.json']),
     );
     _logFile = File(_joinPath([_dataDir.path, 'launcher.log']));
     // Reset launcher logs on every app start so each run has a clean log.
@@ -2859,6 +2978,1641 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       return null;
     }
+  }
+
+  String _encodeGitHubPath(String path) {
+    return path
+        .trim()
+        .replaceAll('\\', '/')
+        .split('/')
+        .where((part) => part.trim().isNotEmpty)
+        .map(Uri.encodeComponent)
+        .join('/');
+  }
+
+  String _atlasResourcesContentsApi(String path) {
+    final encoded = _encodeGitHubPath(path);
+    final suffix = encoded.isEmpty ? '' : '/$encoded';
+    return 'https://api.github.com/repos/$_atlasResourcesOwner/$_atlasResourcesRepo/contents$suffix?ref=$_atlasResourcesRef';
+  }
+
+  String _atlasResourcesRecursiveTreeApi() {
+    return 'https://api.github.com/repos/$_atlasResourcesOwner/$_atlasResourcesRepo/git/trees/$_atlasResourcesRef?recursive=1';
+  }
+
+  String _atlasResourcesRawUrl(String path) {
+    final encoded = _encodeGitHubPath(path);
+    return 'https://raw.githubusercontent.com/$_atlasResourcesOwner/$_atlasResourcesRepo/$_atlasResourcesRef/$encoded';
+  }
+
+  String _atlasResourcesTreeUrl(String path) {
+    final encoded = _encodeGitHubPath(path);
+    return '$_atlasResourcesRepository/tree/$_atlasResourcesRef/$encoded';
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchAtlasResourceContents(
+    String path,
+  ) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(
+        Uri.parse(_atlasResourcesContentsApi(path)),
+      );
+      request.followRedirects = true;
+      request.maxRedirects = 6;
+      request.headers.set('Accept', 'application/vnd.github+json');
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        throw 'GitHub contents request failed (HTTP ${response.statusCode})';
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((entry) => entry.cast<String, dynamic>())
+          .toList();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchAtlasResourceTreeEntries() async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(
+        Uri.parse(_atlasResourcesRecursiveTreeApi()),
+      );
+      request.followRedirects = true;
+      request.maxRedirects = 6;
+      request.headers.set('Accept', 'application/vnd.github+json');
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        throw 'GitHub tree request failed (HTTP ${response.statusCode})';
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! Map<String, dynamic>) {
+        return const <Map<String, dynamic>>[];
+      }
+      if (decoded['truncated'] == true) {
+        throw 'GitHub tree response was truncated.';
+      }
+      final tree = decoded['tree'];
+      if (tree is! List) return const <Map<String, dynamic>>[];
+      return tree
+          .whereType<Map>()
+          .map((entry) => entry.cast<String, dynamic>())
+          .toList();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  bool _isAtlasModImageFile(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.webp') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.bmp');
+  }
+
+  bool _isAtlasModVideoFile(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.mp4') ||
+        lower.endsWith('.webm') ||
+        lower.endsWith('.mov') ||
+        lower.endsWith('.m4v') ||
+        lower.endsWith('.avi') ||
+        lower.endsWith('.wmv') ||
+        lower.endsWith('.mkv');
+  }
+
+  bool _isAtlasModMediaFile(String name) {
+    return _isAtlasModImageFile(name) || _isAtlasModVideoFile(name);
+  }
+
+  _AtlasModMediaType _atlasModMediaTypeForPath(
+    String path, [
+    String explicitType = '',
+  ]) {
+    final type = explicitType.trim().toLowerCase();
+    if (type == 'image' || type == 'gif' || type == 'picture') {
+      return _AtlasModMediaType.image;
+    }
+    if (type == 'video' || type == 'movie') {
+      return _AtlasModMediaType.video;
+    }
+    return _isAtlasModVideoFile(path)
+        ? _AtlasModMediaType.video
+        : _AtlasModMediaType.image;
+  }
+
+  bool _isInstallableAtlasModFile(_AtlasModType type, String name) {
+    final lower = name.toLowerCase();
+    return switch (type) {
+      _AtlasModType.dll => lower.endsWith('.dll'),
+      _AtlasModType.pak =>
+        lower.endsWith('.pak') ||
+            lower.endsWith('.sig') ||
+            lower.endsWith('.ucas') ||
+            lower.endsWith('.utoc'),
+    };
+  }
+
+  List<_AtlasModMedia> _dedupeAtlasModMedia(List<_AtlasModMedia> media) {
+    final seen = <String>{};
+    final result = <_AtlasModMedia>[];
+    for (final item in media) {
+      final url = item.url.trim();
+      if (url.isEmpty) continue;
+      final key = url.toLowerCase();
+      if (!seen.add(key)) continue;
+      result.add(item);
+    }
+    return result;
+  }
+
+  List<_AtlasModMedia> _atlasModMediaFromMetadata(
+    Map<String, dynamic> metadata,
+    List<String> keys,
+    String Function(String value) resolve,
+  ) {
+    final media = <_AtlasModMedia>[];
+    for (final key in keys) {
+      final raw = metadata[key];
+      final items = raw is List
+          ? raw
+          : raw == null
+          ? const <dynamic>[]
+          : <dynamic>[raw];
+      for (final item in items) {
+        String value = '';
+        String label = '';
+        String explicitType = '';
+        if (item is String) {
+          value = item.trim();
+        } else if (item is Map) {
+          final map = item.cast<dynamic, dynamic>();
+          value =
+              (map['url'] ??
+                      map['src'] ??
+                      map['path'] ??
+                      map['file'] ??
+                      map['relativePath'] ??
+                      '')
+                  .toString()
+                  .trim();
+          label = (map['label'] ?? map['title'] ?? map['name'] ?? '')
+              .toString()
+              .trim();
+          explicitType = (map['type'] ?? map['kind'] ?? '').toString().trim();
+        }
+        if (value.isEmpty) continue;
+        final resolved = resolve(value);
+        if (resolved.isEmpty) continue;
+        media.add(
+          _AtlasModMedia(
+            url: resolved,
+            type: _atlasModMediaTypeForPath(value, explicitType),
+            label: label.isEmpty ? _basename(value) : label,
+          ),
+        );
+      }
+    }
+    return _dedupeAtlasModMedia(media);
+  }
+
+  Future<List<_AtlasModMedia>> _fetchAtlasResourceMediaFiles(
+    String path, {
+    int depth = 0,
+  }) async {
+    if (depth > 4) return const <_AtlasModMedia>[];
+    final media = <_AtlasModMedia>[];
+    List<Map<String, dynamic>> contents;
+    try {
+      contents = await _fetchAtlasResourceContents(path);
+    } catch (error) {
+      _log('mods', 'Failed to scan media at $path: $error');
+      return const <_AtlasModMedia>[];
+    }
+    for (final entry in contents) {
+      final name = (entry['name'] ?? '').toString();
+      final type = (entry['type'] ?? '').toString().toLowerCase();
+      final entryPath = (entry['path'] ?? '').toString();
+      if (type == 'file' && _isAtlasModMediaFile(name)) {
+        final url = (entry['download_url'] ?? '').toString().trim();
+        if (url.isEmpty) continue;
+        media.add(
+          _AtlasModMedia(
+            url: url,
+            type: _atlasModMediaTypeForPath(name),
+            label: name,
+          ),
+        );
+      } else if (type == 'dir' && entryPath.trim().isNotEmpty) {
+        media.addAll(
+          await _fetchAtlasResourceMediaFiles(entryPath, depth: depth + 1),
+        );
+      }
+    }
+    return _dedupeAtlasModMedia(media);
+  }
+
+  String _safeFileName(String value) {
+    final sanitized = value
+        .trim()
+        .replaceAll(RegExp(r'[<>:"/\\|?*]'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ');
+    return sanitized.isEmpty ? 'mod-file' : sanitized;
+  }
+
+  String _resolveAtlasResourceUrl(String value, String folderPath) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '';
+    final normalized = trimmed.replaceAll('\\', '/');
+    final lower = normalized.toLowerCase();
+    if (lower.startsWith('http://') || lower.startsWith('https://')) {
+      return normalized;
+    }
+    final relative = normalized.replaceFirst(RegExp(r'^/+'), '');
+    final base = folderPath.trim().replaceAll('\\', '/');
+    return _atlasResourcesRawUrl(base.isEmpty ? relative : '$base/$relative');
+  }
+
+  String _stringFromJson(
+    Map<String, dynamic> json,
+    List<String> keys, [
+    String fallback = '',
+  ]) {
+    for (final key in keys) {
+      final value = json[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty) return text;
+    }
+    return fallback;
+  }
+
+  List<String> _stringListFromJson(
+    Map<String, dynamic> json,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      final value = json[key];
+      if (value is List) {
+        return value
+            .map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList();
+      }
+      if (value is String && value.trim().isNotEmpty) {
+        return <String>[value.trim()];
+      }
+    }
+    return const <String>[];
+  }
+
+  List<_AtlasModFile> _atlasModFilesFromMetadata(
+    Map<String, dynamic> metadata,
+    String folderPath,
+  ) {
+    final raw =
+        metadata['files'] ?? metadata['downloads'] ?? metadata['download'];
+    final items = raw is List
+        ? raw
+        : raw == null
+        ? const <dynamic>[]
+        : <dynamic>[raw];
+    final files = <_AtlasModFile>[];
+    for (final item in items) {
+      String name = '';
+      String url = '';
+      String relativePath = '';
+      if (item is String) {
+        relativePath = item.trim();
+        url = _resolveAtlasResourceUrl(relativePath, folderPath);
+        name = _basename(relativePath);
+      } else if (item is Map) {
+        final map = item.cast<dynamic, dynamic>();
+        relativePath = (map['path'] ?? map['file'] ?? map['relativePath'] ?? '')
+            .toString()
+            .trim();
+        url =
+            (map['url'] ??
+                    map['downloadUrl'] ??
+                    map['download_url'] ??
+                    map['href'] ??
+                    '')
+                .toString()
+                .trim();
+        if (url.isEmpty && relativePath.isNotEmpty) {
+          url = _resolveAtlasResourceUrl(relativePath, folderPath);
+        }
+        name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        if (name.isEmpty) {
+          name = _basename(relativePath.isEmpty ? url : relativePath);
+        }
+      }
+      if (name.isEmpty || url.isEmpty) continue;
+      files.add(
+        _AtlasModFile(
+          name: name,
+          downloadUrl: _resolveAtlasResourceUrl(url, folderPath),
+          relativePath: relativePath,
+        ),
+      );
+    }
+    return files;
+  }
+
+  Future<_AtlasModEntry?> _parseAtlasModFolder(
+    _AtlasModType type,
+    Map<String, dynamic> folderEntry,
+  ) async {
+    final folderName = (folderEntry['name'] ?? '').toString().trim();
+    final folderPath = (folderEntry['path'] ?? '${type.folderName}/$folderName')
+        .toString()
+        .trim()
+        .replaceAll('\\', '/');
+    if (folderName.isEmpty || folderPath.isEmpty) return null;
+
+    final contents = await _fetchAtlasResourceContents(folderPath);
+    Map<String, dynamic> metadata = <String, dynamic>{};
+    final metadataEntry = contents.cast<Map<String, dynamic>?>().firstWhere(
+      (entry) =>
+          (entry?['type'] ?? '').toString().toLowerCase() == 'file' &&
+          (entry?['name'] ?? '').toString().toLowerCase() == 'metadata.json',
+      orElse: () => null,
+    );
+    final metadataUrl = (metadataEntry?['download_url'] ?? '')
+        .toString()
+        .trim();
+    if (metadataUrl.isNotEmpty) {
+      try {
+        final raw = (await _downloadText(metadataUrl)).trim();
+        if (raw.isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map<String, dynamic>) {
+            metadata = decoded;
+          } else if (decoded is Map) {
+            metadata = decoded.cast<String, dynamic>();
+          }
+        }
+      } catch (error) {
+        _log('mods', 'Failed to parse metadata for $folderPath: $error');
+      }
+    }
+
+    final inferredFiles = contents
+        .where((entry) {
+          final name = (entry['name'] ?? '').toString();
+          final entryType = (entry['type'] ?? '').toString().toLowerCase();
+          return entryType == 'file' && _isInstallableAtlasModFile(type, name);
+        })
+        .map(
+          (entry) => _AtlasModFile(
+            name: (entry['name'] ?? '').toString(),
+            downloadUrl: (entry['download_url'] ?? '').toString(),
+            relativePath: (entry['path'] ?? '').toString(),
+          ),
+        )
+        .where(
+          (file) => file.name.trim().isNotEmpty && file.downloadUrl.isNotEmpty,
+        )
+        .toList();
+
+    var files = _atlasModFilesFromMetadata(metadata, folderPath);
+    if (files.isEmpty) files = inferredFiles;
+
+    final directMedia = contents
+        .where((entry) {
+          final name = (entry['name'] ?? '').toString();
+          final entryType = (entry['type'] ?? '').toString().toLowerCase();
+          return entryType == 'file' && _isAtlasModMediaFile(name);
+        })
+        .map((entry) {
+          final name = (entry['name'] ?? '').toString();
+          return _AtlasModMedia(
+            url: (entry['download_url'] ?? '').toString().trim(),
+            type: _atlasModMediaTypeForPath(name),
+            label: name,
+          );
+        })
+        .where((item) => item.url.trim().isNotEmpty)
+        .toList();
+
+    final contentDirs = contents.where((entry) {
+      final entryType = (entry['type'] ?? '').toString().toLowerCase();
+      final name = (entry['name'] ?? '').toString().toLowerCase();
+      return entryType == 'dir' &&
+          (name == 'content' || name == 'media' || name == 'gallery');
+    });
+    final contentMedia = <_AtlasModMedia>[];
+    for (final entry in contentDirs) {
+      final path = (entry['path'] ?? '').toString().trim();
+      if (path.isEmpty) continue;
+      contentMedia.addAll(await _fetchAtlasResourceMediaFiles(path));
+    }
+
+    final metadataMedia = _atlasModMediaFromMetadata(metadata, const <String>[
+      'media',
+      'content',
+      'gallery',
+      'screenshots',
+      'pictures',
+      'images',
+      'videos',
+    ], (value) => _resolveAtlasResourceUrl(value, folderPath));
+    final cardImage = _stringFromJson(metadata, const <String>[
+      'cardImage',
+      'thumbnail',
+      'image',
+      'picture',
+      'cover',
+      'preview',
+    ]);
+    final resolvedCardImage =
+        cardImage.isNotEmpty && _isAtlasModImageFile(cardImage)
+        ? _resolveAtlasResourceUrl(cardImage, folderPath)
+        : '';
+    final media = _dedupeAtlasModMedia(<_AtlasModMedia>[
+      if (resolvedCardImage.isNotEmpty)
+        _AtlasModMedia(
+          url: resolvedCardImage,
+          type: _AtlasModMediaType.image,
+          label: _basename(cardImage),
+        ),
+      ...metadataMedia,
+      ...directMedia,
+      ...contentMedia,
+    ]);
+    final images = media
+        .where((item) => item.type == _AtlasModMediaType.image)
+        .map((item) => item.url)
+        .toList();
+    final primaryImage = resolvedCardImage.isNotEmpty
+        ? resolvedCardImage
+        : images.isNotEmpty
+        ? images.first
+        : '';
+
+    return _AtlasModEntry(
+      id: '${type.name}:${folderPath.toLowerCase()}',
+      type: type,
+      folderName: folderName,
+      folderPath: folderPath,
+      name: _stringFromJson(metadata, const <String>[
+        'name',
+        'title',
+        'displayName',
+      ], folderName),
+      author: _stringFromJson(metadata, const <String>[
+        'author',
+        'creator',
+        'by',
+      ], 'ATLAS Resources'),
+      cardDescription: _stringFromJson(metadata, const <String>[
+        'cardDescription',
+        'shortDescription',
+        'summary',
+        'teaser',
+      ]),
+      description: _stringFromJson(
+        metadata,
+        const <String>['description', 'detailDescription', 'details', 'body'],
+        type == _AtlasModType.pak
+            ? 'Pak mod for ATLAS builds.'
+            : 'DLL mod for the injector.',
+      ),
+      version: _stringFromJson(metadata, const <String>[
+        'version',
+        'gameVersion',
+        'fortniteVersion',
+        'build',
+      ]),
+      tags: _stringListFromJson(
+        metadata,
+        const <String>['tags', 'labels', 'categories', 'badges'],
+      ).where((tag) => tag.trim().isNotEmpty).map((tag) => tag.trim()).toList(),
+      cardImage: primaryImage,
+      images: images,
+      media: media,
+      sourceUrl: _stringFromJson(metadata, const <String>[
+        'sourceUrl',
+        'source',
+        'repo',
+        'repository',
+        'url',
+      ], _atlasResourcesTreeUrl(folderPath)),
+      files: files,
+    );
+  }
+
+  Future<_AtlasModEntry?> _parseAtlasModFolderFromTree(
+    _AtlasModType type,
+    String folderPath,
+    List<Map<String, dynamic>> treeEntries,
+  ) async {
+    final normalizedFolderPath = folderPath.trim().replaceAll('\\', '/');
+    if (normalizedFolderPath.isEmpty) return null;
+    final folderName = _basename(normalizedFolderPath);
+    if (folderName.isEmpty) return null;
+
+    final prefix = '$normalizedFolderPath/';
+    final childEntries = treeEntries.where((entry) {
+      final path = (entry['path'] ?? '').toString().replaceAll('\\', '/');
+      return path.startsWith(prefix);
+    }).toList();
+    if (childEntries.isEmpty) return null;
+
+    bool isBlob(Map<String, dynamic> entry) {
+      return (entry['type'] ?? '').toString().toLowerCase() == 'blob';
+    }
+
+    String entryPath(Map<String, dynamic> entry) {
+      return (entry['path'] ?? '').toString().replaceAll('\\', '/');
+    }
+
+    String directChildName(String path) {
+      if (!path.startsWith(prefix)) return '';
+      final remainder = path.substring(prefix.length);
+      return remainder.contains('/') ? '' : remainder;
+    }
+
+    final directEntries = childEntries.where((entry) {
+      final name = directChildName(entryPath(entry));
+      return name.isNotEmpty;
+    }).toList();
+
+    Map<String, dynamic> metadata = <String, dynamic>{};
+    final metadataEntry = directEntries
+        .cast<Map<String, dynamic>?>()
+        .firstWhere(
+          (entry) =>
+              entry != null &&
+              isBlob(entry) &&
+              directChildName(entryPath(entry)).toLowerCase() ==
+                  'metadata.json',
+          orElse: () => null,
+        );
+    final metadataPath = metadataEntry == null ? '' : entryPath(metadataEntry);
+    if (metadataPath.isNotEmpty) {
+      try {
+        final raw = (await _downloadText(
+          _atlasResourcesRawUrl(metadataPath),
+        )).trim();
+        if (raw.isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map<String, dynamic>) {
+            metadata = decoded;
+          } else if (decoded is Map) {
+            metadata = decoded.cast<String, dynamic>();
+          }
+        }
+      } catch (error) {
+        _log(
+          'mods',
+          'Failed to parse metadata for $normalizedFolderPath: $error',
+        );
+      }
+    }
+
+    final inferredFiles = directEntries
+        .where((entry) {
+          final name = directChildName(entryPath(entry));
+          return isBlob(entry) && _isInstallableAtlasModFile(type, name);
+        })
+        .map((entry) {
+          final path = entryPath(entry);
+          final name = directChildName(path);
+          return _AtlasModFile(
+            name: name,
+            downloadUrl: _atlasResourcesRawUrl(path),
+            relativePath: path,
+          );
+        })
+        .where(
+          (file) => file.name.trim().isNotEmpty && file.downloadUrl.isNotEmpty,
+        )
+        .toList();
+
+    var files = _atlasModFilesFromMetadata(metadata, normalizedFolderPath);
+    if (files.isEmpty) files = inferredFiles;
+
+    final directMedia = directEntries
+        .where((entry) {
+          final name = directChildName(entryPath(entry));
+          return isBlob(entry) && _isAtlasModMediaFile(name);
+        })
+        .map((entry) {
+          final path = entryPath(entry);
+          final name = directChildName(path);
+          return _AtlasModMedia(
+            url: _atlasResourcesRawUrl(path),
+            type: _atlasModMediaTypeForPath(name),
+            label: name,
+          );
+        })
+        .where((item) => item.url.trim().isNotEmpty)
+        .toList();
+
+    final contentMedia = childEntries
+        .where((entry) {
+          if (!isBlob(entry)) return false;
+          final path = entryPath(entry);
+          if (!path.startsWith(prefix)) return false;
+          final remainder = path.substring(prefix.length);
+          final slashIndex = remainder.indexOf('/');
+          if (slashIndex <= 0) return false;
+          final topDirectory = remainder.substring(0, slashIndex).toLowerCase();
+          return (topDirectory == 'content' ||
+                  topDirectory == 'media' ||
+                  topDirectory == 'gallery') &&
+              _isAtlasModMediaFile(_basename(path));
+        })
+        .map((entry) {
+          final path = entryPath(entry);
+          final name = _basename(path);
+          return _AtlasModMedia(
+            url: _atlasResourcesRawUrl(path),
+            type: _atlasModMediaTypeForPath(name),
+            label: name,
+          );
+        })
+        .toList();
+
+    final metadataMedia = _atlasModMediaFromMetadata(metadata, const <String>[
+      'media',
+      'content',
+      'gallery',
+      'screenshots',
+      'pictures',
+      'images',
+      'videos',
+    ], (value) => _resolveAtlasResourceUrl(value, normalizedFolderPath));
+    final cardImage = _stringFromJson(metadata, const <String>[
+      'cardImage',
+      'thumbnail',
+      'image',
+      'picture',
+      'cover',
+      'preview',
+    ]);
+    final resolvedCardImage =
+        cardImage.isNotEmpty && _isAtlasModImageFile(cardImage)
+        ? _resolveAtlasResourceUrl(cardImage, normalizedFolderPath)
+        : '';
+    final media = _dedupeAtlasModMedia(<_AtlasModMedia>[
+      if (resolvedCardImage.isNotEmpty)
+        _AtlasModMedia(
+          url: resolvedCardImage,
+          type: _AtlasModMediaType.image,
+          label: _basename(cardImage),
+        ),
+      ...metadataMedia,
+      ...directMedia,
+      ...contentMedia,
+    ]);
+    final images = media
+        .where((item) => item.type == _AtlasModMediaType.image)
+        .map((item) => item.url)
+        .toList();
+    final primaryImage = resolvedCardImage.isNotEmpty
+        ? resolvedCardImage
+        : images.isNotEmpty
+        ? images.first
+        : '';
+
+    return _AtlasModEntry(
+      id: '${type.name}:${normalizedFolderPath.toLowerCase()}',
+      type: type,
+      folderName: folderName,
+      folderPath: normalizedFolderPath,
+      name: _stringFromJson(metadata, const <String>[
+        'name',
+        'title',
+        'displayName',
+      ], folderName),
+      author: _stringFromJson(metadata, const <String>[
+        'author',
+        'creator',
+        'by',
+      ], 'ATLAS Resources'),
+      cardDescription: _stringFromJson(metadata, const <String>[
+        'cardDescription',
+        'shortDescription',
+        'summary',
+        'teaser',
+      ]),
+      description: _stringFromJson(
+        metadata,
+        const <String>['description', 'detailDescription', 'details', 'body'],
+        type == _AtlasModType.pak
+            ? 'Pak mod for ATLAS builds.'
+            : 'DLL mod for the injector.',
+      ),
+      version: _stringFromJson(metadata, const <String>[
+        'version',
+        'gameVersion',
+        'fortniteVersion',
+        'build',
+      ]),
+      tags: _stringListFromJson(
+        metadata,
+        const <String>['tags', 'labels', 'categories', 'badges'],
+      ).where((tag) => tag.trim().isNotEmpty).map((tag) => tag.trim()).toList(),
+      cardImage: primaryImage,
+      images: images,
+      media: media,
+      sourceUrl: _stringFromJson(metadata, const <String>[
+        'sourceUrl',
+        'source',
+        'repo',
+        'repository',
+        'url',
+      ], _atlasResourcesTreeUrl(normalizedFolderPath)),
+      files: files,
+    );
+  }
+
+  Future<List<_AtlasModEntry>> _loadModsLibraryFromGitHubTree() async {
+    final treeEntries = await _fetchAtlasResourceTreeEntries();
+    final folderPaths = <String>{};
+    for (final type in _AtlasModType.values) {
+      final prefix = '${type.folderName}/';
+      for (final entry in treeEntries) {
+        final path = (entry['path'] ?? '').toString().replaceAll('\\', '/');
+        if (!path.startsWith(prefix)) continue;
+        final remainder = path.substring(prefix.length);
+        final slashIndex = remainder.indexOf('/');
+        if (slashIndex <= 0) continue;
+        folderPaths.add('$prefix${remainder.substring(0, slashIndex)}');
+      }
+    }
+
+    final mods = <_AtlasModEntry>[];
+    for (final type in _AtlasModType.values) {
+      final typePrefix = '${type.folderName}/';
+      final typeFolders =
+          folderPaths.where((path) => path.startsWith(typePrefix)).toList()
+            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      for (final folderPath in typeFolders) {
+        final mod = await _parseAtlasModFolderFromTree(
+          type,
+          folderPath,
+          treeEntries,
+        );
+        if (mod != null) mods.add(mod);
+      }
+    }
+    _log('mods', 'Loaded ${mods.length} mods from ATLAS-Resources tree.');
+    return mods;
+  }
+
+  Future<List<_AtlasModEntry>> _loadModsLibraryFromGitHubContents() async {
+    final mods = <_AtlasModEntry>[];
+    for (final type in _AtlasModType.values) {
+      final entries = await _fetchAtlasResourceContents(type.folderName);
+      for (final entry in entries) {
+        if ((entry['type'] ?? '').toString().toLowerCase() != 'dir') {
+          continue;
+        }
+        final mod = await _parseAtlasModFolder(type, entry);
+        if (mod != null) mods.add(mod);
+      }
+    }
+    _log('mods', 'Loaded ${mods.length} mods from ATLAS-Resources contents.');
+    return mods;
+  }
+
+  Future<List<_AtlasModEntry>> _loadModsLibraryFromGitHub() async {
+    try {
+      return await _loadModsLibraryFromGitHubTree();
+    } catch (error) {
+      _log('mods', 'GitHub tree load failed, trying contents API: $error');
+      return _loadModsLibraryFromGitHubContents();
+    }
+  }
+
+  Future<List<_AtlasModEntry>> _loadModsLibraryCache() async {
+    if (!_storageReady || !await _modsLibraryCacheFile.exists()) {
+      return const <_AtlasModEntry>[];
+    }
+    try {
+      final raw = await _modsLibraryCacheFile.readAsString();
+      final decoded = jsonDecode(raw);
+      final modsRaw = decoded is Map ? decoded['mods'] : decoded;
+      if (modsRaw is! List) return const <_AtlasModEntry>[];
+      return modsRaw
+          .whereType<Map>()
+          .map((item) => _AtlasModEntry.fromJson(item.cast<String, dynamic>()))
+          .where((mod) => mod.id.trim().isNotEmpty)
+          .toList();
+    } catch (error) {
+      _log('mods', 'Failed to read mods library cache: $error');
+      return const <_AtlasModEntry>[];
+    }
+  }
+
+  Future<void> _saveModsLibraryCache(List<_AtlasModEntry> mods) async {
+    if (!_storageReady) return;
+    try {
+      final payload = <String, dynamic>{
+        'version': 1,
+        'cachedAtEpochMs': DateTime.now().millisecondsSinceEpoch,
+        'mods': mods.map((mod) => mod.toJson()).toList(),
+      };
+      final pretty = const JsonEncoder.withIndent('  ').convert(payload);
+      await _modsLibraryCacheFile.writeAsString(pretty, flush: true);
+    } catch (error) {
+      _log('mods', 'Failed to write mods library cache: $error');
+    }
+  }
+
+  Directory? _findLocalAtlasResourcesDirectory() {
+    final seen = <String>{};
+    final candidates = <Directory>[];
+
+    void addCandidate(String path) {
+      final normalized = _normalizePath(path);
+      if (normalized.isEmpty || !seen.add(normalized)) return;
+      candidates.add(Directory(path));
+    }
+
+    void addSiblingCandidates(Directory start) {
+      var current = start.absolute;
+      for (var depth = 0; depth < 8; depth++) {
+        addCandidate(_joinPath([current.path, 'ATLAS-Resources']));
+        final parent = current.parent;
+        if (_normalizePath(parent.path) == _normalizePath(current.path)) break;
+        addCandidate(_joinPath([parent.path, 'ATLAS-Resources']));
+        current = parent;
+      }
+    }
+
+    addSiblingCandidates(Directory.current);
+    addSiblingCandidates(File(Platform.resolvedExecutable).parent);
+    final userProfile = Platform.environment['USERPROFILE']?.trim() ?? '';
+    if (userProfile.isNotEmpty) {
+      addCandidate(
+        _joinPath([
+          userProfile,
+          'OneDrive',
+          'Documents',
+          'GitHub',
+          'ATLAS-Resources',
+        ]),
+      );
+      addCandidate(
+        _joinPath([userProfile, 'Documents', 'GitHub', 'ATLAS-Resources']),
+      );
+    }
+
+    for (final candidate in candidates) {
+      final paks = Directory(_joinPath([candidate.path, 'Paks']));
+      final dlls = Directory(_joinPath([candidate.path, 'DLLs']));
+      if (candidate.existsSync() && (paks.existsSync() || dlls.existsSync())) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  List<_AtlasModFile> _atlasModFilesFromLocalMetadata(
+    Map<String, dynamic> metadata,
+    Directory folder,
+  ) {
+    final raw =
+        metadata['files'] ?? metadata['downloads'] ?? metadata['download'];
+    final items = raw is List
+        ? raw
+        : raw == null
+        ? const <dynamic>[]
+        : <dynamic>[raw];
+    final files = <_AtlasModFile>[];
+    for (final item in items) {
+      String name = '';
+      String url = '';
+      String relativePath = '';
+      if (item is String) {
+        relativePath = item.trim();
+        final lower = relativePath.toLowerCase();
+        url = lower.startsWith('http://') || lower.startsWith('https://')
+            ? relativePath
+            : _joinPath([folder.path, relativePath.replaceAll('/', '\\')]);
+        name = _basename(relativePath);
+      } else if (item is Map) {
+        final map = item.cast<dynamic, dynamic>();
+        relativePath = (map['path'] ?? map['file'] ?? map['relativePath'] ?? '')
+            .toString()
+            .trim();
+        url =
+            (map['url'] ??
+                    map['downloadUrl'] ??
+                    map['download_url'] ??
+                    map['href'] ??
+                    '')
+                .toString()
+                .trim();
+        if (url.isEmpty && relativePath.isNotEmpty) {
+          url = _joinPath([folder.path, relativePath.replaceAll('/', '\\')]);
+        }
+        name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        if (name.isEmpty) {
+          name = _basename(relativePath.isEmpty ? url : relativePath);
+        }
+      }
+      if (name.isEmpty || url.isEmpty) continue;
+      files.add(
+        _AtlasModFile(name: name, downloadUrl: url, relativePath: relativePath),
+      );
+    }
+    return files;
+  }
+
+  List<_AtlasModMedia> _localAtlasResourceMediaFiles(Directory directory) {
+    if (!directory.existsSync()) return const <_AtlasModMedia>[];
+    final media = <_AtlasModMedia>[];
+    for (final entity in directory.listSync(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) continue;
+      final name = _basename(entity.path);
+      if (!_isAtlasModMediaFile(name)) continue;
+      media.add(
+        _AtlasModMedia(
+          url: entity.path,
+          type: _atlasModMediaTypeForPath(name),
+          label: name,
+        ),
+      );
+    }
+    return _dedupeAtlasModMedia(media);
+  }
+
+  Future<_AtlasModEntry?> _parseLocalAtlasModFolder(
+    _AtlasModType type,
+    Directory folder,
+    Directory resourcesRoot,
+  ) async {
+    final folderName = _basename(folder.path);
+    final folderPath = '${type.folderName}/$folderName';
+    Map<String, dynamic> metadata = <String, dynamic>{};
+    final metadataFile = File(_joinPath([folder.path, 'metadata.json']));
+    if (await metadataFile.exists()) {
+      try {
+        final decoded = jsonDecode(await metadataFile.readAsString());
+        if (decoded is Map<String, dynamic>) {
+          metadata = decoded;
+        } else if (decoded is Map) {
+          metadata = decoded.cast<String, dynamic>();
+        }
+      } catch (error) {
+        _log('mods', 'Failed to parse local metadata for $folderPath: $error');
+      }
+    }
+
+    final directFiles = folder
+        .listSync(followLinks: false)
+        .whereType<File>()
+        .where((file) => _isInstallableAtlasModFile(type, _basename(file.path)))
+        .map(
+          (file) => _AtlasModFile(
+            name: _basename(file.path),
+            downloadUrl: file.path,
+            relativePath: _basename(file.path),
+          ),
+        )
+        .toList();
+    var files = _atlasModFilesFromLocalMetadata(metadata, folder);
+    if (files.isEmpty) files = directFiles;
+
+    final directMedia = folder
+        .listSync(followLinks: false)
+        .whereType<File>()
+        .where((file) => _isAtlasModMediaFile(_basename(file.path)))
+        .map(
+          (file) => _AtlasModMedia(
+            url: file.path,
+            type: _atlasModMediaTypeForPath(_basename(file.path)),
+            label: _basename(file.path),
+          ),
+        )
+        .toList();
+    final contentMedia = <_AtlasModMedia>[];
+    for (final name in const <String>['Content', 'Media', 'Gallery']) {
+      contentMedia.addAll(
+        _localAtlasResourceMediaFiles(
+          Directory(_joinPath([folder.path, name])),
+        ),
+      );
+    }
+    String resolveLocalMedia(String value) {
+      final trimmed = value.trim();
+      final lower = trimmed.toLowerCase();
+      if (lower.startsWith('http://') || lower.startsWith('https://')) {
+        return trimmed;
+      }
+      return _joinPath([folder.path, trimmed.replaceAll('/', '\\')]);
+    }
+
+    final metadataMedia = _atlasModMediaFromMetadata(metadata, const <String>[
+      'media',
+      'content',
+      'gallery',
+      'screenshots',
+      'pictures',
+      'images',
+      'videos',
+    ], resolveLocalMedia);
+    final cardImage = _stringFromJson(metadata, const <String>[
+      'cardImage',
+      'thumbnail',
+      'image',
+      'picture',
+      'cover',
+      'preview',
+    ]);
+    final resolvedCardImage =
+        cardImage.isNotEmpty && _isAtlasModImageFile(cardImage)
+        ? resolveLocalMedia(cardImage)
+        : '';
+    final media = _dedupeAtlasModMedia(<_AtlasModMedia>[
+      if (resolvedCardImage.isNotEmpty)
+        _AtlasModMedia(
+          url: resolvedCardImage,
+          type: _AtlasModMediaType.image,
+          label: _basename(cardImage),
+        ),
+      ...metadataMedia,
+      ...directMedia,
+      ...contentMedia,
+    ]);
+    final images = media
+        .where((item) => item.type == _AtlasModMediaType.image)
+        .map((item) => item.url)
+        .toList();
+    final primaryImage = resolvedCardImage.isNotEmpty
+        ? resolvedCardImage
+        : images.isNotEmpty
+        ? images.first
+        : '';
+
+    return _AtlasModEntry(
+      id: '${type.name}:${folderPath.toLowerCase()}',
+      type: type,
+      folderName: folderName,
+      folderPath: folderPath,
+      name: _stringFromJson(metadata, const <String>[
+        'name',
+        'title',
+        'displayName',
+      ], folderName),
+      author: _stringFromJson(metadata, const <String>[
+        'author',
+        'creator',
+        'by',
+      ], 'ATLAS Resources'),
+      cardDescription: _stringFromJson(metadata, const <String>[
+        'cardDescription',
+        'shortDescription',
+        'summary',
+        'teaser',
+      ]),
+      description: _stringFromJson(
+        metadata,
+        const <String>['description', 'detailDescription', 'details', 'body'],
+        type == _AtlasModType.pak
+            ? 'Pak mod for ATLAS builds.'
+            : 'DLL mod for the injector.',
+      ),
+      version: _stringFromJson(metadata, const <String>[
+        'version',
+        'gameVersion',
+        'fortniteVersion',
+        'build',
+      ]),
+      tags: _stringListFromJson(
+        metadata,
+        const <String>['tags', 'labels', 'categories', 'badges'],
+      ).where((tag) => tag.trim().isNotEmpty).map((tag) => tag.trim()).toList(),
+      cardImage: primaryImage,
+      images: images,
+      media: media,
+      sourceUrl: resourcesRoot.path,
+      files: files,
+    );
+  }
+
+  Future<List<_AtlasModEntry>> _loadModsLibraryFromLocalResources() async {
+    final resourcesRoot = _findLocalAtlasResourcesDirectory();
+    if (resourcesRoot == null) return const <_AtlasModEntry>[];
+    final mods = <_AtlasModEntry>[];
+    for (final type in _AtlasModType.values) {
+      final typeDir = Directory(
+        _joinPath([resourcesRoot.path, type.folderName]),
+      );
+      if (!await typeDir.exists()) continue;
+      final folders = typeDir
+          .listSync(followLinks: false)
+          .whereType<Directory>();
+      for (final entry in folders) {
+        final mod = await _parseLocalAtlasModFolder(type, entry, resourcesRoot);
+        if (mod != null) mods.add(mod);
+      }
+    }
+    _log('mods', 'Loaded ${mods.length} mods from local ATLAS-Resources.');
+    return mods;
+  }
+
+  void _sortAtlasMods(List<_AtlasModEntry> mods) {
+    mods.sort((a, b) {
+      final typeCompare = a.type.index.compareTo(b.type.index);
+      if (typeCompare != 0) return typeCompare;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+  }
+
+  Future<void> _loadModsLibrary({bool forceRefresh = false}) {
+    if (_modsRefreshInFlight != null) return _modsRefreshInFlight!;
+    if (!forceRefresh && _modsLibrary.isNotEmpty) return Future<void>.value();
+    final hadLoadedMods = _modsLibrary.isNotEmpty;
+
+    final future = () async {
+      if (mounted) {
+        setState(() {
+          _modsLoading = true;
+          _modsLoadError = '';
+        });
+      } else {
+        _modsLoading = true;
+        _modsLoadError = '';
+      }
+
+      try {
+        final mods = await _loadModsLibraryFromGitHub();
+        _sortAtlasMods(mods);
+        await _saveModsLibraryCache(mods);
+        if (mounted) {
+          setState(() => _modsLibrary = mods);
+        } else {
+          _modsLibrary = mods;
+        }
+        await _reconcileDetectedInstalledMods(mods);
+        if (forceRefresh && mounted) {
+          _toast('Refreshed ${mods.length} Mods');
+        }
+      } catch (error) {
+        _log('mods', 'Failed to Load Mods Library: $error');
+        var fallbackMods = await _loadModsLibraryFromLocalResources();
+        var fallbackLabel = 'local ATLAS-Resources';
+        if (fallbackMods.isEmpty) {
+          fallbackMods = await _loadModsLibraryCache();
+          fallbackLabel = 'cached mods';
+        }
+        if (fallbackMods.isNotEmpty) {
+          _sortAtlasMods(fallbackMods);
+          if (mounted) {
+            setState(() {
+              _modsLibrary = fallbackMods;
+              _modsLoadError = '';
+            });
+            if (forceRefresh || !hadLoadedMods) {
+              _toast('Loaded ${fallbackMods.length} $fallbackLabel');
+            }
+          } else {
+            _modsLibrary = fallbackMods;
+            _modsLoadError = '';
+          }
+          await _reconcileDetectedInstalledMods(fallbackMods);
+        } else if (hadLoadedMods) {
+          _modsLoadError = '';
+          if (mounted) _toast('Unable to Refresh Mods. Keeping Current List.');
+        } else {
+          _modsLoadError = 'Unable to load ATLAS Resources Mods.';
+        }
+        if (mounted) setState(() {});
+      } finally {
+        _modsLoading = false;
+        if (mounted) setState(() {});
+      }
+    }();
+
+    _modsRefreshInFlight = future.whenComplete(
+      () => _modsRefreshInFlight = null,
+    );
+    return _modsRefreshInFlight!;
+  }
+
+  Future<void> _loadInstalledMods() async {
+    if (!_storageReady) return;
+    try {
+      if (!await _installedModsFile.exists()) {
+        _installedModsById = <String, _InstalledAtlasMod>{};
+        return;
+      }
+      final raw = await _installedModsFile.readAsString();
+      final decoded = jsonDecode(raw);
+      final modsRaw = decoded is Map ? decoded['mods'] : decoded;
+      if (modsRaw is! List) {
+        _installedModsById = <String, _InstalledAtlasMod>{};
+        return;
+      }
+      final next = <String, _InstalledAtlasMod>{};
+      for (final item in modsRaw) {
+        if (item is Map<String, dynamic>) {
+          final mod = _InstalledAtlasMod.fromJson(item);
+          if (mod.id.isNotEmpty) next[mod.id] = mod;
+        } else if (item is Map) {
+          final mod = _InstalledAtlasMod.fromJson(item.cast<String, dynamic>());
+          if (mod.id.isNotEmpty) next[mod.id] = mod;
+        }
+      }
+      _installedModsById = next;
+    } catch (error) {
+      _installedModsById = <String, _InstalledAtlasMod>{};
+      _log('mods', 'Failed to load installed mods: $error');
+    }
+  }
+
+  Future<void> _saveInstalledMods() async {
+    if (!_storageReady) return;
+    final mods = _installedModsById.values.toList()
+      ..sort((a, b) => b.installedAtEpochMs.compareTo(a.installedAtEpochMs));
+    final payload = <String, dynamic>{
+      'version': 1,
+      'mods': mods.map((mod) => mod.toJson()).toList(),
+    };
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
+    await _installedModsFile.writeAsString(pretty, flush: true);
+  }
+
+  String _normalizedVersionToken(String value) {
+    return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  bool _versionEntryMatchesMod(VersionEntry entry, String modVersion) {
+    final modToken = _normalizedVersionToken(modVersion);
+    if (modToken.isEmpty) return false;
+    final entryVersion = _normalizedVersionToken(entry.gameVersion);
+    final entryName = _normalizedVersionToken(entry.name);
+    return entryVersion == modToken ||
+        entryName == modToken ||
+        entryVersion.contains(modToken) ||
+        entryName.contains(modToken);
+  }
+
+  VersionEntry? _targetVersionForPakMod(_AtlasModEntry mod) {
+    final modVersion = mod.version.trim();
+    if (modVersion.isNotEmpty) {
+      for (final version in _settings.versions) {
+        if (_versionEntryMatchesMod(version, modVersion)) return version;
+      }
+      return null;
+    }
+    return _settings.selectedVersion;
+  }
+
+  String _pakModTargetDirectory(VersionEntry version) {
+    return _joinPath([version.location, 'FortniteGame', 'Content', 'Paks']);
+  }
+
+  String _dllModTargetDirectory(_AtlasModEntry mod) {
+    return _joinPath([_dataDir.path, 'mods', 'dlls', _safeFileName(mod.id)]);
+  }
+
+  List<String> _expectedAtlasModInstallPaths(
+    _AtlasModEntry mod, {
+    VersionEntry? targetVersion,
+  }) {
+    if (mod.files.isEmpty) return const <String>[];
+    final targetDirectory = switch (mod.type) {
+      _AtlasModType.pak =>
+        targetVersion == null ? '' : _pakModTargetDirectory(targetVersion),
+      _AtlasModType.dll => _dllModTargetDirectory(mod),
+    };
+    if (targetDirectory.trim().isEmpty) return const <String>[];
+    return mod.files
+        .map((file) => _joinPath([targetDirectory, _safeFileName(file.name)]))
+        .toList();
+  }
+
+  bool _installedAtlasModFilesPresent(_InstalledAtlasMod installed) {
+    return installed.installedFilePaths.isNotEmpty &&
+        installed.installedFilePaths.every((path) => File(path).existsSync());
+  }
+
+  _InstalledAtlasMod? _detectExistingAtlasModInstall(_AtlasModEntry mod) {
+    final targetVersion = mod.type == _AtlasModType.pak
+        ? _targetVersionForPakMod(mod)
+        : null;
+    final expectedPaths = _expectedAtlasModInstallPaths(
+      mod,
+      targetVersion: targetVersion,
+    );
+    if (expectedPaths.isEmpty) return null;
+    if (!expectedPaths.every((path) => File(path).existsSync())) return null;
+    return _InstalledAtlasMod(
+      id: mod.id,
+      type: mod.type,
+      name: mod.name,
+      version: mod.version,
+      targetVersionId: targetVersion?.id ?? '',
+      installedFilePaths: expectedPaths,
+      installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  bool _isAtlasModInstalled(_AtlasModEntry mod) {
+    final installed = _installedModsById[mod.id];
+    if (installed != null && _installedAtlasModFilesPresent(installed)) {
+      return true;
+    }
+    return _detectExistingAtlasModInstall(mod) != null;
+  }
+
+  Future<void> _reconcileDetectedInstalledMods([
+    List<_AtlasModEntry>? sourceMods,
+  ]) async {
+    final mods = sourceMods ?? _modsLibrary;
+    var changed = false;
+    for (final mod in mods) {
+      final existing = _installedModsById[mod.id];
+      if (existing != null && _installedAtlasModFilesPresent(existing)) {
+        continue;
+      }
+      final detected = _detectExistingAtlasModInstall(mod);
+      if (detected == null) continue;
+      _installedModsById[mod.id] = detected;
+      changed = true;
+    }
+    if (!changed) return;
+    await _saveInstalledMods();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _installAtlasMod(_AtlasModEntry mod) async {
+    final detected = _detectExistingAtlasModInstall(mod);
+    final savedInstall = _installedModsById[mod.id];
+    if ((savedInstall != null &&
+            _installedAtlasModFilesPresent(savedInstall)) ||
+        detected != null) {
+      if (detected != null &&
+          (savedInstall == null ||
+              !_installedAtlasModFilesPresent(savedInstall))) {
+        _installedModsById[mod.id] = detected;
+        await _saveInstalledMods();
+        if (mounted) setState(() {});
+      }
+      _toast('${mod.name} is already installed');
+      return;
+    }
+    if (mod.files.isEmpty) {
+      _toast('${mod.name} has no downloadable files');
+      return;
+    }
+
+    VersionEntry? targetVersion;
+    Directory targetDirectory;
+    if (mod.type == _AtlasModType.pak) {
+      targetVersion = _targetVersionForPakMod(mod);
+      if (targetVersion == null) {
+        final versionLabel = mod.version.trim().isEmpty
+            ? 'a selected build'
+            : 'version ${mod.version.trim()}';
+        _toast('Import $versionLabel before installing ${mod.name}');
+        return;
+      }
+      targetDirectory = Directory(_pakModTargetDirectory(targetVersion));
+    } else {
+      targetDirectory = Directory(_dllModTargetDirectory(mod));
+    }
+
+    await targetDirectory.create(recursive: true);
+    final installedPaths = <String>[];
+    _toastProgress(
+      'Downloading ${mod.name}...',
+      progress: null,
+      indeterminate: true,
+    );
+    try {
+      for (var index = 0; index < mod.files.length; index++) {
+        final file = mod.files[index];
+        final destination = File(
+          _joinPath([targetDirectory.path, _safeFileName(file.name)]),
+        );
+        await _downloadToFile(
+          file.downloadUrl,
+          destination,
+          onProgress: (received, total) {
+            final fileProgress = total == null || total <= 0
+                ? 0.0
+                : (received / total).clamp(0.0, 1.0);
+            final progress = (index + fileProgress) / mod.files.length;
+            _toastProgress(
+              'Downloading ${mod.name} (${index + 1}/${mod.files.length})',
+              progress: progress,
+              indeterminate: false,
+            );
+          },
+        );
+        installedPaths.add(destination.path);
+      }
+
+      _installedModsById[mod.id] = _InstalledAtlasMod(
+        id: mod.id,
+        type: mod.type,
+        name: mod.name,
+        version: mod.version,
+        targetVersionId: targetVersion?.id ?? '',
+        installedFilePaths: installedPaths,
+        installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await _saveInstalledMods();
+      if (mounted) setState(() {});
+      _toastProgressDismiss();
+      _toast('Mod Installed "${mod.name}"');
+    } catch (error) {
+      for (final path in installedPaths) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+      _toastProgressDismiss();
+      _toast('Failed to install ${mod.name}');
+      _log('mods', 'Failed to install ${mod.id}: $error');
+    }
+  }
+
+  Future<void> _uninstallAtlasMod(_AtlasModEntry mod) async {
+    final installed =
+        _installedModsById[mod.id] ?? _detectExistingAtlasModInstall(mod);
+    if (installed == null) return;
+    for (final path in installed.installedFilePaths) {
+      try {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      } catch (error) {
+        _log('mods', 'Failed to delete installed mod file $path: $error');
+      }
+    }
+    _installedModsById.remove(mod.id);
+    await _saveInstalledMods();
+    if (mounted) setState(() {});
+    _toast('Removed ${installed.name}');
+  }
+
+  Map<String, _InstalledAtlasMod> _installedAtlasModsSnapshot() {
+    final installed = <String, _InstalledAtlasMod>{};
+    for (final entry in _installedModsById.entries) {
+      if (_installedAtlasModFilesPresent(entry.value)) {
+        installed[entry.key] = entry.value;
+      }
+    }
+    for (final mod in _modsLibrary) {
+      final detected = _detectExistingAtlasModInstall(mod);
+      if (detected != null) installed[mod.id] = detected;
+    }
+    return installed;
+  }
+
+  Future<void> _clearInstalledAtlasMods() async {
+    final installed = _installedAtlasModsSnapshot();
+    if (installed.isEmpty) {
+      _toast('No installed mods to clear');
+      return;
+    }
+
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 480),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Clear installed mods?',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'This will delete ${installed.length} installed mod${installed.length == 1 ? '' : 's'} from the launcher mods folder and matching build Paks folders.',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.84),
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            _dialogCancelButton(
+                              dialogContext,
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
+                            ),
+                            const Spacer(),
+                            FilledButton.icon(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFB3261E),
+                                foregroundColor: Colors.white,
+                              ),
+                              icon: const Icon(Icons.delete_sweep_rounded),
+                              label: const Text('Clear Mods'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+
+    if (confirmed != true) return;
+
+    var deletedFiles = 0;
+    for (final mod in installed.values) {
+      for (final path in mod.installedFilePaths) {
+        try {
+          final file = File(path);
+          if (await file.exists()) {
+            await file.delete();
+            deletedFiles++;
+          }
+        } catch (error) {
+          _log('mods', 'Failed to delete installed mod file $path: $error');
+        }
+      }
+      _installedModsById.remove(mod.id);
+    }
+    await _saveInstalledMods();
+    if (mounted) setState(() {});
+    _toast(
+      deletedFiles == 1
+          ? 'Cleared 1 mod file'
+          : 'Cleared $deletedFiles mod files',
+    );
+  }
+
+  List<_SavedInjectorDll> _installedModInjectorDlls() {
+    final options = <_SavedInjectorDll>[];
+    for (final mod in _installedModsById.values) {
+      if (mod.type != _AtlasModType.dll) continue;
+      final dllPaths = mod.installedFilePaths.where((path) {
+        return path.toLowerCase().endsWith('.dll') && File(path).existsSync();
+      }).toList();
+      for (final path in dllPaths) {
+        final label = dllPaths.length == 1
+            ? mod.name
+            : '${mod.name} - ${_basename(path)}';
+        options.add(_SavedInjectorDll(label: label, path: path));
+      }
+    }
+    return _normalizedInjectorDllLibrary(options);
   }
 
   Future<void> _resetBundledDllPathToLatest({
@@ -8731,209 +10485,239 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               child: Scrollbar(
                                 controller: dialogScrollController,
                                 thumbVisibility: true,
-                                child: SingleChildScrollView(
-                                  controller: dialogScrollController,
-                                  padding: EdgeInsets.zero,
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      settingTile(
-                                        icon: Icons.play_circle_outline_rounded,
-                                        title: 'Play Launch Arguments',
-                                        subtitle:
-                                            'Additional arguments to use with the Launch button',
-                                        trailing: SizedBox(
-                                          width: 220,
-                                          child: TextField(
-                                            controller:
-                                                playLaunchArgsController,
-                                            focusNode: playLaunchArgsFocusNode,
-                                            keyboardType: TextInputType.text,
-                                            decoration: InputDecoration(
-                                              isDense: true,
-                                              hintText: 'Arguments...',
-                                              contentPadding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(right: 12),
+                                  child: ScrollConfiguration(
+                                    behavior: ScrollConfiguration.of(
+                                      dialogContext,
+                                    ).copyWith(scrollbars: false),
+                                    child: SingleChildScrollView(
+                                      controller: dialogScrollController,
+                                      padding: EdgeInsets.zero,
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          settingTile(
+                                            icon: Icons
+                                                .play_circle_outline_rounded,
+                                            title: 'Play Launch Arguments',
+                                            subtitle:
+                                                'Additional arguments to use with the Launch button',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller:
+                                                    playLaunchArgsController,
+                                                focusNode:
+                                                    playLaunchArgsFocusNode,
+                                                keyboardType:
+                                                    TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'Arguments...',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
                                                   ),
-                                              border: OutlineInputBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
+                                                ),
                                               ),
                                             ),
                                           ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.tune_rounded,
-                                        title: 'Host Launch Arguments',
-                                        subtitle:
-                                            'Additional arguments to use with the Host button',
-                                        trailing: SizedBox(
-                                          width: 220,
-                                          child: TextField(
-                                            controller: launchArgsController,
-                                            focusNode: hostLaunchArgsFocusNode,
-                                            keyboardType: TextInputType.text,
-                                            decoration: InputDecoration(
-                                              isDense: true,
-                                              hintText: 'Arguments...',
-                                              contentPadding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.tune_rounded,
+                                            title: 'Host Launch Arguments',
+                                            subtitle:
+                                                'Additional arguments to use with the Host button',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller:
+                                                    launchArgsController,
+                                                focusNode:
+                                                    hostLaunchArgsFocusNode,
+                                                keyboardType:
+                                                    TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'Arguments...',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
                                                   ),
-                                              border: OutlineInputBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
+                                                ),
                                               ),
                                             ),
                                           ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.badge_rounded,
-                                        title: 'Host Client Name',
-                                        subtitle:
-                                            'Username used for the hosted client',
-                                        trailing: SizedBox(
-                                          width: 220,
-                                          child: TextField(
-                                            controller: hostUsernameController,
-                                            focusNode: hostUsernameFocusNode,
-                                            keyboardType: TextInputType.text,
-                                            decoration: InputDecoration(
-                                              isDense: true,
-                                              hintText: 'host',
-                                              contentPadding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.badge_rounded,
+                                            title: 'Host Client Name',
+                                            subtitle:
+                                                'Username used for the hosted client',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller:
+                                                    hostUsernameController,
+                                                focusNode:
+                                                    hostUsernameFocusNode,
+                                                keyboardType:
+                                                    TextInputType.text,
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText: 'host',
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
                                                   ),
-                                              border: OutlineInputBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
+                                                ),
                                               ),
                                             ),
                                           ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.numbers_rounded,
-                                        title: 'Port',
-                                        subtitle:
-                                            'The port the launcher expects the game server on',
-                                        trailing: SizedBox(
-                                          width: 220,
-                                          child: TextField(
-                                            controller: portController,
-                                            focusNode: portFocusNode,
-                                            keyboardType: TextInputType.number,
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter
-                                                  .digitsOnly,
-                                            ],
-                                            decoration: InputDecoration(
-                                              isDense: true,
-                                              hintText: _defaultGameServerPort
-                                                  .toString(),
-                                              contentPadding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.numbers_rounded,
+                                            title: 'Port',
+                                            subtitle:
+                                                'The port the launcher expects the game server on',
+                                            trailing: SizedBox(
+                                              width: 220,
+                                              child: TextField(
+                                                controller: portController,
+                                                focusNode: portFocusNode,
+                                                keyboardType:
+                                                    TextInputType.number,
+                                                inputFormatters: [
+                                                  FilteringTextInputFormatter
+                                                      .digitsOnly,
+                                                ],
+                                                decoration: InputDecoration(
+                                                  isDense: true,
+                                                  hintText:
+                                                      _defaultGameServerPort
+                                                          .toString(),
+                                                  contentPadding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 12,
+                                                        vertical: 10,
+                                                      ),
+                                                  border: OutlineInputBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
                                                   ),
-                                              border: OutlineInputBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(10),
+                                                ),
                                               ),
                                             ),
                                           ),
-                                        ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.web_asset_off_rounded,
+                                            title: 'Headless',
+                                            subtitle:
+                                                'Disables game rendering to save resources',
+                                            trailing: Switch(
+                                              value: headless,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => headless = value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.groups_rounded,
+                                            title: 'Multi-Client Launching',
+                                            subtitle:
+                                                'Allows Launch to open additional game clients while one is already running',
+                                            trailing: Switch(
+                                              value: allowMultipleClients,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => allowMultipleClients =
+                                                      value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.cloud_rounded,
+                                            title:
+                                                'Launch ATLAS Backend with Game',
+                                            subtitle:
+                                                'Start ATLAS Backend when launching a session',
+                                            trailing: Switch(
+                                              value: launchBackend,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => launchBackend = value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.restart_alt_rounded,
+                                            title: 'Automatic Restart',
+                                            subtitle:
+                                                'Automatically restarts the game server when it exits',
+                                            trailing: Switch(
+                                              value: autoRestart,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () => autoRestart = value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          settingTile(
+                                            icon: Icons.warning_amber_rounded,
+                                            title:
+                                                'Delete GFSDK_Aftermath_Lib.dll',
+                                            subtitle:
+                                                'Removes the Aftermath DLL from the game directory when launching the game',
+                                            trailing: Switch(
+                                              value: deleteAftermathOnLaunch,
+                                              onChanged: (value) {
+                                                setDialogState(
+                                                  () =>
+                                                      deleteAftermathOnLaunch =
+                                                          value,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.web_asset_off_rounded,
-                                        title: 'Headless',
-                                        subtitle:
-                                            'Disables game rendering to save resources',
-                                        trailing: Switch(
-                                          value: headless,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => headless = value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.groups_rounded,
-                                        title: 'Multi-Client Launching',
-                                        subtitle:
-                                            'Allows Launch to open additional game clients while one is already running',
-                                        trailing: Switch(
-                                          value: allowMultipleClients,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () =>
-                                                  allowMultipleClients = value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.cloud_rounded,
-                                        title: 'Launch ATLAS Backend with Game',
-                                        subtitle:
-                                            'Start ATLAS Backend when launching a session',
-                                        trailing: Switch(
-                                          value: launchBackend,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => launchBackend = value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.restart_alt_rounded,
-                                        title: 'Automatic Restart',
-                                        subtitle:
-                                            'Automatically restarts the game server when it exits',
-                                        trailing: Switch(
-                                          value: autoRestart,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => autoRestart = value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      settingTile(
-                                        icon: Icons.warning_amber_rounded,
-                                        title: 'Delete GFSDK_Aftermath_Lib.dll',
-                                        subtitle:
-                                            'Removes the Aftermath DLL from the game directory when launching the game',
-                                        trailing: Switch(
-                                          value: deleteAftermathOnLaunch,
-                                          onChanged: (value) {
-                                            setDialogState(
-                                              () => deleteAftermathOnLaunch =
-                                                  value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ],
+                                    ),
                                   ),
                                 ),
                               ),
@@ -10503,14 +12287,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Future<void> _showInjectorDialog() async {
     if (!mounted) return;
     await _loadInjectorDllLibrary();
+    await _loadInstalledMods();
     if (!mounted) return;
     final bundledOptions = _bundledInjectorDlls();
+    final installedModOptions = _installedModInjectorDlls();
     final targets = _manualInjectionTargets();
     final injectorScrollController = ScrollController();
     final injectorSearchController = TextEditingController();
     var customOptions = List<_SavedInjectorDll>.from(_injectorDllLibrary);
     var injectorSearchQuery = '';
     final selectedCustomDlls = <String>{};
+    final selectedInstalledModDlls = <String>{};
     final selectedBundledDlls = <String>{};
     int? selectedPid = targets.isEmpty ? null : targets.first.pid;
 
@@ -10540,6 +12327,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       ).colorScheme.secondary;
                       final selectedCount =
                           selectedCustomDlls.length +
+                          selectedInstalledModDlls.length +
                           selectedBundledDlls.length;
                       final canInject =
                           selectedPid != null && selectedCount > 0;
@@ -10556,8 +12344,23 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                     option.path,
                                   ).toLowerCase().contains(normalizedSearch);
                             }).toList();
+                      final visibleInstalledModOptions =
+                          normalizedSearch.isEmpty
+                          ? installedModOptions
+                          : installedModOptions.where((option) {
+                              return option.label.toLowerCase().contains(
+                                    normalizedSearch,
+                                  ) ||
+                                  _basename(
+                                    option.path,
+                                  ).toLowerCase().contains(normalizedSearch);
+                            }).toList();
 
                       String customKey(_SavedInjectorDll option) {
+                        return _normalizePath(option.path);
+                      }
+
+                      String installedModKey(_SavedInjectorDll option) {
                         return _normalizePath(option.path);
                       }
 
@@ -10570,6 +12373,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         setDialogState(() {
                           if (!selectedCustomDlls.add(key)) {
                             selectedCustomDlls.remove(key);
+                          }
+                        });
+                      }
+
+                      void toggleInstalledMod(_SavedInjectorDll option) {
+                        final key = installedModKey(option);
+                        setDialogState(() {
+                          if (!selectedInstalledModDlls.add(key)) {
+                            selectedInstalledModDlls.remove(key);
                           }
                         });
                       }
@@ -10590,6 +12402,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         final selected = <({String label, String path})>[];
                         for (final option in customOptions) {
                           if (!selectedCustomDlls.contains(customKey(option))) {
+                            continue;
+                          }
+                          selected.add((
+                            label: option.label,
+                            path: option.path,
+                          ));
+                        }
+                        for (final option in installedModOptions) {
+                          if (!selectedInstalledModDlls.contains(
+                            installedModKey(option),
+                          )) {
                             continue;
                           }
                           selected.add((
@@ -10894,6 +12717,61 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                   size: 18,
                                                 ),
                                               ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                          ],
+                                        Divider(
+                                          height: 26,
+                                          color: onSurface.withValues(
+                                            alpha: 0.16,
+                                          ),
+                                        ),
+                                        sectionHeader('Installed Mods'),
+                                        if (installedModOptions.isEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 12,
+                                            ),
+                                            child: Text(
+                                              'No DLL mods installed yet.',
+                                              style: TextStyle(
+                                                color: onSurface.withValues(
+                                                  alpha: 0.56,
+                                                ),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          )
+                                        else if (visibleInstalledModOptions
+                                            .isEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 12,
+                                            ),
+                                            child: Text(
+                                              'No installed mods match your search.',
+                                              style: TextStyle(
+                                                color: onSurface.withValues(
+                                                  alpha: 0.56,
+                                                ),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          )
+                                        else
+                                          for (final option
+                                              in visibleInstalledModOptions) ...[
+                                            _injectorDllTile(
+                                              context: dialogContext,
+                                              title: option.label,
+                                              subtitle: option.path,
+                                              enabled: selectedPid != null,
+                                              selected: selectedInstalledModDlls
+                                                  .contains(
+                                                    installedModKey(option),
+                                                  ),
+                                              onTap: () =>
+                                                  toggleInstalledMod(option),
                                             ),
                                             const SizedBox(height: 8),
                                           ],
@@ -13263,7 +15141,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'This will restore ATLAS Link to a default state and make it feel like a fresh install.',
+                          'This will restore ATLAS Link to a default state and make it feel like a fresh install. Any downloaded embedded backends (NeoniteV2 / LawinServer) will be removed and can be downloaded again from the Backend tab.',
                           style: TextStyle(
                             color: _onSurface(dialogContext, 0.86),
                             height: 1.35,
@@ -13394,9 +15272,24 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       Directory(_joinPath([_dataDir.path, 'launcher-installer'])),
     );
     await deleteDir(Directory(_joinPath([_dataDir.path, 'dlls'])));
+    await deleteDir(Directory(_joinPath([_dataDir.path, 'mods'])));
+
+    // Remove any downloaded/installed embedded backends so a reset truly feels
+    // like a fresh install (the Backend tab will show "Download" again). Target
+    // the installed location next to the executable specifically, so this never
+    // deletes a development source tree resolved from the working directory.
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    await deleteDir(
+      Directory(
+        _joinPath([exeDir, 'data', 'flutter_assets', 'assets', 'backend']),
+      ),
+    );
+
     await deleteFile(_installStateFile);
     await deleteFile(_settingsFile);
     await deleteFile(_dllPresetsFile);
+    await deleteFile(_modsLibraryCacheFile);
+    await deleteFile(_installedModsFile);
     await deleteFile(_logFile);
 
     _logs.clear();
@@ -13430,6 +15323,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         _bundledDllUpdatedFileNames = <String>{};
         _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
         _dllPresets = <_DllPreset>[];
+        _modsLibrary = <_AtlasModEntry>[];
+        _installedModsById = <String, _InstalledAtlasMod>{};
+        _modsType = _AtlasModType.pak;
+        _modsLoadError = '';
+        _modsLoading = false;
+        _modsSearchQuery = '';
         _dllPresetSeedVersion = 0;
         _launcherUpdateDialogVisible = false;
         _launcherUpdateAutoCheckQueued = false;
@@ -13482,6 +15381,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       _bundledDllUpdatedFileNames = <String>{};
       _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
       _dllPresets = <_DllPreset>[];
+      _modsLibrary = <_AtlasModEntry>[];
+      _installedModsById = <String, _InstalledAtlasMod>{};
+      _modsType = _AtlasModType.pak;
+      _modsLoadError = '';
+      _modsLoading = false;
+      _modsSearchQuery = '';
       _dllPresetSeedVersion = 0;
       _launcherUpdateDialogVisible = false;
       _launcherUpdateAutoCheckQueued = false;
@@ -13513,6 +15418,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     }
 
     _librarySearchController.clear();
+    _modsSearchController.clear();
 
     _syncControllers();
     _shellEntranceController.stop();
@@ -15306,12 +17212,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           Positioned.fill(
             child: Builder(
               builder: (context) {
+                // Until settings are loaded (and the resolved background image
+                // is precached in _bootstrap), paint only the opaque base color.
+                // This avoids flashing the bundled default background and then a
+                // black gap while the user's custom image decodes from disk.
                 final background = DecoratedBox(
                   decoration: BoxDecoration(
-                    image: DecorationImage(
-                      image: _backgroundImage(),
-                      fit: BoxFit.cover,
-                    ),
+                    color: const Color(0xFF0A0E14),
+                    image: _startupConfigResolved
+                        ? DecorationImage(
+                            image: _backgroundImage(),
+                            fit: BoxFit.cover,
+                          )
+                        : null,
                   ),
                 );
                 if (blurSigma <= 0.01) return background;
@@ -15674,8 +17587,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       ),
               ),
             ),
+          // Only build the intro after bootstrap resolves settings and
+          // precaches the selected background. The native runner shows the
+          // window on Flutter's first allowed frame, so this keeps launch from
+          // exposing a half-loaded background before the animation starts.
           if (_startupConfigResolved && _showStartup)
-            _AtlasStartupAnimationOverlay(onFinished: _finishStartupAnimation),
+            _AtlasStartupAnimationOverlay(
+              key: const ValueKey('atlas-startup-overlay'),
+              onFinished: _finishStartupAnimation,
+            ),
         ],
       ),
     );
@@ -15824,6 +17744,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           ),
         ],
       ),
+      LauncherTab.mods => Text(
+        'Mods',
+        style: TextStyle(
+          fontSize: 52,
+          fontWeight: FontWeight.w700,
+          color: _onSurface(context, 0.95),
+        ),
+      ),
       LauncherTab.stats => Text(
         'Stats',
         style: TextStyle(
@@ -15906,31 +17834,52 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
 
     final nav = _tabCapsule();
-    if (compact) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (showLeft) leftTitle,
-          if (showLeft && (showNav || right.children.isNotEmpty))
-            const SizedBox(height: 12),
-          if (showNav) Align(alignment: Alignment.center, child: nav),
-          if (right.children.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Align(alignment: Alignment.centerRight, child: right),
-          ],
-        ],
-      );
-    }
     return SizedBox(
-      height: 72,
-      child: Stack(
-        fit: StackFit.expand,
+      height: compact ? 64 : 72,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          if (showLeft)
-            Align(alignment: Alignment.centerLeft, child: leftTitle),
-          if (showNav) Align(alignment: Alignment.center, child: nav),
-          if (right.children.isNotEmpty)
-            Align(alignment: Alignment.centerRight, child: right),
+          Expanded(
+            flex: 3,
+            child: showLeft
+                ? Align(
+                    alignment: Alignment.centerLeft,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: leftTitle,
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 4,
+            child: showNav
+                ? Align(
+                    alignment: Alignment.center,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.center,
+                      child: nav,
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 3,
+            child: right.children.isNotEmpty
+                ? Align(
+                    alignment: Alignment.centerRight,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: right,
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
         ],
       ),
     );
@@ -16623,9 +18572,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         <({String title, String description, String assetPath, String url})>[
           (
             title: 'FortForge',
-            description: 'https://builds.fortforge.dev/builds',
+            description: 'https://www.fortforge.co.uk/builds',
             assetPath: 'assets/images/fortforge.png',
-            url: 'https://builds.fortforge.dev/builds',
+            url: 'https://www.fortforge.co.uk/builds',
           ),
           (
             title: 'Carbon',
@@ -16929,6 +18878,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             onTap: () => unawaited(_switchMenu(LauncherTab.backend)),
           ),
           (
+            key: 'mods',
+            label: 'Mods',
+            icon: Icons.extension_rounded,
+            selected: _tab == LauncherTab.mods,
+            onTap: () => unawaited(_switchMenu(LauncherTab.mods)),
+          ),
+          (
             key: 'stats',
             label: 'Stats',
             icon: Icons.bar_chart_rounded,
@@ -17143,6 +19099,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final child = switch (_tab) {
       LauncherTab.home => _homeTab(),
       LauncherTab.library => _libraryTab(),
+      LauncherTab.mods => _modsTab(),
       LauncherTab.stats => _statsTab(),
       LauncherTab.backend => _backendTab(),
       LauncherTab.general => _generalTab(),
@@ -17173,6 +19130,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return switch (_tab) {
       LauncherTab.home => 'Browsing Homepage',
       LauncherTab.library => 'Browsing Library',
+      LauncherTab.mods => 'Browsing Mods',
       LauncherTab.stats => 'Reviewing Stats',
       LauncherTab.backend => 'Configuring Backend',
       LauncherTab.general => 'Editing Settings',
@@ -17273,6 +19231,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       unawaited(
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
       );
+    }
+    if (tab == LauncherTab.mods) {
+      unawaited(_loadModsLibrary());
     }
     _syncLibraryActionsNudgePulse();
     _syncLauncherDiscordPresence();
@@ -18147,11 +20108,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    Expanded(child: searchInput),
+                    clearAllButton,
                     const SizedBox(width: 8),
                     sortButton,
                     const SizedBox(width: 8),
-                    clearAllButton,
+                    Expanded(child: searchInput),
                   ],
                 ),
               ],
@@ -18166,11 +20127,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
                 ),
               ),
-              SizedBox(width: 300, child: searchInput),
+              clearAllButton,
               const SizedBox(width: 8),
               sortButton,
               const SizedBox(width: 8),
-              clearAllButton,
+              SizedBox(width: 300, child: searchInput),
             ],
           );
         },
@@ -18383,65 +20344,85 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     required String value,
     required String subtitle,
   }) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        color: _adaptiveScrimColor(context, darkAlpha: 0.08, lightAlpha: 0.16),
-        border: Border.all(color: _onSurface(context, 0.08)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              color: Theme.of(context).colorScheme.secondary.withValues(
-                alpha: _isDarkTheme(context) ? 0.16 : 0.12,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 330;
+        final iconSize = compact ? 34.0 : 38.0;
+        final secondary = Theme.of(context).colorScheme.secondary;
+        return Container(
+          padding: EdgeInsets.all(compact ? 14 : 18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            color: _adaptiveScrimColor(
+              context,
+              darkAlpha: 0.08,
+              lightAlpha: 0.16,
+            ),
+            border: Border.all(color: _onSurface(context, 0.08)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: iconSize,
+                height: iconSize,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      secondary.withValues(alpha: 0.30),
+                      secondary.withValues(alpha: 0.12),
+                    ],
+                  ),
+                  border: Border.all(color: secondary.withValues(alpha: 0.42)),
+                ),
+                child: Icon(
+                  icon,
+                  size: compact ? 17 : 19,
+                  color: secondary.withValues(alpha: 0.95),
+                ),
               ),
-            ),
-            child: Icon(
-              icon,
-              size: 19,
-              color: Theme.of(context).colorScheme.secondary,
-            ),
+              SizedBox(height: compact ? 12 : 14),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: compact ? 12.5 : 13,
+                  fontWeight: FontWeight.w700,
+                  color: _onSurface(context, 0.68),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                value,
+                maxLines: compact ? 1 : 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: compact ? 21 : 24,
+                  fontWeight: FontWeight.w800,
+                  color: _onSurface(context, 0.96),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                maxLines: compact ? 1 : 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: compact ? 12.5 : 13,
+                  height: 1.3,
+                  fontWeight: FontWeight.w600,
+                  color: _onSurface(context, 0.7),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 14),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: _onSurface(context, 0.68),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w800,
-              color: _onSurface(context, 0.96),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            subtitle,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
-              height: 1.3,
-              fontWeight: FontWeight.w600,
-              color: _onSurface(context, 0.7),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -18679,7 +20660,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 620;
-          final showInsightPanel = constraints.maxWidth >= 900;
+          final showInsightPanel = constraints.maxWidth >= 980;
           const cardContentPadding = 16.0;
           const sectionSpacing = 18.0;
           const summarySpacing = 12.0;
@@ -18836,6 +20817,1616 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  Widget _modsTab() {
+    if (!_modsLoading && _modsLibrary.isEmpty && _modsLoadError.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _tab == LauncherTab.mods) {
+          unawaited(_loadModsLibrary());
+        }
+      });
+    }
+
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final query = _modsSearchQuery.trim().toLowerCase();
+    // Mods of the current type that match the search (before the All/Installed
+    // filter) — used both for the counts and as the base list to filter.
+    final typeSearchMods = _modsLibrary.where((mod) {
+      if (mod.type != _modsType) return false;
+      if (query.isEmpty) return true;
+      return mod.name.toLowerCase().contains(query) ||
+          mod.author.toLowerCase().contains(query) ||
+          mod.cardDescription.toLowerCase().contains(query) ||
+          mod.description.toLowerCase().contains(query) ||
+          mod.version.toLowerCase().contains(query) ||
+          mod.tags.any((tag) => tag.toLowerCase().contains(query));
+    }).toList();
+    final allCount = typeSearchMods.length;
+    final installedCount = typeSearchMods.where(_isAtlasModInstalled).length;
+    final visibleMods = _modsInstalledFilter == _ModsInstalledFilter.installed
+        ? typeSearchMods.where(_isAtlasModInstalled).toList()
+        : typeSearchMods;
+    final showFilterBar = _modsLoadError.isEmpty && _modsLibrary.isNotEmpty;
+    final hasInstalledMods = _installedAtlasModsSnapshot().isNotEmpty;
+    final showBlockingLoading = _modsLoading && _modsLibrary.isEmpty;
+
+    final search = TextField(
+      controller: _modsSearchController,
+      onChanged: (value) => setState(() => _modsSearchQuery = value),
+      decoration: _backendFieldDecoration(hintText: 'Search mods').copyWith(
+        prefixIcon: Icon(
+          Icons.search_rounded,
+          color: onSurface.withValues(alpha: 0.72),
+          size: 18,
+        ),
+        suffixIcon: _modsSearchQuery.trim().isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Clear search',
+                onPressed: () {
+                  _modsSearchController.clear();
+                  setState(() => _modsSearchQuery = '');
+                },
+                icon: const Icon(Icons.close_rounded, size: 18),
+              ),
+      ),
+    );
+    final refresh = _versionCardAction(
+      icon: Icons.refresh_rounded,
+      tooltip: 'Refresh mods',
+      busy: _modsLoading,
+      onTap: _modsLoading
+          ? null
+          : () => unawaited(_loadModsLibrary(forceRefresh: true)),
+    );
+    final clearInstalled = _versionCardAction(
+      icon: Icons.delete_sweep_rounded,
+      tooltip: 'Clear installed mods',
+      onTap: hasInstalledMods
+          ? () => unawaited(_clearInstalledAtlasMods())
+          : null,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _menuItemEntrance(
+          menuKey: LauncherTab.mods,
+          index: 0,
+          child: _glass(
+            radius: 24,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact = constraints.maxWidth < 1000;
+                  if (compact) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _modsHeaderTitle(),
+                        const SizedBox(height: 12),
+                        _modsSegmentedControl(),
+                      ],
+                    );
+                  }
+
+                  // Wide: a single compact row — title + segmented control grouped
+                  // on the left, search + tools on the right (fills the bar so it
+                  // doesn't read as empty).
+                  return Row(
+                    children: [
+                      _modsHeaderTitle(),
+                      const Spacer(),
+                      _modsSegmentedControl(),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Expanded(
+          child: _menuItemEntrance(
+            menuKey: LauncherTab.mods,
+            index: 1,
+            child: _glass(
+              radius: 24,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 0, 16),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  layoutBuilder: (currentChild, previousChildren) {
+                    return currentChild ?? const SizedBox.shrink();
+                  },
+                  child: Scrollbar(
+                    key: ValueKey(
+                      'mods-scroll-${_modsType.name}-${_modsInstalledFilter.name}-${showBlockingLoading
+                          ? 'loading'
+                          : _modsLoadError.isNotEmpty
+                          ? 'error'
+                          : visibleMods.isEmpty
+                          ? 'empty'
+                          : 'grid'}',
+                    ),
+                    controller: _modsScrollController,
+                    thumbVisibility: true,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 16),
+                      child: ScrollConfiguration(
+                        behavior: ScrollConfiguration.of(
+                          context,
+                        ).copyWith(scrollbars: false),
+                        child: CustomScrollView(
+                          controller: _modsScrollController,
+                          clipBehavior: Clip.none,
+                          slivers: [
+                            if (showFilterBar) ...[
+                              SliverToBoxAdapter(
+                                child: _modsFilterBar(
+                                  allCount: allCount,
+                                  installedCount: installedCount,
+                                  search: search,
+                                  refresh: refresh,
+                                  clearInstalled: clearInstalled,
+                                ),
+                              ),
+                              const SliverToBoxAdapter(
+                                child: SizedBox(height: 14),
+                              ),
+                            ],
+                            if (showBlockingLoading)
+                              const SliverFillRemaining(
+                                hasScrollBody: false,
+                                child: Center(
+                                  key: ValueKey('mods-loading'),
+                                  child: CircularProgressIndicator(),
+                                ),
+                              )
+                            else if (_modsLoadError.isNotEmpty)
+                              SliverFillRemaining(
+                                hasScrollBody: false,
+                                child: _modsCenteredState(
+                                  key: const ValueKey('mods-error'),
+                                  icon: Icons.cloud_off_rounded,
+                                  title: _modsLoadError,
+                                  subtitle:
+                                      'Check the ATLAS-Resources repo and try refresh.',
+                                ),
+                              )
+                            else if (visibleMods.isEmpty)
+                              SliverFillRemaining(
+                                hasScrollBody: false,
+                                child: _modsCenteredState(
+                                  key: const ValueKey('mods-empty'),
+                                  icon:
+                                      _modsInstalledFilter ==
+                                          _ModsInstalledFilter.installed
+                                      ? Icons.download_done_rounded
+                                      : Icons.extension_off_rounded,
+                                  title:
+                                      _modsInstalledFilter ==
+                                          _ModsInstalledFilter.installed
+                                      ? 'No Installed ${_modsType.folderName}'
+                                      : 'No ${_modsType.folderName} available',
+                                  subtitle: _modsSearchQuery.trim().isNotEmpty
+                                      ? 'No mods match your search.'
+                                      : _modsInstalledFilter ==
+                                            _ModsInstalledFilter.installed
+                                      ? 'Install a mod and it will appear here.'
+                                      : 'There are currently no available ${_modsType.folderName} to download.',
+                                ),
+                              )
+                            else
+                              SliverLayoutBuilder(
+                                builder: (context, constraints) {
+                                  final columns =
+                                      constraints.crossAxisExtent >= 1040
+                                      ? 2
+                                      : 1;
+                                  return SliverPadding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      4,
+                                      6,
+                                      8,
+                                      12,
+                                    ),
+                                    sliver: SliverGrid(
+                                      gridDelegate:
+                                          SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: columns,
+                                            crossAxisSpacing: 16,
+                                            mainAxisSpacing: 16,
+                                            mainAxisExtent: columns == 1
+                                                ? 138
+                                                : 150,
+                                          ),
+                                      delegate: SliverChildBuilderDelegate(
+                                        (
+                                          context,
+                                          index,
+                                        ) => _modGridItemEntrance(
+                                          switchKey:
+                                              '${_modsType.name}-${_modsInstalledFilter.name}-${visibleMods[index].id}',
+                                          index: index,
+                                          child: _atlasModCard(
+                                            visibleMods[index],
+                                          ),
+                                        ),
+                                        childCount: visibleMods.length,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Centered empty/error/loading state shown inside the mods content panel.
+  Widget _modsCenteredState({
+    required Key key,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Center(
+      key: key,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 34, color: onSurface.withValues(alpha: 0.6)),
+          const SizedBox(height: 12),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: onSurface.withValues(alpha: 0.92),
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: onSurface.withValues(alpha: 0.6),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Toolbar inside the content panel: filter between all and installed mods.
+  Widget _modsFilterBar({
+    required int allCount,
+    required int installedCount,
+    required Widget search,
+    required Widget refresh,
+    required Widget clearInstalled,
+  }) {
+    final chips = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _modsFilterChip(
+          label: 'All',
+          count: allCount,
+          selected: _modsInstalledFilter == _ModsInstalledFilter.all,
+          onTap: () =>
+              setState(() => _modsInstalledFilter = _ModsInstalledFilter.all),
+        ),
+        const SizedBox(width: 8),
+        _modsFilterChip(
+          label: 'Installed',
+          count: installedCount,
+          selected: _modsInstalledFilter == _ModsInstalledFilter.installed,
+          onTap: () => setState(
+            () => _modsInstalledFilter = _ModsInstalledFilter.installed,
+          ),
+        ),
+      ],
+    );
+
+    final tools = Row(
+      children: [
+        clearInstalled,
+        const SizedBox(width: 8),
+        refresh,
+        const SizedBox(width: 8),
+        Expanded(child: search),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 760;
+        if (compact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [chips, const SizedBox(height: 10), tools],
+          );
+        }
+
+        return Row(
+          children: [
+            chips,
+            const Spacer(),
+            SizedBox(width: 360, child: tools),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _modsFilterChip({
+    required String label,
+    required int count,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: selected
+                ? secondary.withValues(alpha: 0.18)
+                : onSurface.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected
+                  ? secondary.withValues(alpha: 0.50)
+                  : onSurface.withValues(alpha: 0.10),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: onSurface.withValues(alpha: selected ? 0.95 : 0.72),
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? secondary.withValues(alpha: 0.30)
+                      : onSurface.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  '$count',
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: selected ? 0.92 : 0.62),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modGridItemEntrance({
+    required String switchKey,
+    required int index,
+    required Widget child,
+  }) {
+    if (MediaQuery.of(context).disableAnimations) return child;
+
+    final delay = (0.045 * min(index, 8)).clamp(0.0, 0.36);
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('mod-card-$switchKey'),
+      tween: Tween<double>(begin: 0.0, end: 1.0),
+      duration: const Duration(milliseconds: 480),
+      curve: Interval(delay, 1.0, curve: Curves.easeOutCubic),
+      builder: (context, t, child) {
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 14),
+            child: child,
+          ),
+        );
+      },
+      child: child,
+    );
+  }
+
+  // Title block for the Mods header: an accent icon chip + title + subtitle.
+  Widget _modsHeaderTitle() {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    final total = _modsLibrary.length;
+    final subtitle = total == 0
+        ? 'Community mods for your ATLAS builds'
+        : '$total mod${total == 1 ? '' : 's'} available from ATLAS Resources';
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 46,
+          height: 46,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                secondary.withValues(alpha: 0.30),
+                secondary.withValues(alpha: 0.12),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: secondary.withValues(alpha: 0.42)),
+          ),
+          child: Icon(
+            Icons.extension_rounded,
+            color: secondary.withValues(alpha: 0.95),
+            size: 24,
+          ),
+        ),
+        const SizedBox(width: 13),
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Mod Library',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 23,
+                height: 1.05,
+                fontWeight: FontWeight.w800,
+                color: onSurface.withValues(alpha: 0.97),
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: onSurface.withValues(alpha: 0.62),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // Segmented toggle for the mod type (Paks / DLLs) with live counts. Uses a
+  // single sliding highlight behind fixed-width segments so switching animates
+  // smoothly instead of flickering per-segment.
+  Widget _modsSegmentedControl() {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    const segWidth = 122.0;
+    const segHeight = 38.0;
+    final types = _AtlasModType.values;
+    final selectedIndex = types.indexOf(_modsType).clamp(0, types.length - 1);
+    final highlightAlign = types.length <= 1
+        ? 0.0
+        : (selectedIndex / (types.length - 1)) * 2 - 1;
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: onSurface.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(color: onSurface.withValues(alpha: 0.10)),
+      ),
+      child: SizedBox(
+        width: segWidth * types.length,
+        height: segHeight,
+        child: Stack(
+          children: [
+            AnimatedAlign(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment(highlightAlign, 0),
+              child: Container(
+                width: segWidth,
+                height: segHeight,
+                decoration: BoxDecoration(
+                  color: secondary.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                for (final type in types)
+                  SizedBox(
+                    width: segWidth,
+                    height: segHeight,
+                    child: _modsSegmentLabel(type),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _modsSegmentLabel(_AtlasModType type) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final selected = _modsType == type;
+    final icon = type == _AtlasModType.pak
+        ? Icons.inventory_2_rounded
+        : Icons.science_rounded;
+    // GestureDetector (not InkWell) so there's no ripple/circle on tap — only
+    // the sliding highlight animates.
+    return MouseRegion(
+      cursor: selected ? MouseCursor.defer : SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: selected ? null : () => setState(() => _modsType = type),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: selected
+                    ? Colors.white
+                    : onSurface.withValues(alpha: 0.70),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                type.folderName,
+                style: TextStyle(
+                  color: selected
+                      ? Colors.white
+                      : onSurface.withValues(alpha: 0.80),
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _atlasModCard(_AtlasModEntry mod) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    final installed = _isAtlasModInstalled(mod);
+    final descriptionPreview = _plainTextMarkdownPreview(
+      mod.cardDescription.trim().isNotEmpty
+          ? mod.cardDescription
+          : mod.description,
+    );
+    final image = _launcherContentImageProvider(
+      mod.primaryImage,
+      fallbackAsset: 'assets/images/missingasset.webp',
+    );
+    final cardRadius = BorderRadius.circular(18);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 520;
+        final bgCacheWidth =
+            ((constraints.maxWidth.isFinite ? constraints.maxWidth : 520.0) *
+                    MediaQuery.of(context).devicePixelRatio)
+                .round()
+                .clamp(1, 4096);
+        final thumbSize = compact ? 78.0 : 88.0;
+
+        final thumb = ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image(
+            image: image,
+            width: thumbSize,
+            height: thumbSize,
+            fit: BoxFit.cover,
+            alignment: Alignment.center,
+            filterQuality: FilterQuality.high,
+            errorBuilder: (context, error, stackTrace) {
+              return Image.asset(
+                'assets/images/missingasset.webp',
+                width: thumbSize,
+                height: thumbSize,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.high,
+              );
+            },
+          ),
+        );
+
+        // Pills are fully metadata-driven: the optional version pill and any
+        // free-form tags from the mod's metadata.json. Tags are capped to fit
+        // the card; overflow collapses into a "+N" pill (the details dialog
+        // shows the full list). "Installed" is launcher runtime state.
+        final maxVisibleTags = compact ? 1 : 3;
+        final visibleTags = mod.tags.length <= maxVisibleTags
+            ? mod.tags
+            : mod.tags.take(maxVisibleTags).toList();
+        final hiddenTagCount = mod.tags.length - visibleTags.length;
+        final pills = Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            if (mod.version.trim().isNotEmpty)
+              _modPill(
+                mod.version.trim(),
+                icon: Icons.sell_rounded,
+                prominent: true,
+              ),
+            for (final tag in visibleTags) _modPill(tag),
+            if (hiddenTagCount > 0) _modPill('+$hiddenTagCount'),
+            if (installed)
+              _modPill(
+                'Installed',
+                icon: Icons.check_rounded,
+                color: secondary,
+              ),
+          ],
+        );
+
+        final details = Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              mod.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: onSurface.withValues(alpha: 0.98),
+                fontSize: compact ? 20 : 23,
+                height: 1,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              mod.author,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: onSurface.withValues(alpha: 0.72),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              descriptionPreview.isEmpty
+                  ? 'No description provided.'
+                  : descriptionPreview,
+              maxLines: compact ? 1 : 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: onSurface.withValues(alpha: 0.74),
+                height: 1.22,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 9),
+            pills,
+          ],
+        );
+
+        return _HoverScale(
+          scale: 1.01,
+          child: InkWell(
+            borderRadius: cardRadius,
+            onTap: () => unawaited(_showAtlasModDetails(mod)),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              decoration: BoxDecoration(
+                borderRadius: cardRadius,
+                boxShadow: installed
+                    ? [
+                        BoxShadow(
+                          color: secondary.withValues(alpha: 0.34),
+                          blurRadius: 24,
+                          spreadRadius: 0.7,
+                        ),
+                        BoxShadow(
+                          color: _adaptiveScrimColor(
+                            context,
+                            darkAlpha: 0.30,
+                            lightAlpha: 0.10,
+                          ),
+                          blurRadius: 16,
+                          offset: const Offset(0, 8),
+                        ),
+                      ]
+                    : [
+                        BoxShadow(
+                          color: _adaptiveScrimColor(
+                            context,
+                            darkAlpha: 0.18,
+                            lightAlpha: 0.08,
+                          ),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+              ),
+              child: ClipRRect(
+                borderRadius: cardRadius,
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: ImageFiltered(
+                        imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
+                        child: Image(
+                          image: ResizeImage(image, width: bgCacheWidth),
+                          fit: BoxFit.cover,
+                          filterQuality: FilterQuality.low,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Image.asset(
+                              'assets/images/missingasset.webp',
+                              fit: BoxFit.cover,
+                              filterQuality: FilterQuality.low,
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    Positioned.fill(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.50,
+                                lightAlpha: 0.30,
+                              ),
+                              _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.40,
+                                lightAlpha: 0.18,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: cardRadius,
+                            border: Border.all(
+                              color: installed
+                                  ? secondary.withValues(alpha: 0.82)
+                                  : onSurface.withValues(alpha: 0.20),
+                              width: installed ? 1.35 : 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      child: Row(
+                        children: [
+                          thumb,
+                          const SizedBox(width: 14),
+                          Expanded(child: details),
+                          const SizedBox(width: 10),
+                          Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: _adaptiveScrimColor(
+                                context,
+                                darkAlpha: 0.22,
+                                lightAlpha: 0.24,
+                              ),
+                              border: Border.all(
+                                color: onSurface.withValues(alpha: 0.22),
+                              ),
+                            ),
+                            child: Icon(
+                              Icons.chevron_right_rounded,
+                              color: onSurface.withValues(alpha: 0.88),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _plainTextMarkdownPreview(String value) {
+    var text = value
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .replaceAll(RegExp(r'```[\s\S]*?```'), ' ')
+        .replaceAllMapped(RegExp(r'`([^`]*)`'), (match) => match.group(1) ?? '')
+        .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]+\)'), ' ')
+        .replaceAllMapped(
+          RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+          (match) => match.group(1) ?? '',
+        )
+        .replaceAll(RegExp(r'^\s{0,3}#{1,6}\s*', multiLine: true), '')
+        .replaceAll(RegExp(r'^\s{0,3}[-*_]{3,}\s*$', multiLine: true), ' ')
+        .replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '')
+        .replaceAll(RegExp(r'^\s*\d+[.)]\s+', multiLine: true), '')
+        .replaceAll(RegExp(r'[*_~>#]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return text;
+  }
+
+  Widget _modPill(
+    String label, {
+    IconData? icon,
+    Color? color,
+    bool prominent = false,
+  }) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final base = color ?? Theme.of(context).colorScheme.secondary;
+    final neutralFillAlpha = prominent ? 0.54 : 0.50;
+    final neutralBorderAlpha = prominent ? 0.34 : 0.32;
+    final textColor = color == null
+        ? Colors.white.withValues(alpha: prominent ? 1.0 : 0.94)
+        : Colors.white;
+    return Container(
+      padding: EdgeInsets.fromLTRB(icon == null ? 10 : 8, 5, 10, 5),
+      decoration: BoxDecoration(
+        color: color == null
+            ? Colors.black.withValues(alpha: neutralFillAlpha)
+            : base.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: color == null
+              ? Colors.white.withValues(alpha: neutralBorderAlpha)
+              : base.withValues(alpha: 0.68),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.18),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(
+              icon,
+              size: 12,
+              color: color == null
+                  ? onSurface.withValues(alpha: prominent ? 0.95 : 0.78)
+                  : Colors.white,
+            ),
+            const SizedBox(width: 5),
+          ],
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: textColor,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _atlasModMediaSlide(
+    BuildContext context,
+    _AtlasModMedia media, {
+    required ValueChanged<bool> onWatchingChanged,
+  }) {
+    if (media.type == _AtlasModMediaType.image) {
+      return Image(
+        image: _launcherContentImageProvider(
+          media.url,
+          fallbackAsset: 'assets/images/missingasset.webp',
+        ),
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          return Image.asset(
+            'assets/images/missingasset.webp',
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.medium,
+          );
+        },
+      );
+    }
+    return _AtlasModPlaybackViewer(
+      media: media,
+      onWatchingChanged: onWatchingChanged,
+      onOpenExternal: (url) => unawaited(_openUrl(url)),
+    );
+  }
+
+  Future<void> _showAtlasModDetails(_AtlasModEntry mod) async {
+    if (!mounted) return;
+    final media = mod.detailMedia;
+    final pageController = PageController();
+    final detailsScrollController = ScrollController();
+    Timer? mediaTimer;
+    final watchingMediaIndexes = <int>{};
+    var imageIndex = 0;
+    var actionBusy = false;
+    var mediaHover = false;
+    const mediaSwitchDuration = Duration(milliseconds: 360);
+    const mediaSwitchCurve = Curves.easeOutCubic;
+
+    void animateToMedia(
+      int index,
+      void Function(void Function()) setDialogState,
+    ) {
+      if (media.isEmpty) return;
+      final nextIndex = index % media.length;
+      final previousIndex = imageIndex;
+      pageController.animateToPage(
+        nextIndex,
+        duration: mediaSwitchDuration,
+        curve: mediaSwitchCurve,
+      );
+      if (previousIndex != nextIndex) {
+        setDialogState(() => imageIndex = nextIndex);
+      }
+    }
+
+    void startMediaTimer(void Function(void Function()) setDialogState) {
+      mediaTimer?.cancel();
+      if (media.length <= 1) return;
+      if (watchingMediaIndexes.contains(imageIndex % media.length)) return;
+      final seconds = _activeLauncherContentPage.heroRotationSeconds;
+      if (seconds <= 0) return;
+      mediaTimer = Timer.periodic(Duration(seconds: seconds), (_) {
+        if (!mounted || !pageController.hasClients) return;
+        if (watchingMediaIndexes.contains(imageIndex % media.length)) {
+          mediaTimer?.cancel();
+          mediaTimer = null;
+          return;
+        }
+        animateToMedia(imageIndex + 1, setDialogState);
+      });
+    }
+
+    void selectMedia(
+      int index,
+      void Function(void Function()) setDialogState, {
+      bool restartTimer = true,
+    }) {
+      animateToMedia(index, setDialogState);
+      if (restartTimer) startMediaTimer(setDialogState);
+    }
+
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.transparent,
+        transitionDuration: const Duration(milliseconds: 220),
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    return ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: 760,
+                        maxHeight: constraints.maxHeight * 0.92,
+                      ),
+                      child: StatefulBuilder(
+                        builder: (dialogContext, setDialogState) {
+                          if (mediaTimer == null && media.length > 1) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (dialogContext.mounted) {
+                                startMediaTimer(setDialogState);
+                              }
+                            });
+                          }
+                          final onSurface = Theme.of(
+                            dialogContext,
+                          ).colorScheme.onSurface;
+                          final secondary = Theme.of(
+                            dialogContext,
+                          ).colorScheme.secondary;
+                          final installed = _isAtlasModInstalled(mod);
+                          return Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 20),
+                            padding: const EdgeInsets.fromLTRB(20, 20, 0, 18),
+                            decoration: BoxDecoration(
+                              color: _dialogSurfaceColor(dialogContext),
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(
+                                color: _onSurface(dialogContext, 0.12),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _dialogShadowColor(dialogContext),
+                                  blurRadius: 34,
+                                  offset: const Offset(0, 18),
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Flexible(
+                                  child: Scrollbar(
+                                    controller: detailsScrollController,
+                                    thumbVisibility: true,
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(right: 20),
+                                      child: ScrollConfiguration(
+                                        behavior: ScrollConfiguration.of(
+                                          dialogContext,
+                                        ).copyWith(scrollbars: false),
+                                        child: SingleChildScrollView(
+                                          controller: detailsScrollController,
+                                          primary: false,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              MouseRegion(
+                                                onEnter: (_) => setDialogState(
+                                                  () => mediaHover = true,
+                                                ),
+                                                onExit: (_) => setDialogState(
+                                                  () => mediaHover = false,
+                                                ),
+                                                child: ClipRRect(
+                                                  borderRadius:
+                                                      BorderRadius.circular(18),
+                                                  child: AspectRatio(
+                                                    aspectRatio: 16 / 8.4,
+                                                    child: Stack(
+                                                      fit: StackFit.expand,
+                                                      children: [
+                                                        PageView.builder(
+                                                          controller:
+                                                              pageController,
+                                                          itemCount:
+                                                              media.length,
+                                                          onPageChanged: (index) {
+                                                            setDialogState(
+                                                              () => imageIndex =
+                                                                  index,
+                                                            );
+                                                            startMediaTimer(
+                                                              setDialogState,
+                                                            );
+                                                          },
+                                                          itemBuilder: (context, index) {
+                                                            return _atlasModMediaSlide(
+                                                              dialogContext,
+                                                              media[index],
+                                                              onWatchingChanged: (watching) {
+                                                                if (watching) {
+                                                                  watchingMediaIndexes
+                                                                      .add(
+                                                                        index,
+                                                                      );
+                                                                } else {
+                                                                  watchingMediaIndexes
+                                                                      .remove(
+                                                                        index,
+                                                                      );
+                                                                }
+                                                                if (index ==
+                                                                    imageIndex) {
+                                                                  if (watching) {
+                                                                    mediaTimer
+                                                                        ?.cancel();
+                                                                    mediaTimer =
+                                                                        null;
+                                                                  } else {
+                                                                    startMediaTimer(
+                                                                      setDialogState,
+                                                                    );
+                                                                  }
+                                                                }
+                                                              },
+                                                            );
+                                                          },
+                                                        ),
+                                                        if (mod.version
+                                                            .trim()
+                                                            .isNotEmpty)
+                                                          Positioned(
+                                                            top: 12,
+                                                            right: 12,
+                                                            child: _modPill(
+                                                              mod.version
+                                                                  .trim(),
+                                                              icon: Icons
+                                                                  .sell_rounded,
+                                                              prominent: true,
+                                                            ),
+                                                          ),
+                                                        if (media.length > 1 &&
+                                                            mediaHover)
+                                                          Positioned(
+                                                            left: 12,
+                                                            top: 0,
+                                                            bottom: 0,
+                                                            child: Center(
+                                                              child: _modMediaNavButton(
+                                                                dialogContext,
+                                                                Icons
+                                                                    .chevron_left_rounded,
+                                                                () => selectMedia(
+                                                                  imageIndex -
+                                                                      1,
+                                                                  setDialogState,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        if (media.length > 1 &&
+                                                            mediaHover)
+                                                          Positioned(
+                                                            right: 12,
+                                                            top: 0,
+                                                            bottom: 0,
+                                                            child: Center(
+                                                              child: _modMediaNavButton(
+                                                                dialogContext,
+                                                                Icons
+                                                                    .chevron_right_rounded,
+                                                                () => selectMedia(
+                                                                  imageIndex +
+                                                                      1,
+                                                                  setDialogState,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        if (media.length > 1)
+                                                          Positioned(
+                                                            bottom: 12,
+                                                            left: 0,
+                                                            right: 0,
+                                                            child: Row(
+                                                              mainAxisAlignment:
+                                                                  MainAxisAlignment
+                                                                      .center,
+                                                              children: [
+                                                                for (
+                                                                  var index = 0;
+                                                                  index <
+                                                                      media
+                                                                          .length;
+                                                                  index++
+                                                                )
+                                                                  GestureDetector(
+                                                                    behavior:
+                                                                        HitTestBehavior
+                                                                            .opaque,
+                                                                    onTap: () =>
+                                                                        selectMedia(
+                                                                          index,
+                                                                          setDialogState,
+                                                                        ),
+                                                                    child: AnimatedContainer(
+                                                                      duration: const Duration(
+                                                                        milliseconds:
+                                                                            160,
+                                                                      ),
+                                                                      width:
+                                                                          index ==
+                                                                              imageIndex
+                                                                          ? 22
+                                                                          : 8,
+                                                                      height: 8,
+                                                                      margin: const EdgeInsets.symmetric(
+                                                                        horizontal:
+                                                                            3,
+                                                                        vertical:
+                                                                            6,
+                                                                      ),
+                                                                      decoration: BoxDecoration(
+                                                                        color: Colors.white.withValues(
+                                                                          alpha:
+                                                                              index ==
+                                                                                  imageIndex
+                                                                              ? 0.95
+                                                                              : 0.46,
+                                                                        ),
+                                                                        borderRadius:
+                                                                            BorderRadius.circular(
+                                                                              999,
+                                                                            ),
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                              ],
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 18),
+                                              Text(
+                                                mod.name,
+                                                style: Theme.of(dialogContext)
+                                                    .textTheme
+                                                    .headlineSmall
+                                                    ?.copyWith(
+                                                      fontWeight:
+                                                          FontWeight.w900,
+                                                    ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                mod.author,
+                                                style: TextStyle(
+                                                  color: onSurface.withValues(
+                                                    alpha: 0.64,
+                                                  ),
+                                                  fontWeight: FontWeight.w800,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 12),
+                                              MarkdownBody(
+                                                selectable: true,
+                                                data:
+                                                    mod.description
+                                                        .trim()
+                                                        .isEmpty
+                                                    ? 'No description provided.'
+                                                    : mod.description,
+                                                styleSheet:
+                                                    MarkdownStyleSheet.fromTheme(
+                                                      Theme.of(dialogContext),
+                                                    ).copyWith(
+                                                      p: TextStyle(
+                                                        color: onSurface
+                                                            .withValues(
+                                                              alpha: 0.78,
+                                                            ),
+                                                        height: 1.35,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                      listBullet: TextStyle(
+                                                        color: onSurface
+                                                            .withValues(
+                                                              alpha: 0.78,
+                                                            ),
+                                                        height: 1.35,
+                                                        fontWeight:
+                                                            FontWeight.w800,
+                                                      ),
+                                                      a: TextStyle(
+                                                        color: secondary,
+                                                        fontWeight:
+                                                            FontWeight.w800,
+                                                      ),
+                                                      horizontalRuleDecoration:
+                                                          BoxDecoration(
+                                                            border: Border(
+                                                              top: BorderSide(
+                                                                width: 1.6,
+                                                                color: _onSurface(
+                                                                  dialogContext,
+                                                                  0.16,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                    ),
+                                                onTapLink:
+                                                    (text, href, title) async {
+                                                      if (href == null ||
+                                                          href.trim().isEmpty) {
+                                                        return;
+                                                      }
+                                                      await _openUrl(href);
+                                                    },
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _modMetaChip(
+                                      dialogContext,
+                                      Icons.folder_rounded,
+                                      mod.type.folderName,
+                                    ),
+                                    _modMetaChip(
+                                      dialogContext,
+                                      Icons.download_rounded,
+                                      '${mod.files.length} file${mod.files.length == 1 ? '' : 's'}',
+                                    ),
+                                    if (mod.version.trim().isNotEmpty)
+                                      _modMetaChip(
+                                        dialogContext,
+                                        Icons.sell_rounded,
+                                        mod.version.trim(),
+                                      ),
+                                    for (final tag in mod.tags)
+                                      _modMetaChip(dialogContext, null, tag),
+                                  ],
+                                ),
+                                const SizedBox(height: 16),
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 20),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: [
+                                      _dialogCancelButton(
+                                        dialogContext,
+                                        onPressed: actionBusy
+                                            ? null
+                                            : () => Navigator.of(
+                                                dialogContext,
+                                              ).pop(),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: Wrap(
+                                            alignment: WrapAlignment.end,
+                                            runSpacing: 8,
+                                            spacing: 8,
+                                            children: [
+                                              OutlinedButton.icon(
+                                                onPressed: () => unawaited(
+                                                  _openUrl(
+                                                    mod.sourceUrl.trim().isEmpty
+                                                        ? _atlasResourcesRepository
+                                                        : mod.sourceUrl,
+                                                  ),
+                                                ),
+                                                style: OutlinedButton.styleFrom(
+                                                  shape: const StadiumBorder(),
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 16,
+                                                        vertical: 11,
+                                                      ),
+                                                  side: BorderSide(
+                                                    color: _onSurface(
+                                                      dialogContext,
+                                                      0.14,
+                                                    ),
+                                                  ),
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.open_in_new_rounded,
+                                                  size: 18,
+                                                ),
+                                                label: const Text('Source'),
+                                              ),
+                                              FilledButton.icon(
+                                                onPressed: actionBusy
+                                                    ? null
+                                                    : () async {
+                                                        setDialogState(
+                                                          () =>
+                                                              actionBusy = true,
+                                                        );
+                                                        if (installed) {
+                                                          await _uninstallAtlasMod(
+                                                            mod,
+                                                          );
+                                                        } else {
+                                                          await _installAtlasMod(
+                                                            mod,
+                                                          );
+                                                        }
+                                                        if (dialogContext
+                                                            .mounted) {
+                                                          setDialogState(
+                                                            () => actionBusy =
+                                                                false,
+                                                          );
+                                                        }
+                                                      },
+                                                style: FilledButton.styleFrom(
+                                                  backgroundColor: installed
+                                                      ? const Color(0xFFB3261E)
+                                                      : secondary,
+                                                  foregroundColor: Colors.white,
+                                                  disabledBackgroundColor:
+                                                      _onSurface(
+                                                        dialogContext,
+                                                        0.16,
+                                                      ),
+                                                  disabledForegroundColor:
+                                                      _onSurface(
+                                                        dialogContext,
+                                                        0.5,
+                                                      ),
+                                                  shape: const StadiumBorder(),
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 18,
+                                                        vertical: 12,
+                                                      ),
+                                                ),
+                                                icon: actionBusy
+                                                    ? const SizedBox(
+                                                        width: 18,
+                                                        height: 18,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                              strokeWidth: 2,
+                                                              color:
+                                                                  Colors.white,
+                                                            ),
+                                                      )
+                                                    : Icon(
+                                                        installed
+                                                            ? Icons
+                                                                  .delete_outline_rounded
+                                                            : Icons
+                                                                  .download_rounded,
+                                                      ),
+                                                label: Text(
+                                                  actionBusy
+                                                      ? (installed
+                                                            ? 'Removing...'
+                                                            : 'Installing...')
+                                                      : (installed
+                                                            ? 'Uninstall'
+                                                            : 'Install'),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: _dialogPopupTransition,
+      );
+    } finally {
+      mediaTimer?.cancel();
+      pageController.dispose();
+      detailsScrollController.dispose();
+    }
+  }
+
+  Widget _modMediaNavButton(
+    BuildContext context,
+    IconData icon,
+    VoidCallback onPressed,
+  ) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onPressed,
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.black.withValues(alpha: 0.34),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+          ),
+          child: Icon(icon, size: 25, color: onSurface.withValues(alpha: 0.92)),
+        ),
+      ),
+    );
+  }
+
+  Widget _modMetaChip(BuildContext context, IconData? icon, String label) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: onSurface.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: onSurface.withValues(alpha: 0.1)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 15, color: onSurface.withValues(alpha: 0.68)),
+            const SizedBox(width: 6),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              color: onSurface.withValues(alpha: 0.78),
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _statsTab() {
     final activeTrackedVersions = _activeTrackedVersions();
     final liveTrackingActive = activeTrackedVersions.isNotEmpty;
@@ -18927,7 +22518,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               padding: const EdgeInsets.all(24),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final compact = constraints.maxWidth < 860;
+                  final compact = constraints.maxWidth < 980;
                   const summaryStripSpacing = 12.0;
                   final visibleSplashCount = min(
                     activeTrackedVersions.length,
@@ -18984,7 +22575,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       Text(
                         _formatTrackedPlaytime(totalTrackedSeconds),
                         style: TextStyle(
-                          fontSize: compact ? 46 : 60,
+                          fontSize: compact
+                              ? (constraints.maxWidth * 0.10)
+                                    .clamp(34.0, 46.0)
+                                    .toDouble()
+                              : 60,
                           height: 0.98,
                           fontWeight: FontWeight.w800,
                           color: _onSurface(context, 0.98),
@@ -19130,9 +22725,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               padding: const EdgeInsets.all(18),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final columns = constraints.maxWidth >= 1120
+                  final columns = constraints.maxWidth >= 900
                       ? 3
-                      : constraints.maxWidth >= 720
+                      : constraints.maxWidth >= 620
                       ? 2
                       : 1;
                   const spacing = 12.0;
@@ -19182,7 +22777,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   return Wrap(
                     spacing: spacing,
                     runSpacing: spacing,
-                    children: cards.reversed.toList(growable: false),
+                    children: cards,
                   );
                 },
               ),
@@ -19254,7 +22849,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                         : 0,
                     onTap: _advanceStatsSortMode,
                   );
-                  final compactHeader = constraints.maxWidth < 880;
+                  final compactHeader = constraints.maxWidth < 980;
                   final searchClusterWidth = compactHeader
                       ? min(460.0, constraints.maxWidth)
                       : min(430.0, max(350.0, constraints.maxWidth * 0.32));
@@ -19263,11 +22858,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Expanded(child: searchInput),
+                        clearTimeButton,
                         const SizedBox(width: 8),
                         statsSortButton,
                         const SizedBox(width: 8),
-                        clearTimeButton,
+                        Expanded(child: searchInput),
                       ],
                     ),
                   );
@@ -19857,35 +23452,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   ),
                                 ),
                                 const SizedBox(height: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(999),
-                                    color: _adaptiveScrimColor(
-                                      context,
-                                      darkAlpha: 0.24,
-                                      lightAlpha: 0.30,
-                                    ),
-                                    border: Border.all(
-                                      color: onSurface.withValues(alpha: 0.28),
-                                    ),
-                                  ),
-                                  child: Text(
-                                    versionPill == '?'
-                                        ? 'Unknown'
-                                        : versionPill,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: onSurface.withValues(alpha: 0.95),
-                                      fontWeight: FontWeight.w700,
-                                      height: 1.05,
-                                    ),
-                                  ),
+                                _modPill(
+                                  versionPill == '?' ? 'Unknown' : versionPill,
+                                  icon: Icons.sell_rounded,
+                                  prominent: true,
                                 ),
                               ],
                             ),
@@ -19949,17 +23519,28 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     required VoidCallback? onTap,
     double iconRotation = 0,
     Color? iconColor,
+    bool busy = false,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
+    final resolvedColor = iconColor ?? onSurface.withValues(alpha: 0.92);
     return Tooltip(
       message: tooltip,
       child: IconButton(
         onPressed: onTap,
-        icon: Transform.rotate(
-          angle: iconRotation,
-          child: Icon(icon, size: 18),
-        ),
-        color: iconColor ?? onSurface.withValues(alpha: 0.92),
+        icon: busy
+            ? SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(resolvedColor),
+                ),
+              )
+            : Transform.rotate(
+                angle: iconRotation,
+                child: Icon(icon, size: 18),
+              ),
+        color: resolvedColor,
         style: IconButton.styleFrom(
           minimumSize: const Size(32, 32),
           padding: const EdgeInsets.all(6),
@@ -20019,7 +23600,20 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         _settings.backendConnectionType == BackendConnectionType.embedded
         ? _settings.embeddedBackendType.label
         : 'ATLAS Backend';
-    final backendLaunchLabel = _atlasBackendActionBusy
+    // The selected embedded backend may not be installed on disk (the installer
+    // makes each backend optional). When missing, the primary action becomes a
+    // download instead of a launch.
+    final selectedEmbeddedBackend = _settings.embeddedBackendType;
+    final selectedEmbeddedMissing =
+        _settings.backendConnectionType == BackendConnectionType.embedded &&
+        !_embeddedBackendInstalled(selectedEmbeddedBackend);
+    final isDownloadingSelectedBackend =
+        _downloadingBackend == selectedEmbeddedBackend;
+    final backendLaunchLabel = selectedEmbeddedMissing
+        ? (isDownloadingSelectedBackend
+              ? 'Downloading ${selectedEmbeddedBackend.label}...'
+              : 'Download ${selectedEmbeddedBackend.label}')
+        : _atlasBackendActionBusy
         ? backendBusyLabel
         : _atlasBackendProcess != null
         ? 'Stop Backend'
@@ -20043,15 +23637,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       });
     }
 
-    final shouldShrinkBackendPanel =
-        _settings.backendConnectionType != BackendConnectionType.remote;
     final backendPanel = _glass(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          mainAxisSize: shouldShrinkBackendPanel
-              ? MainAxisSize.min
-              : MainAxisSize.max,
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
@@ -20156,9 +23746,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       width: 42,
                       height: 42,
                       child: IconButton(
-                        tooltip: 'Open backend folder',
-                        onPressed: () =>
-                            unawaited(_openEmbeddedBackendFolder()),
+                        tooltip: selectedEmbeddedMissing
+                            ? 'Backend not installed'
+                            : 'Open backend folder',
+                        onPressed: selectedEmbeddedMissing
+                            ? null
+                            : () => unawaited(_openEmbeddedBackendFolder()),
                         icon: const Icon(Icons.folder_open_rounded, size: 20),
                       ),
                     ),
@@ -20311,13 +23904,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             LayoutBuilder(
               builder: (context, constraints) {
                 final compactActions = constraints.maxWidth < 980;
-                final backendLaunchEnabled =
-                    canUseManagedBackend &&
-                    !backendActionBusy &&
-                    (_settings.backendConnectionType ==
-                            BackendConnectionType.embedded ||
-                        _atlasBackendProcess != null ||
-                        !_backendOnline);
+                final backendLaunchEnabled = selectedEmbeddedMissing
+                    ? _downloadingBackend == null
+                    : canUseManagedBackend &&
+                          !backendActionBusy &&
+                          (_settings.backendConnectionType ==
+                                  BackendConnectionType.embedded ||
+                              _atlasBackendProcess != null ||
+                              !_backendOnline);
                 const buttonTextStyle = TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 15,
@@ -20325,7 +23919,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
                 final launchButton = FilledButton.icon(
                   onPressed: backendLaunchEnabled
-                      ? (_atlasBackendProcess != null
+                      ? (selectedEmbeddedMissing
+                            ? () => unawaited(
+                                _downloadEmbeddedBackend(
+                                  selectedEmbeddedBackend,
+                                ),
+                              )
+                            : _atlasBackendProcess != null
                             ? _stopManagedBackend
                             : _launchManagedBackend)
                       : null,
@@ -20341,7 +23941,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     elevation: 0,
                   ),
                   icon: Icon(
-                    _atlasBackendProcess != null
+                    selectedEmbeddedMissing
+                        ? Icons.download_rounded
+                        : _atlasBackendProcess != null
                         ? Icons.stop_rounded
                         : Icons.play_arrow_rounded,
                     size: 18,
@@ -20370,22 +23972,65 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   ),
                 );
 
-                final resetButton = OutlinedButton.icon(
-                  onPressed: backendActionBusy
-                      ? null
-                      : _resetBackendPreferences,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: onSurface.withValues(alpha: 0.9),
-                    side: BorderSide(color: onSurface.withValues(alpha: 0.22)),
-                    backgroundColor: onSurface.withValues(alpha: 0.03),
-                    minimumSize: const Size.fromHeight(48),
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: const StadiumBorder(),
-                    textStyle: buttonTextStyle,
-                  ),
-                  icon: const Icon(Icons.restart_alt_rounded, size: 18),
-                  label: const Text('Reset'),
-                );
+                // Third action button is mode-dependent:
+                //  - Embedded: "Delete Backend" removes the selected backend.
+                //  - Local: "Reset" reverts the port to default.
+                //  - Remote: "Reset" clears the host IP and reverts the port.
+                final Widget resetButton;
+                if (_settings.backendConnectionType ==
+                    BackendConnectionType.embedded) {
+                  final canDelete =
+                      !backendActionBusy &&
+                      _downloadingBackend == null &&
+                      _atlasBackendProcess == null &&
+                      _embeddedBackendInstalled(selectedEmbeddedBackend);
+                  const deleteColor = Color(0xFFB3261E);
+                  resetButton = FilledButton.icon(
+                    onPressed: canDelete
+                        ? _deleteSelectedEmbeddedBackend
+                        : null,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: deleteColor,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: onSurface.withValues(
+                        alpha: 0.15,
+                      ),
+                      disabledForegroundColor: onSurface.withValues(
+                        alpha: 0.58,
+                      ),
+                      minimumSize: const Size.fromHeight(48),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: const StadiumBorder(),
+                      textStyle: buttonTextStyle,
+                    ),
+                    icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                    label: const Text('Delete Backend'),
+                  );
+                } else {
+                  final isRemote =
+                      _settings.backendConnectionType ==
+                      BackendConnectionType.remote;
+                  resetButton = OutlinedButton.icon(
+                    onPressed: backendActionBusy
+                        ? null
+                        : (isRemote
+                              ? _resetRemoteBackendEndpoint
+                              : _resetLocalBackendPort),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: onSurface.withValues(alpha: 0.9),
+                      side: BorderSide(
+                        color: onSurface.withValues(alpha: 0.22),
+                      ),
+                      backgroundColor: onSurface.withValues(alpha: 0.03),
+                      minimumSize: const Size.fromHeight(48),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: const StadiumBorder(),
+                      textStyle: buttonTextStyle,
+                    ),
+                    icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                    label: const Text('Reset'),
+                  );
+                }
 
                 if (compactActions) {
                   return Column(
@@ -20417,10 +24062,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             if (_settings.backendConnectionType ==
                 BackendConnectionType.remote) ...[
               const SizedBox(height: 14),
-              if (_settings.savedBackends.isEmpty)
-                _savedBackendsPanel()
-              else
-                Expanded(child: _savedBackendsPanel()),
+              _savedBackendsPanel(),
             ],
           ],
         ),
@@ -20430,9 +24072,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return _menuItemEntrance(
       menuKey: LauncherTab.backend,
       index: 0,
-      child: shouldShrinkBackendPanel
-          ? Align(alignment: Alignment.topCenter, child: backendPanel)
-          : backendPanel,
+      child: SingleChildScrollView(
+        primary: false,
+        padding: const EdgeInsets.only(bottom: 18),
+        child: Align(alignment: Alignment.topCenter, child: backendPanel),
+      ),
     );
   }
 
@@ -20867,6 +24511,157 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       ]),
     );
     return packageMarker.existsSync();
+  }
+
+  /// Whether the given embedded backend's assets are present and complete on
+  /// disk (folder + entrypoint + node_modules + shared Node runtime).
+  bool _embeddedBackendInstalled(EmbeddedBackendType backend) {
+    return _resolveEmbeddedBackendWorkingDirectory(backend) != null;
+  }
+
+  /// Base `assets/backend` directory next to the running executable, where
+  /// downloaded backend payloads are extracted. Created if it does not exist.
+  String _embeddedBackendInstallRoot() {
+    final candidates = _bundledAssetPathCandidates(['assets', 'backend']);
+    for (final candidate in candidates) {
+      if (Directory(candidate).existsSync()) return candidate;
+    }
+    // None exist yet (fresh install with no backends): use the candidate next
+    // to the executable, which is where the app resolves bundled assets first.
+    return candidates.first;
+  }
+
+  Future<void> _downloadEmbeddedBackend(EmbeddedBackendType backend) async {
+    if (!Platform.isWindows) {
+      _toast('Downloading backends is only available on Windows');
+      return;
+    }
+    if (_downloadingBackend != null) return;
+    if (_embeddedBackendInstalled(backend)) {
+      await _checkBackendNow();
+      return;
+    }
+
+    setState(() => _downloadingBackend = backend);
+    _toastProgress(
+      'Preparing ${backend.label} download...',
+      progress: null,
+      indeterminate: true,
+    );
+
+    File? tempZip;
+    try {
+      final url = backend.downloadUrl;
+
+      final tempDir = await Directory.systemTemp.createTemp(
+        'atlas_link_backend_dl_',
+      );
+      tempZip = File(_joinPath([tempDir.path, backend.downloadAssetName]));
+
+      var lastPercent = -1;
+      await _downloadToFile(
+        url,
+        tempZip,
+        onProgress: (received, total) {
+          if (total == null || total <= 0) {
+            _toastProgress(
+              'Downloading ${backend.label}... ${_formatByteSize(received)}',
+              progress: null,
+              indeterminate: true,
+            );
+            return;
+          }
+          final fraction = received / total;
+          final percent = (fraction * 100).round();
+          if (percent == lastPercent) return;
+          lastPercent = percent;
+          _toastProgress(
+            'Downloading ${backend.label}... $percent%',
+            progress: fraction.clamp(0.0, 1.0),
+            indeterminate: false,
+          );
+        },
+      );
+
+      _toastProgress(
+        'Installing ${backend.label}...',
+        progress: null,
+        indeterminate: true,
+      );
+
+      final installRoot = _embeddedBackendInstallRoot();
+      await Directory(installRoot).create(recursive: true);
+      final extracted = await _extractZipWithPowerShell(
+        tempZip.path,
+        installRoot,
+      );
+      if (!extracted) {
+        if (mounted) _toast('Failed to install ${backend.label}');
+        return;
+      }
+
+      if (_embeddedBackendInstalled(backend)) {
+        if (mounted) {
+          setState(() {});
+          _toast('${backend.label} installed');
+        }
+      } else {
+        if (mounted) {
+          _toast(
+            '${backend.label} download finished but assets are incomplete',
+          );
+        }
+      }
+    } catch (error) {
+      _log('backend', 'Failed to download ${backend.label}: $error');
+      if (mounted) _toast('Failed to download ${backend.label}');
+    } finally {
+      _toastProgressDismiss();
+      try {
+        final zip = tempZip;
+        if (zip != null && zip.existsSync()) {
+          await zip.parent.delete(recursive: true);
+        }
+      } catch (_) {
+        // Ignore temp cleanup failures.
+      }
+      if (mounted) {
+        setState(() => _downloadingBackend = null);
+      } else {
+        _downloadingBackend = null;
+      }
+    }
+  }
+
+  Future<bool> _extractZipWithPowerShell(
+    String zipPath,
+    String destinationDir,
+  ) async {
+    final escapedZip = _escapePowerShellSingleQuotedValue(zipPath);
+    final escapedDest = _escapePowerShellSingleQuotedValue(destinationDir);
+    final command =
+        "Expand-Archive -LiteralPath '$escapedZip' "
+        "-DestinationPath '$escapedDest' -Force";
+    try {
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        command,
+      ], runInShell: true);
+      if (result.exitCode != 0) {
+        _log(
+          'backend',
+          'Expand-Archive failed (exit ${result.exitCode}): ${result.stderr}',
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      _log('backend', 'Expand-Archive threw: $error');
+      return false;
+    }
   }
 
   Future<File?> _openBackendLogTerminal(String backendName) async {
@@ -21788,6 +25583,25 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     File destination, {
     void Function(int receivedBytes, int? totalBytes)? onProgress,
   }) async {
+    final trimmed = url.trim();
+    final uri = Uri.tryParse(trimmed);
+    if (uri?.scheme.toLowerCase() == 'file') {
+      final source = File(uri!.toFilePath());
+      final length = await source.exists() ? await source.length() : 0;
+      await source.copy(destination.path);
+      onProgress?.call(length, length);
+      return;
+    }
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      final source = File(trimmed);
+      if (await source.exists()) {
+        final length = await source.length();
+        await source.copy(destination.path);
+        onProgress?.call(length, length);
+        return;
+      }
+    }
+
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20)
       ..userAgent = 'ATLAS-Link';
@@ -22110,29 +25924,117 @@ foreach ($app in $appPaths) {
     }
   }
 
-  Future<void> _resetBackendPreferences() async {
+  // Local mode reset: revert the backend port back to the default.
+  Future<void> _resetLocalBackendPort() async {
     setState(() {
       _settings = _settings.copyWith(
-        backendRuntimeProvider: BackendRuntimeProvider.atlas,
-        backendConnectionType: BackendConnectionType.local,
-        embeddedBackendType: EmbeddedBackendType.lawinServer,
-        backendHost: _defaultBackendHost,
-        backendPort: _defaultBackendPort,
         localBackendPort: _defaultBackendPort,
-        remoteBackendHost: '',
-        remoteBackendPort: _defaultBackendPort,
-        backendWorkingDirectory: '',
-        backendStartCommand: _defaultExternalBackendStartCommand,
+        backendPort: _defaultBackendPort,
       );
-      _backendHostController.text = '';
       _backendPortController.text = _defaultBackendPort.toString();
-      _backendDirController.text = '';
-      _backendCommandController.text = _defaultExternalBackendStartCommand;
     });
     await _saveSettings(toast: false);
     await _refreshRuntime();
     if (mounted) {
-      _toast('Backend settings reset');
+      _toast('Backend port reset to $_defaultBackendPort');
+    }
+  }
+
+  // Remote mode reset: clear the saved host IP and revert to the default port.
+  Future<void> _resetRemoteBackendEndpoint() async {
+    setState(() {
+      _settings = _settings.copyWith(
+        remoteBackendHost: '',
+        backendHost: '',
+        remoteBackendPort: _defaultBackendPort,
+        backendPort: _defaultBackendPort,
+      );
+      _backendHostController.text = '';
+      _backendPortController.text = _defaultBackendPort.toString();
+    });
+    await _saveSettings(toast: false);
+    await _refreshRuntime();
+    if (mounted) {
+      _toast('Remote backend reset');
+    }
+  }
+
+  // The installed backend payloads live next to the executable. Using this
+  // explicit path (rather than the working-directory search) ensures deletes
+  // never touch a development source tree.
+  String _installedEmbeddedBackendRoot() {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    return _joinPath([exeDir, 'data', 'flutter_assets', 'assets', 'backend']);
+  }
+
+  String _embeddedBackendFolderName(EmbeddedBackendType backend) =>
+      backend.bundledAssetDirectory.split('/').last;
+
+  String _embeddedBackendExeName(EmbeddedBackendType backend) =>
+      backend.executableAssetPath.split('/').last;
+
+  // Embedded mode "Delete Backend": remove the currently selected embedded
+  // backend from disk so the Backend tab shows "Download" again.
+  Future<void> _deleteSelectedEmbeddedBackend() async {
+    final backend = _settings.embeddedBackendType;
+    if (_downloadingBackend != null) return;
+    if (_atlasBackendProcess != null) {
+      _toast('Stop ${backend.label} before deleting it');
+      return;
+    }
+    if (!_embeddedBackendInstalled(backend)) {
+      _toast('${backend.label} is not installed');
+      return;
+    }
+
+    Future<void> deleteDir(Directory dir) async {
+      try {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      } catch (_) {
+        // Ignore cleanup failures (locks, permissions, etc.).
+      }
+    }
+
+    Future<void> deleteFile(File file) async {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Ignore cleanup failures (locks, permissions, etc.).
+      }
+    }
+
+    try {
+      await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+      final root = _installedEmbeddedBackendRoot();
+      await deleteDir(
+        Directory(_joinPath([root, _embeddedBackendFolderName(backend)])),
+      );
+      await deleteFile(
+        File(_joinPath([root, 'bin', _embeddedBackendExeName(backend)])),
+      );
+
+      // Remove the shared Node runtime (and the bin folder) only when no other
+      // embedded backend still needs it.
+      final otherStillInstalled = EmbeddedBackendType.values
+          .where((other) => other != backend)
+          .any(
+            (other) => Directory(
+              _joinPath([root, _embeddedBackendFolderName(other)]),
+            ).existsSync(),
+          );
+      if (!otherStillInstalled) {
+        await deleteDir(Directory(_joinPath([root, 'node'])));
+        await deleteDir(Directory(_joinPath([root, 'bin'])));
+      }
+
+      if (mounted) {
+        setState(() {});
+        _toast('${backend.label} deleted');
+      }
+      await _refreshRuntime();
+    } catch (error) {
+      _log('backend', 'Failed to delete ${backend.label}: $error');
+      if (mounted) _toast('Failed to delete ${backend.label}');
     }
   }
 
@@ -22148,6 +26050,45 @@ foreach ($app in $appPaths) {
         ? normalized.split(']').first.replaceFirst('[', '')
         : normalized.split(':').first;
     return bare.trim();
+  }
+
+  String _savedBackendStatusKey(String host, int port) {
+    return '${_backendHostKey(host)}:$port';
+  }
+
+  void _refreshSavedBackendStatus(SavedBackend entry, {bool force = false}) {
+    final key = _savedBackendStatusKey(entry.host, entry.port);
+    final cached = _savedBackendStatusCache[key];
+    if (!force &&
+        cached != null &&
+        DateTime.now().difference(cached.checkedAt) <
+            const Duration(seconds: 30)) {
+      return;
+    }
+    if (!_savedBackendStatusRefreshInFlight.add(key)) return;
+
+    unawaited(
+      Future<void>(() async {
+        try {
+          final online = await _pingBackend(entry.host, entry.port) != null;
+          if (!mounted) {
+            _savedBackendStatusCache[key] = (
+              online: online,
+              checkedAt: DateTime.now(),
+            );
+            return;
+          }
+          setState(() {
+            _savedBackendStatusCache[key] = (
+              online: online,
+              checkedAt: DateTime.now(),
+            );
+          });
+        } finally {
+          _savedBackendStatusRefreshInFlight.remove(key);
+        }
+      }),
+    );
   }
 
   Future<void> _saveCurrentRemoteBackend() async {
@@ -22198,6 +26139,7 @@ foreach ($app in $appPaths) {
     setState(() {
       _settings = _settingsWithSavedBackendsForActiveProfile(next);
     });
+    _refreshSavedBackendStatus(entry, force: true);
     await _saveSettings(toast: false, applyControllers: false);
     if (mounted) _toast('Saved backend: ${entry.name}');
   }
@@ -22224,9 +26166,13 @@ foreach ($app in $appPaths) {
 
     final next = List<SavedBackend>.from(_settings.savedBackends);
     next[index] = updated;
+    _savedBackendStatusCache.remove(
+      _savedBackendStatusKey(entry.host, entry.port),
+    );
     setState(() {
       _settings = _settingsWithSavedBackendsForActiveProfile(next);
     });
+    _refreshSavedBackendStatus(updated, force: true);
     await _saveSettings(toast: false, applyControllers: false);
     if (mounted) _toast('Updated backend: ${updated.name}');
   }
@@ -22387,17 +26333,23 @@ foreach ($app in $appPaths) {
                           children: [
                             Row(
                               children: [
-                                Icon(
+                                _dialogHeaderIconBadge(
+                                  dialogContext,
                                   Icons.edit_rounded,
-                                  color: _onSurface(dialogContext, 0.94),
                                 ),
-                                const SizedBox(width: 10),
-                                Text(
-                                  'Edit Saved Backend',
-                                  style: TextStyle(
-                                    fontSize: 34,
-                                    fontWeight: FontWeight.w700,
-                                    color: _onSurface(dialogContext, 0.96),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      'Edit Saved Backend',
+                                      style: TextStyle(
+                                        fontSize: 34,
+                                        fontWeight: FontWeight.w700,
+                                        color: _onSurface(dialogContext, 0.96),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ],
@@ -22465,7 +26417,6 @@ foreach ($app in $appPaths) {
                                     ),
                                     const SizedBox(height: 16),
                                     Row(
-                                      mainAxisAlignment: MainAxisAlignment.end,
                                       children: [
                                         _dialogCancelButton(
                                           dialogContext,
@@ -22473,7 +26424,7 @@ foreach ($app in $appPaths) {
                                             dialogContext,
                                           ).pop(null),
                                         ),
-                                        const SizedBox(width: 10),
+                                        const Spacer(),
                                         FilledButton.icon(
                                           onPressed: () =>
                                               submit(setDialogState),
@@ -22758,6 +26709,12 @@ foreach ($app in $appPaths) {
       );
     if (next.length == _settings.savedBackends.length) return;
 
+    _savedBackendStatusCache.remove(
+      _savedBackendStatusKey(entry.host, entry.port),
+    );
+    _savedBackendStatusRefreshInFlight.remove(
+      _savedBackendStatusKey(entry.host, entry.port),
+    );
     if (mounted) {
       setState(() {
         _settings = _settingsWithSavedBackendsForActiveProfile(next);
@@ -22773,6 +26730,8 @@ foreach ($app in $appPaths) {
     if (_settings.savedBackends.isEmpty) return;
     _savedBackendSearchController.clear();
     _savedBackendSearchQuery = '';
+    _savedBackendStatusCache.clear();
+    _savedBackendStatusRefreshInFlight.clear();
     if (mounted) {
       setState(() {
         _settings = _settingsWithSavedBackendsForActiveProfile(
@@ -22863,12 +26822,24 @@ foreach ($app in $appPaths) {
     );
 
     Widget header() {
-      final title = Text(
-        'Saved Backends',
-        style: TextStyle(
-          fontWeight: FontWeight.w800,
-          color: onSurface.withValues(alpha: 0.92),
-        ),
+      final title = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.bookmarks_rounded,
+            size: 18,
+            color: onSurface.withValues(alpha: 0.86),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            'Saved Backends',
+            style: TextStyle(
+              fontSize: 15.5,
+              fontWeight: FontWeight.w900,
+              color: onSurface.withValues(alpha: 0.96),
+            ),
+          ),
+        ],
       );
 
       if (saved.isEmpty) return title;
@@ -22948,7 +26919,7 @@ foreach ($app in $appPaths) {
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(14),
         color: onSurface.withValues(alpha: 0.04),
@@ -22961,158 +26932,145 @@ foreach ($app in $appPaths) {
           const SizedBox(height: 8),
           if (saved.isEmpty)
             emptyState
-          else
-            Expanded(
-              child: filtered.isEmpty
-                  ? Align(
-                      alignment: Alignment.topLeft,
-                      child: Text(
-                        'No saved backends match your search.',
-                        style: TextStyle(
-                          color: onSurface.withValues(alpha: 0.70),
-                          fontWeight: FontWeight.w600,
+          else if (filtered.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Text(
+                'No saved backends match your search.',
+                style: TextStyle(
+                  color: onSurface.withValues(alpha: 0.70),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            )
+          else ...[
+            for (var index = 0; index < filtered.length; index++) ...[
+              if (index > 0) const SizedBox(height: 8),
+              Builder(
+                builder: (context) {
+                  final entry = filtered[index];
+                  final statusKey = _savedBackendStatusKey(
+                    entry.host,
+                    entry.port,
+                  );
+                  final cachedStatus = _savedBackendStatusCache[statusKey];
+                  _refreshSavedBackendStatus(entry);
+
+                  final online = cachedStatus?.online;
+                  final statusColor = online == null
+                      ? onSurface.withValues(alpha: 0.35)
+                      : online
+                      ? const Color(0xFF16C47F)
+                      : const Color(0xFFDC3545);
+                  final statusTooltip = online == null
+                      ? 'Checking...'
+                      : online
+                      ? 'Online'
+                      : 'Offline';
+
+                  return Material(
+                    type: MaterialType.transparency,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () async {
+                        if (online != true) {
+                          _toast('Backend is offline');
+                          return;
+                        }
+                        setState(() {
+                          _settings = _settings.copyWith(
+                            backendConnectionType: BackendConnectionType.remote,
+                            remoteBackendHost: entry.host,
+                            remoteBackendPort: entry.port,
+                            backendHost: entry.host,
+                            backendPort: entry.port,
+                          );
+                          _backendHostController.text = entry.host;
+                          _backendPortController.text = entry.port.toString();
+                        });
+                        await _saveSettings(
+                          toast: false,
+                          applyControllers: false,
+                        );
+                        await _refreshRuntime(force: true);
+                        if (mounted) {
+                          _toast('Connected to ${entry.host}:${entry.port}');
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
                         ),
-                      ),
-                    )
-                  : ListView.separated(
-                      itemCount: filtered.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) {
-                        final entry = filtered[index];
-                        return FutureBuilder<Uri?>(
-                          future: _pingBackend(entry.host, entry.port),
-                          builder: (context, snapshot) {
-                            final checking =
-                                snapshot.connectionState ==
-                                ConnectionState.waiting;
-                            final online = snapshot.data != null;
-
-                            final statusColor = checking
-                                ? onSurface.withValues(alpha: 0.35)
-                                : online
-                                ? const Color(0xFF16C47F)
-                                : const Color(0xFFDC3545);
-                            final statusTooltip = checking
-                                ? 'Checking...'
-                                : online
-                                ? 'Online'
-                                : 'Offline';
-
-                            return Material(
-                              type: MaterialType.transparency,
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(12),
-                                onTap: () async {
-                                  if (!online) {
-                                    _toast('Backend is offline');
-                                    return;
-                                  }
-                                  setState(() {
-                                    _settings = _settings.copyWith(
-                                      backendConnectionType:
-                                          BackendConnectionType.remote,
-                                      remoteBackendHost: entry.host,
-                                      remoteBackendPort: entry.port,
-                                      backendHost: entry.host,
-                                      backendPort: entry.port,
-                                    );
-                                    _backendHostController.text = entry.host;
-                                    _backendPortController.text = entry.port
-                                        .toString();
-                                  });
-                                  await _saveSettings(
-                                    toast: false,
-                                    applyControllers: false,
-                                  );
-                                  await _refreshRuntime(force: true);
-                                  if (mounted) {
-                                    _toast(
-                                      'Connected to ${entry.host}:${entry.port}',
-                                    );
-                                  }
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 10,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(12),
-                                    color: onSurface.withValues(alpha: 0.04),
-                                    border: Border.all(
-                                      color: onSurface.withValues(alpha: 0.10),
-                                    ),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Tooltip(
-                                        message: statusTooltip,
-                                        child: Container(
-                                          width: 10,
-                                          height: 10,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: statusColor,
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              entry.name,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.w700,
-                                                color: onSurface.withValues(
-                                                  alpha: 0.92,
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(height: 2),
-                                            Text(
-                                              '${entry.host}:${entry.port}',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.w600,
-                                                color: onSurface.withValues(
-                                                  alpha: 0.72,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      _versionCardAction(
-                                        icon: Icons.edit_rounded,
-                                        tooltip: 'Edit backend',
-                                        onTap: () =>
-                                            unawaited(_editSavedBackend(entry)),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      _versionCardAction(
-                                        icon: Icons.delete_outline_rounded,
-                                        tooltip: 'Delete backend',
-                                        onTap: () => unawaited(
-                                          _removeSavedBackend(entry),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: onSurface.withValues(alpha: 0.04),
+                          border: Border.all(
+                            color: onSurface.withValues(alpha: 0.10),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Tooltip(
+                              message: statusTooltip,
+                              child: Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: statusColor,
                                 ),
                               ),
-                            );
-                          },
-                        );
-                      },
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    entry.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: onSurface.withValues(alpha: 0.92),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '${entry.host}:${entry.port}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      color: onSurface.withValues(alpha: 0.72),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            _versionCardAction(
+                              icon: Icons.edit_rounded,
+                              tooltip: 'Edit backend',
+                              onTap: () => unawaited(_editSavedBackend(entry)),
+                            ),
+                            const SizedBox(width: 6),
+                            _versionCardAction(
+                              icon: Icons.delete_outline_rounded,
+                              tooltip: 'Delete backend',
+                              onTap: () =>
+                                  unawaited(_removeSavedBackend(entry)),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-            ),
+                  );
+                },
+              ),
+            ],
+          ],
         ],
       ),
     );
@@ -23357,16 +27315,25 @@ foreach ($app in $appPaths) {
           child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('Profile', style: sectionTitleStyle),
                 const SizedBox(height: 14),
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    final compactProfile = constraints.maxWidth < 620;
-                    final avatarSize = compactProfile ? 96.0 : 112.0;
+                    final compactProfile = constraints.maxWidth < 760;
+                    final avatarSize = compactProfile
+                        ? min(96.0, max(76.0, constraints.maxWidth * 0.20))
+                        : 112.0;
+                    final nameFontSize =
+                        (compactProfile
+                                ? constraints.maxWidth * 0.12
+                                : constraints.maxWidth * 0.075)
+                            .clamp(34.0, 48.0)
+                            .toDouble();
                     final nameStyle = TextStyle(
-                      fontSize: compactProfile ? 42 : 48,
+                      fontSize: nameFontSize,
                       fontWeight: FontWeight.w700,
                       height: 1.0,
                     );
@@ -23484,6 +27451,7 @@ foreach ($app in $appPaths) {
                     }
 
                     final details = Column(
+                      mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
@@ -23611,6 +27579,7 @@ foreach ($app in $appPaths) {
 
                     if (compactProfile) {
                       return Column(
+                        mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [avatar, const SizedBox(height: 14), details],
                       );
@@ -24299,27 +28268,26 @@ foreach ($app in $appPaths) {
                 const SizedBox(height: 18),
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    final cards = credits
-                        .map((credit) => _creditProfileCard(credit))
-                        .toList(growable: false);
-                    if (constraints.maxWidth < 940) {
-                      return Column(
-                        children: [
-                          for (var i = 0; i < cards.length; i++) ...[
-                            if (i > 0) const SizedBox(height: 16),
-                            cards[i],
-                          ],
-                        ],
-                      );
-                    }
+                    const spacing = 16.0;
+                    final maxWidth = constraints.maxWidth;
+                    final columns = maxWidth >= 1180
+                        ? 4
+                        : maxWidth >= 820
+                        ? 2
+                        : 1;
+                    final cardWidth = columns == 1
+                        ? maxWidth
+                        : (maxWidth - ((columns - 1) * spacing)) / columns;
 
-                    return Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    return Wrap(
+                      spacing: spacing,
+                      runSpacing: spacing,
                       children: [
-                        for (var i = 0; i < cards.length; i++) ...[
-                          if (i > 0) const SizedBox(width: 16),
-                          Expanded(child: cards[i]),
-                        ],
+                        for (final credit in credits)
+                          SizedBox(
+                            width: cardWidth,
+                            child: _creditProfileCard(credit),
+                          ),
                       ],
                     );
                   },
@@ -24354,31 +28322,38 @@ foreach ($app in $appPaths) {
             ],
           );
         }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _menuItemEntrance(
-              menuKey: LauncherTab.general,
-              index: 0,
-              child: SizedBox(
-                width: 300,
-                child: _settingsSidebar(compact: false),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: _menuItemEntrance(
-                menuKey: LauncherTab.general,
-                index: 1,
-                child: _animatedSwap(
-                  switchKey: _settingsSection,
-                  duration: const Duration(milliseconds: 220),
-                  expand: true,
-                  child: body,
+        return Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _menuItemEntrance(
+                  menuKey: LauncherTab.general,
+                  index: 0,
+                  child: SizedBox(
+                    width: 300,
+                    child: _settingsSidebar(compact: false),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: _menuItemEntrance(
+                    menuKey: LauncherTab.general,
+                    index: 1,
+                    child: _animatedSwap(
+                      switchKey: _settingsSection,
+                      duration: const Duration(milliseconds: 220),
+                      expand: true,
+                      layoutAlignment: Alignment.topCenter,
+                      child: body,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         );
       },
     );
@@ -24395,18 +28370,17 @@ foreach ($app in $appPaths) {
     final keyed = KeyedSubtree(key: ValueKey(switchKey), child: child);
     if (MediaQuery.of(context).disableAnimations) return keyed;
 
-    return AnimatedSwitcher(
+    final switcher = AnimatedSwitcher(
       duration: duration,
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInCubic,
       layoutBuilder: (currentChild, previousChildren) {
-        return Stack(
-          fit: expand ? StackFit.expand : StackFit.loose,
+        // Do not keep outgoing page bodies alive in the layout. The settings
+        // panes can be tall and glassy, so overlapping old/new children during
+        // fast switching looks like stacked cards.
+        return Align(
           alignment: layoutAlignment,
-          children: [
-            ...previousChildren,
-            ...?(currentChild == null ? null : [currentChild]),
-          ],
+          child: currentChild ?? const SizedBox.shrink(),
         );
       },
       transitionBuilder: (child, animation) {
@@ -24429,6 +28403,9 @@ foreach ($app in $appPaths) {
       },
       child: keyed,
     );
+
+    if (!expand) return switcher;
+    return SizedBox(width: double.infinity, child: switcher);
   }
 
   Widget _menuItemEntrance({
@@ -24446,13 +28423,7 @@ foreach ($app in $appPaths) {
       duration: const Duration(milliseconds: 520),
       curve: curve,
       builder: (context, t, child) {
-        return Opacity(
-          opacity: t,
-          child: Transform.translate(
-            offset: Offset(0, (1 - t) * 12),
-            child: child,
-          ),
-        );
+        return Opacity(opacity: t, child: child);
       },
       child: child,
     );
@@ -24471,7 +28442,7 @@ foreach ($app in $appPaths) {
     }) {
       final selected = _settingsSection == section;
       return Padding(
-        padding: const EdgeInsets.only(bottom: 8),
+        padding: compact ? EdgeInsets.zero : const EdgeInsets.only(bottom: 8),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
           onTap: () {
@@ -24481,29 +28452,47 @@ foreach ($app in $appPaths) {
             _syncLauncherDiscordPresence();
           },
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 12 : 12,
+              vertical: compact ? 10 : 12,
+            ),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
               color: selected ? selectedColor : Colors.transparent,
             ),
             child: Row(
+              mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
               children: [
                 Icon(
                   icon,
-                  size: 20,
+                  size: compact ? 18 : 20,
                   color: _onSurface(context, selected ? 1.0 : 0.66),
                 ),
                 const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
+                if (compact)
+                  Text(
                     title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 17,
+                      fontSize: 14,
                       color: _onSurface(context, selected ? 1.0 : 0.82),
-                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 17,
+                        color: _onSurface(context, selected ? 1.0 : 0.82),
+                        fontWeight: selected
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -24514,53 +28503,84 @@ foreach ($app in $appPaths) {
     return _glass(
       radius: 24,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-        child: Column(
-          children: [
-            tile(
-              section: SettingsSection.profile,
-              icon: Icons.person_rounded,
-              title: 'Profile',
-            ),
-            tile(
-              section: SettingsSection.appearance,
-              icon: Icons.palette_rounded,
-              title: 'Appearance',
-            ),
-            tile(
-              section: SettingsSection.startup,
-              icon: Icons.power_settings_new_rounded,
-              title: 'Startup',
-            ),
-            tile(
-              section: SettingsSection.dataManagement,
-              icon: Icons.storage_rounded,
-              title: 'Data Management',
-            ),
-            tile(
-              section: SettingsSection.support,
-              icon: Icons.help_rounded,
-              title: 'Support',
-            ),
-            const SizedBox(height: 10),
-            if (!compact)
-              Container(height: 1, color: _onSurface(context, 0.12)),
-            const SizedBox(height: 12),
-            if (!compact)
-              OutlinedButton.icon(
-                onPressed: () => unawaited(
-                  _switchMenu(
-                    _settingsReturnTab,
-                    contentTabId: _settingsReturnTab == LauncherTab.home
-                        ? _settingsReturnContentTabId
-                        : null,
+        padding: EdgeInsets.fromLTRB(16, compact ? 12 : 16, 16, 16),
+        child: compact
+            ? Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  tile(
+                    section: SettingsSection.profile,
+                    icon: Icons.person_rounded,
+                    title: 'Profile',
                   ),
-                ),
-                icon: const Icon(Icons.logout_rounded),
-                label: const Text('Back'),
+                  tile(
+                    section: SettingsSection.appearance,
+                    icon: Icons.palette_rounded,
+                    title: 'Appearance',
+                  ),
+                  tile(
+                    section: SettingsSection.startup,
+                    icon: Icons.power_settings_new_rounded,
+                    title: 'Startup',
+                  ),
+                  tile(
+                    section: SettingsSection.dataManagement,
+                    icon: Icons.storage_rounded,
+                    title: 'Data Management',
+                  ),
+                  tile(
+                    section: SettingsSection.support,
+                    icon: Icons.help_rounded,
+                    title: 'Support',
+                  ),
+                ],
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  tile(
+                    section: SettingsSection.profile,
+                    icon: Icons.person_rounded,
+                    title: 'Profile',
+                  ),
+                  tile(
+                    section: SettingsSection.appearance,
+                    icon: Icons.palette_rounded,
+                    title: 'Appearance',
+                  ),
+                  tile(
+                    section: SettingsSection.startup,
+                    icon: Icons.power_settings_new_rounded,
+                    title: 'Startup',
+                  ),
+                  tile(
+                    section: SettingsSection.dataManagement,
+                    icon: Icons.storage_rounded,
+                    title: 'Data Management',
+                  ),
+                  tile(
+                    section: SettingsSection.support,
+                    icon: Icons.help_rounded,
+                    title: 'Support',
+                  ),
+                  const SizedBox(height: 10),
+                  Container(height: 1, color: _onSurface(context, 0.12)),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(
+                      _switchMenu(
+                        _settingsReturnTab,
+                        contentTabId: _settingsReturnTab == LauncherTab.home
+                            ? _settingsReturnContentTabId
+                            : null,
+                      ),
+                    ),
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Back'),
+                  ),
+                ],
               ),
-          ],
-        ),
       ),
     );
   }
@@ -24612,163 +28632,195 @@ foreach ($app in $appPaths) {
         ? secondary.withValues(alpha: 0.88)
         : const Color(0xFF1565C0);
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(24),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [cardTop, cardBottom],
-        ),
-        border: Border.all(color: _onSurface(context, 0.10)),
-        boxShadow: [
-          BoxShadow(
-            color: _glassShadowColor(
-              context,
-            ).withValues(alpha: dark ? 0.18 : 0.10),
-            blurRadius: 26,
-            offset: const Offset(0, 14),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 340;
+        final nameFontSize = compact ? 24.0 : 28.0;
+
+        return Container(
+          padding: EdgeInsets.all(compact ? 16 : 20),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(24),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [cardTop, cardBottom],
+            ),
+            border: Border.all(color: _onSurface(context, 0.10)),
+            boxShadow: [
+              BoxShadow(
+                color: _glassShadowColor(
+                  context,
+                ).withValues(alpha: dark ? 0.18 : 0.10),
+                blurRadius: 26,
+                offset: const Offset(0, 14),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _creditAvatar(avatarUrl: credit.avatarUrl),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(999),
-                        color: accent.withValues(alpha: dark ? 0.18 : 0.12),
-                        border: Border.all(
-                          color: accent.withValues(alpha: dark ? 0.36 : 0.24),
+              Flex(
+                direction: compact ? Axis.vertical : Axis.horizontal,
+                crossAxisAlignment: compact
+                    ? CrossAxisAlignment.start
+                    : CrossAxisAlignment.center,
+                children: [
+                  _creditAvatar(avatarUrl: credit.avatarUrl),
+                  SizedBox(width: compact ? 0 : 16, height: compact ? 14 : 0),
+                  Flexible(
+                    fit: compact ? FlexFit.loose : FlexFit.tight,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          constraints: const BoxConstraints(maxWidth: 190),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            color: accent.withValues(alpha: dark ? 0.18 : 0.12),
+                            border: Border.all(
+                              color: accent.withValues(
+                                alpha: dark ? 0.36 : 0.24,
+                              ),
+                            ),
+                          ),
+                          child: Text(
+                            credit.role,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: _onSurface(context, 0.92),
+                              fontSize: compact ? 12 : 12.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
-                      ),
-                      child: Text(
-                        credit.role,
-                        style: TextStyle(
-                          color: _onSurface(context, 0.92),
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
+                        const SizedBox(height: 12),
+                        Text(
+                          credit.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: nameFontSize,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(context, 0.96),
+                            height: 1.0,
+                          ),
                         ),
-                      ),
+                        const SizedBox(height: 5),
+                        Text(
+                          credit.handle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(context, 0.66),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      credit.name,
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w800,
-                        color: _onSurface(context, 0.96),
-                        height: 1.0,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              Text(
+                credit.description,
+                style: TextStyle(
+                  color: _onSurface(context, 0.82),
+                  height: 1.5,
+                  fontSize: 14.5,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Text(
+                'Projects',
+                style: TextStyle(
+                  color: _onSurface(context, 0.92),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final project in credit.projects)
+                    ActionChip(
+                      onPressed: () => unawaited(_openUrl(project.url)),
+                      backgroundColor: _onSurface(context, 0.06),
+                      side: BorderSide(color: _onSurface(context, 0.12)),
+                      avatar: Icon(
+                        Icons.open_in_new_rounded,
+                        size: 15,
+                        color: _onSurface(context, 0.82),
                       ),
-                    ),
-                    const SizedBox(height: 5),
-                    Text(
-                      credit.handle,
-                      style: TextStyle(
-                        fontSize: 14.5,
+                      label: Text(
+                        project.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      labelStyle: TextStyle(
+                        color: _onSurface(context, 0.90),
                         fontWeight: FontWeight.w600,
-                        color: _onSurface(context, 0.66),
                       ),
                     ),
-                  ],
-                ),
+                ],
               ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          Text(
-            credit.description,
-            style: TextStyle(
-              color: _onSurface(context, 0.82),
-              height: 1.5,
-              fontSize: 14.5,
-            ),
-          ),
-          const SizedBox(height: 18),
-          Text(
-            'Projects',
-            style: TextStyle(
-              color: _onSurface(context, 0.92),
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final project in credit.projects)
-                ActionChip(
-                  onPressed: () => unawaited(_openUrl(project.url)),
-                  backgroundColor: _onSurface(context, 0.06),
-                  side: BorderSide(color: _onSurface(context, 0.12)),
-                  avatar: Icon(
-                    Icons.open_in_new_rounded,
-                    size: 15,
-                    color: _onSurface(context, 0.82),
-                  ),
-                  label: Text(project.label),
-                  labelStyle: TextStyle(
-                    color: _onSurface(context, 0.90),
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              FilledButton.icon(
-                onPressed: () => unawaited(_openUrl(credit.githubUrl)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: dark
-                      ? const Color(0xFF0A0F18)
-                      : const Color(0xFF111827),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 14,
-                  ),
-                  shape: const StadiumBorder(),
-                ),
-                icon: const FaIcon(FontAwesomeIcons.github, size: 18),
-                label: Text('View ${credit.handle}'),
-              ),
-              if (credit.discordUrl != null && credit.discordLabel != null)
-                FilledButton.icon(
-                  onPressed: () => unawaited(_openUrl(credit.discordUrl!)),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFF5865F2),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 14,
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => unawaited(_openUrl(credit.githubUrl)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: dark
+                          ? const Color(0xFF0A0F18)
+                          : const Color(0xFF111827),
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: compact ? 14 : 18,
+                        vertical: 14,
+                      ),
+                      shape: const StadiumBorder(),
                     ),
-                    shape: const StadiumBorder(),
+                    icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+                    label: Text(
+                      'View ${credit.handle}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  icon: const Icon(Icons.discord_rounded, size: 18),
-                  label: Text(credit.discordLabel!),
-                ),
+                  if (credit.discordUrl != null && credit.discordLabel != null)
+                    FilledButton.icon(
+                      onPressed: () => unawaited(_openUrl(credit.discordUrl!)),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF5865F2),
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: compact ? 14 : 18,
+                          vertical: 14,
+                        ),
+                        shape: const StadiumBorder(),
+                      ),
+                      icon: const Icon(Icons.discord_rounded, size: 18),
+                      label: Text(
+                        credit.discordLabel!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+              ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -25094,7 +29146,7 @@ foreach ($app in $appPaths) {
 }
 
 class _AtlasStartupAnimationOverlay extends StatefulWidget {
-  const _AtlasStartupAnimationOverlay({required this.onFinished});
+  const _AtlasStartupAnimationOverlay({super.key, required this.onFinished});
 
   final VoidCallback onFinished;
 
@@ -26224,6 +30276,505 @@ class _SavedInjectorDll {
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{'label': label, 'path': path};
+  }
+}
+
+String _atlasPathBasename(String path) {
+  final normalized = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+  final parts = normalized.split('/');
+  if (parts.isEmpty) return normalized;
+  return parts.last;
+}
+
+class _AtlasModFile {
+  const _AtlasModFile({
+    required this.name,
+    required this.downloadUrl,
+    required this.relativePath,
+  });
+
+  final String name;
+  final String downloadUrl;
+  final String relativePath;
+
+  factory _AtlasModFile.fromJson(Map<String, dynamic> json) {
+    return _AtlasModFile(
+      name: (json['name'] ?? '').toString(),
+      downloadUrl: (json['downloadUrl'] ?? json['url'] ?? '').toString(),
+      relativePath: (json['relativePath'] ?? json['path'] ?? '').toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'name': name,
+      'downloadUrl': downloadUrl,
+      'relativePath': relativePath,
+    };
+  }
+}
+
+String _atlasPlayableVideoUrl(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) return trimmed;
+  final uri = Uri.tryParse(trimmed);
+  if (uri != null && uri.hasScheme) return trimmed;
+  if (trimmed.startsWith(r'\\') ||
+      RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(trimmed)) {
+    return Uri.file(trimmed).toString();
+  }
+  return trimmed;
+}
+
+class _AtlasModPlaybackViewer extends StatelessWidget {
+  const _AtlasModPlaybackViewer({
+    required this.media,
+    required this.onWatchingChanged,
+    required this.onOpenExternal,
+  });
+
+  final _AtlasModMedia media;
+  final ValueChanged<bool> onWatchingChanged;
+  final void Function(String url) onOpenExternal;
+
+  @override
+  Widget build(BuildContext context) {
+    return _AtlasDirectVideoPlaybackViewer(
+      url: media.url,
+      onWatchingChanged: onWatchingChanged,
+      onOpenExternal: onOpenExternal,
+    );
+  }
+}
+
+class _AtlasDirectVideoPlaybackViewer extends StatefulWidget {
+  const _AtlasDirectVideoPlaybackViewer({
+    required this.url,
+    required this.onWatchingChanged,
+    required this.onOpenExternal,
+  });
+
+  final String url;
+  final ValueChanged<bool> onWatchingChanged;
+  final void Function(String url) onOpenExternal;
+
+  @override
+  State<_AtlasDirectVideoPlaybackViewer> createState() =>
+      _AtlasDirectVideoPlaybackViewerState();
+}
+
+class _AtlasDirectVideoPlaybackViewerState
+    extends State<_AtlasDirectVideoPlaybackViewer> {
+  late final media_kit.Player _player;
+  late final media_kit_video.VideoController _controller;
+  StreamSubscription<String>? _errorSubscription;
+  StreamSubscription<bool>? _playingSubscription;
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = media_kit.Player();
+    _controller = media_kit_video.VideoController(_player);
+    _errorSubscription = _player.stream.error.listen((error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = error.trim().isEmpty ? 'Unable to load video.' : error;
+      });
+    });
+    _playingSubscription = _player.stream.playing.listen((playing) {
+      widget.onWatchingChanged(playing);
+    });
+    unawaited(_openVideo());
+  }
+
+  Future<void> _openVideo() async {
+    try {
+      await _player.open(
+        media_kit.Media(_atlasPlayableVideoUrl(widget.url)),
+        play: false,
+      );
+      if (!mounted) return;
+      setState(() => _loading = false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Unable to load video.';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.onWatchingChanged(false);
+    unawaited(_errorSubscription?.cancel());
+    unawaited(_playingSubscription?.cancel());
+    unawaited(_player.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return _AtlasVideoFallback(
+        message: _error!,
+        url: widget.url,
+        onOpenExternal: widget.onOpenExternal,
+      );
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(
+          color: Colors.black,
+          child: media_kit_video.Video(
+            controller: _controller,
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+            // Keep fullscreen purely at the Flutter level. media_kit's default
+            // native fullscreen rewrites the Win32 window style and never
+            // restores flutter_acrylic's transparent titlebar / full-size
+            // content view, which leaves the top navigation bar unclickable
+            // after exiting fullscreen. The fullscreen route is pushed on the
+            // root navigator, so the video still fills the whole app window.
+            onEnterFullscreen: () async {},
+            onExitFullscreen: () async {},
+          ),
+        ),
+        if (_loading)
+          const DecoratedBox(
+            decoration: BoxDecoration(color: Color(0xB0000000)),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+      ],
+    );
+  }
+}
+
+class _AtlasVideoFallback extends StatelessWidget {
+  const _AtlasVideoFallback({
+    required this.message,
+    required this.url,
+    required this.onOpenExternal,
+  });
+
+  final String message;
+  final String url;
+  final void Function(String url) onOpenExternal;
+
+  @override
+  Widget build(BuildContext context) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF101A2B), Color(0xFF050914)],
+        ),
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 62,
+              height: 62,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: secondary.withValues(alpha: 0.22),
+                border: Border.all(color: secondary.withValues(alpha: 0.45)),
+              ),
+              child: Icon(
+                Icons.play_arrow_rounded,
+                size: 38,
+                color: onSurface.withValues(alpha: 0.96),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: onSurface.withValues(alpha: 0.72),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: url.trim().isEmpty ? null : () => onOpenExternal(url),
+              style: OutlinedButton.styleFrom(shape: const StadiumBorder()),
+              icon: const Icon(Icons.open_in_new_rounded, size: 17),
+              label: const Text('Open externally'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AtlasModMedia {
+  const _AtlasModMedia({
+    required this.url,
+    required this.type,
+    required this.label,
+  });
+
+  final String url;
+  final _AtlasModMediaType type;
+  final String label;
+
+  factory _AtlasModMedia.fromJson(Map<String, dynamic> json) {
+    final typeText = (json['type'] ?? '').toString().trim().toLowerCase();
+    final url = (json['url'] ?? '').toString();
+    return _AtlasModMedia(
+      url: url,
+      type: typeText == 'video'
+          ? _AtlasModMediaType.video
+          : _AtlasModMediaType.image,
+      label: (json['label'] ?? '').toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{'url': url, 'type': type.name, 'label': label};
+  }
+}
+
+class _AtlasModEntry {
+  const _AtlasModEntry({
+    required this.id,
+    required this.type,
+    required this.folderName,
+    required this.folderPath,
+    required this.name,
+    required this.author,
+    required this.cardDescription,
+    required this.description,
+    required this.version,
+    required this.tags,
+    required this.cardImage,
+    required this.images,
+    required this.media,
+    required this.sourceUrl,
+    required this.files,
+  });
+
+  final String id;
+  final _AtlasModType type;
+  final String folderName;
+  final String folderPath;
+  final String name;
+  final String author;
+  final String cardDescription;
+  final String description;
+  final String version;
+  // Free-form labels defined entirely by the mod's metadata.json ("tags").
+  final List<String> tags;
+  final String cardImage;
+  final List<String> images;
+  final List<_AtlasModMedia> media;
+  final String sourceUrl;
+  final List<_AtlasModFile> files;
+
+  String get primaryImage {
+    if (cardImage.trim().isNotEmpty) return cardImage;
+    if (images.isNotEmpty) return images.first;
+    for (final item in media) {
+      if (item.type == _AtlasModMediaType.image && item.url.trim().isNotEmpty) {
+        return item.url;
+      }
+    }
+    return '';
+  }
+
+  List<_AtlasModMedia> get detailMedia {
+    final result = <_AtlasModMedia>[];
+    final primary = primaryImage.trim();
+    if (primary.isNotEmpty) {
+      result.add(
+        _AtlasModMedia(
+          url: primary,
+          type: _AtlasModMediaType.image,
+          label: _atlasPathBasename(primary),
+        ),
+      );
+    }
+    for (final item in media) {
+      if (item.url.trim().isEmpty) continue;
+      if (primary.isNotEmpty &&
+          item.url.trim().toLowerCase() == primary.toLowerCase()) {
+        continue;
+      }
+      result.add(item);
+    }
+    if (result.isEmpty) {
+      result.add(
+        const _AtlasModMedia(
+          url: '',
+          type: _AtlasModMediaType.image,
+          label: 'Missing image',
+        ),
+      );
+    }
+    return result;
+  }
+
+  factory _AtlasModEntry.fromJson(Map<String, dynamic> json) {
+    _AtlasModType parseType(dynamic value) {
+      final text = value.toString().trim().toLowerCase();
+      return text == 'dll' || text == 'dlls'
+          ? _AtlasModType.dll
+          : _AtlasModType.pak;
+    }
+
+    List<String> stringList(dynamic value) {
+      if (value is! List) return const <String>[];
+      return value
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+
+    final filesRaw = json['files'];
+    final files = filesRaw is List
+        ? filesRaw
+              .whereType<Map>()
+              .map(
+                (item) => _AtlasModFile.fromJson(item.cast<String, dynamic>()),
+              )
+              .where((file) => file.name.trim().isNotEmpty)
+              .toList()
+        : <_AtlasModFile>[];
+    final mediaRaw = json['media'];
+    final images = stringList(json['images']);
+    final media = mediaRaw is List
+        ? mediaRaw
+              .whereType<Map>()
+              .map(
+                (item) => _AtlasModMedia.fromJson(item.cast<String, dynamic>()),
+              )
+              .where((item) => item.url.trim().isNotEmpty)
+              .toList()
+        : images
+              .map(
+                (image) => _AtlasModMedia(
+                  url: image,
+                  type: _AtlasModMediaType.image,
+                  label: _atlasPathBasename(image),
+                ),
+              )
+              .toList();
+
+    return _AtlasModEntry(
+      id: (json['id'] ?? '').toString(),
+      type: parseType(json['type']),
+      folderName: (json['folderName'] ?? '').toString(),
+      folderPath: (json['folderPath'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      author: (json['author'] ?? '').toString(),
+      cardDescription: (json['cardDescription'] ?? '').toString(),
+      description: (json['description'] ?? '').toString(),
+      version: (json['version'] ?? '').toString(),
+      tags: stringList(json['tags']),
+      cardImage: (json['cardImage'] ?? '').toString(),
+      images: images,
+      media: media,
+      sourceUrl: (json['sourceUrl'] ?? '').toString(),
+      files: files,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'type': type.name,
+      'folderName': folderName,
+      'folderPath': folderPath,
+      'name': name,
+      'author': author,
+      'cardDescription': cardDescription,
+      'description': description,
+      'version': version,
+      'tags': tags,
+      'cardImage': cardImage,
+      'images': images,
+      'media': media.map((item) => item.toJson()).toList(),
+      'sourceUrl': sourceUrl,
+      'files': files.map((file) => file.toJson()).toList(),
+    };
+  }
+}
+
+class _InstalledAtlasMod {
+  const _InstalledAtlasMod({
+    required this.id,
+    required this.type,
+    required this.name,
+    required this.version,
+    required this.targetVersionId,
+    required this.installedFilePaths,
+    required this.installedAtEpochMs,
+  });
+
+  final String id;
+  final _AtlasModType type;
+  final String name;
+  final String version;
+  final String targetVersionId;
+  final List<String> installedFilePaths;
+  final int installedAtEpochMs;
+
+  factory _InstalledAtlasMod.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
+    _AtlasModType parseType(dynamic value) {
+      final text = value.toString().trim().toLowerCase();
+      return text == 'dll' || text == 'dlls'
+          ? _AtlasModType.dll
+          : _AtlasModType.pak;
+    }
+
+    final pathsRaw = json['installedFilePaths'] ?? json['files'];
+    final paths = pathsRaw is List
+        ? pathsRaw
+              .map((path) => path.toString().trim())
+              .where((path) => path.isNotEmpty)
+              .toList()
+        : <String>[];
+
+    return _InstalledAtlasMod(
+      id: (json['id'] ?? '').toString(),
+      type: parseType(json['type']),
+      name: (json['name'] ?? '').toString(),
+      version: (json['version'] ?? '').toString(),
+      targetVersionId: (json['targetVersionId'] ?? '').toString(),
+      installedFilePaths: paths,
+      installedAtEpochMs: asInt(json['installedAtEpochMs'], 0),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'type': type.name,
+      'name': name,
+      'version': version,
+      'targetVersionId': targetVersionId,
+      'installedFilePaths': installedFilePaths,
+      'installedAtEpochMs': installedAtEpochMs,
+    };
   }
 }
 

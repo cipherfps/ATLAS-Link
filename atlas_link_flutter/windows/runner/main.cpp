@@ -122,10 +122,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   // Always use a consistent launch size. We intentionally do not persist
   // window bounds so updates don't inherit stale/corrupt cached sizes.
+  Win32Window::Size minimum_size(1100, 720);
   Win32Window::Size size(1350, 800);
   size = FitSizeToWorkArea(monitor, size);
   Win32Window::Point origin = CenteredOrigin(monitor, size);
 
+  window.SetMinimumSize(minimum_size);
   if (!window.Create(L"ATLAS Link", origin, size, monitor)) {
     return EXIT_FAILURE;
   }
