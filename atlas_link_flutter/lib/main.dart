@@ -13,6 +13,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -422,8 +423,12 @@ enum _AtlasModType {
 
   const _AtlasModType(this.folderName, this.label);
 
+  // GitHub resource folder name (also the on-disk folder). Keep as-is.
   final String folderName;
   final String label;
+
+  // User-facing plural label. Paks are shown as "PAKs".
+  String get displayPlural => this == _AtlasModType.pak ? 'PAKs' : 'DLLs';
 }
 
 enum _AtlasModMediaType { image, video }
@@ -764,9 +769,9 @@ class LauncherScreen extends StatefulWidget {
 }
 
 class _LauncherScreenState extends State<LauncherScreen>
-    with TickerProviderStateMixin {
-  static const String _launcherVersion = '1.4.0';
-  static const String _launcherBuildLabel = 'Stable 1.4.0';
+    with TickerProviderStateMixin, WidgetsBindingObserver {
+  static const String _launcherVersion = '1.4.1';
+  static const String _launcherBuildLabel = 'Stable 1.4.1';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -776,6 +781,12 @@ class _LauncherScreenState extends State<LauncherScreen>
       BackendProxyRouting.defaultBackendHost;
   static const int _defaultBackendPort = BackendProxyRouting.defaultBackendPort;
   static const int _defaultGameServerPort = 7777;
+  static const Duration _windowResizeBlurResumeDelay = Duration(
+    milliseconds: 420,
+  );
+  static const Duration _windowResizeBlurFadeInDuration = Duration(
+    milliseconds: 520,
+  );
   static const String _legacyLaunchFltoken = '3db3ba5dcbd2e16703f3978d';
   static const String _legacyLaunchCalderaToken =
       'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ';
@@ -976,6 +987,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _bundledDllLaunchToastQueued = false;
   bool _bundledDllAutoUpdateOnLaunchQueued = false;
   bool _bundledDllAutoUpdateOnLaunchStarted = false;
+  bool _installedModAutoUpdateOnLaunchStarted = false;
   bool _checkingLauncherUpdate = false;
   bool _checkingBundledDllDefaultsUpdate = false;
   bool _bundledDllDefaultsUpdateAvailable = false;
@@ -994,6 +1006,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   EmbeddedBackendType? _downloadingBackend;
   DateTime? _lastEmbeddedOrphanCleanupAt;
   bool _backgroundMotionPaused = false;
+  bool _backgroundMotionPauseQueued = false;
+  bool _windowResizeBlurPaused = false;
+  final ValueNotifier<bool> _windowResizeBlurPausedNotifier =
+      ValueNotifier<bool>(false);
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
   // When the game server is started from the "start game server?" prompt during
@@ -1047,6 +1063,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   Timer? _gameServerCrashStatusClearTimer;
   Timer? _playtimeCheckpointTimer;
   Timer? _backgroundMotionPauseTimer;
+  Timer? _windowResizeBlurResumeTimer;
   bool _runtimePollingStarted = false;
   DateTime? _runtimePollingStartedAt;
   Future<void>? _runtimeRefreshInFlight;
@@ -1106,6 +1123,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _modsLoading = false;
   String _modsLoadError = '';
   Future<void>? _modsRefreshInFlight;
+  String _modsCardEntranceSignature = '';
+  final Set<String> _animatingModCardEntranceKeys = <String>{};
+  final Set<String> _settledModCardEntranceKeys = <String>{};
+  DateTime? _suppressModCardEntrancesUntil;
   int _dllPresetSeedVersion = 0;
 
   LauncherInstallState _installState = LauncherInstallState.defaults();
@@ -1113,6 +1134,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _shellEntranceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 720),
@@ -1143,6 +1165,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _killManagedBackendProcessOnShutdown();
     _checkpointActivePlaytime(syncSave: true);
     _playtimeCheckpointTimer?.cancel();
@@ -1151,12 +1174,14 @@ class _LauncherScreenState extends State<LauncherScreen>
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
     _backgroundMotionPauseTimer?.cancel();
+    _windowResizeBlurResumeTimer?.cancel();
     _toastOverlayEntry?.remove();
     _toastOverlayEntry = null;
     _logFlushTimer?.cancel();
     _flushLogBuffer();
     _shellEntranceController.dispose();
     _libraryActionsNudgeController.dispose();
+    _windowResizeBlurPausedNotifier.dispose();
     _usernameController.dispose();
     _profileAuthEmailController.dispose();
     _profileAuthPasswordController.dispose();
@@ -1178,6 +1203,12 @@ class _LauncherScreenState extends State<LauncherScreen>
     unawaited(_stopBackendProxy());
     _launcherDiscordRpc.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    _pauseGlassBlurForWindowResize();
   }
 
   LauncherContentPage get _activeLauncherContentPage {
@@ -1246,6 +1277,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       unawaited(
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: false),
       );
+      // Load the mod catalog in the background so the Mods nav can flag
+      // available updates without the user opening the tab first.
+      unawaited(_loadModsLibrary());
       if (currentLauncherVersion.isNotEmpty &&
           _installState.lastSeenLauncherVersion != currentLauncherVersion) {
         _installState = _installState.copyWith(
@@ -1401,6 +1435,37 @@ class _LauncherScreenState extends State<LauncherScreen>
         'Failed to auto-update bundled default DLLs after launch: $error',
       );
     }
+    // "Update Files on Launch" also keeps installed Paks and library DLLs in
+    // sync with the catalog.
+    unawaited(_runInstalledModAutoUpdateOnLaunch());
+  }
+
+  /// Auto-updates installed Pak/DLL mods that have a newer catalog release.
+  /// Each mod is refreshed across every build it is installed to. Gated by the
+  /// same "Update Files on Launch" toggle as the bundled DLL refresh.
+  Future<void> _runInstalledModAutoUpdateOnLaunch() async {
+    if (!mounted) return;
+    if (!_settings.updateDefaultDllsOnLaunchEnabled) return;
+    if (_installedModAutoUpdateOnLaunchStarted) return;
+    _installedModAutoUpdateOnLaunchStarted = true;
+    try {
+      // Ensure the catalog is loaded so we can compare it against installs.
+      await _loadModsLibrary();
+      final pending = _modsLibrary.where(_atlasModUpdateAvailable).toList();
+      if (pending.isEmpty) return;
+      var updated = 0;
+      for (final mod in pending) {
+        // Re-check: a build may have been removed, or state changed mid-run.
+        if (!_atlasModUpdateAvailable(mod)) continue;
+        await _updateAtlasMod(mod, announce: false);
+        if (!_atlasModUpdateAvailable(mod)) updated++;
+      }
+      if (updated > 0 && mounted) {
+        _toast(updated == 1 ? 'Updated 1 mod' : 'Updated $updated mods');
+      }
+    } catch (error) {
+      _log('mods', 'Failed to auto-update installed mods on launch: $error');
+    }
   }
 
   void _queueBundledDllLaunchUpdateToast(int updatedCount) {
@@ -1516,6 +1581,18 @@ class _LauncherScreenState extends State<LauncherScreen>
   void _pauseBackgroundMotionBriefly([
     Duration duration = const Duration(milliseconds: 420),
   ]) {
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      if (_backgroundMotionPauseQueued) return;
+      _backgroundMotionPauseQueued = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _backgroundMotionPauseQueued = false;
+        if (!mounted) return;
+        _pauseBackgroundMotionBriefly(duration);
+      });
+      return;
+    }
+
     _backgroundMotionPauseTimer?.cancel();
     if (!_backgroundMotionPaused && mounted) {
       setState(() => _backgroundMotionPaused = true);
@@ -1531,6 +1608,37 @@ class _LauncherScreenState extends State<LauncherScreen>
         _backgroundMotionPaused = false;
       }
     });
+  }
+
+  void _pauseGlassBlurForWindowResize() {
+    _windowResizeBlurResumeTimer?.cancel();
+    _suppressModCardEntrancesUntil = DateTime.now().add(
+      _windowResizeBlurResumeDelay +
+          _windowResizeBlurFadeInDuration +
+          const Duration(milliseconds: 180),
+    );
+    if (!_windowResizeBlurPaused) {
+      _windowResizeBlurPaused = true;
+      _windowResizeBlurPausedNotifier.value = true;
+    }
+
+    _windowResizeBlurResumeTimer = Timer(_windowResizeBlurResumeDelay, () {
+      _windowResizeBlurResumeTimer = null;
+      if (!_windowResizeBlurPaused) return;
+      _windowResizeBlurPaused = false;
+      _windowResizeBlurPausedNotifier.value = false;
+    });
+  }
+
+  void _resetModsCardEntranceAnimations() {
+    _modsCardEntranceSignature = '';
+    _animatingModCardEntranceKeys.clear();
+    _settledModCardEntranceKeys.clear();
+  }
+
+  bool get _suppressModCardEntranceAnimations {
+    final until = _suppressModCardEntrancesUntil;
+    return until != null && DateTime.now().isBefore(until);
   }
 
   bool _deferNonCriticalRuntimeRefresh() {
@@ -3010,6 +3118,19 @@ class _LauncherScreenState extends State<LauncherScreen>
     return '$_atlasResourcesRepository/tree/$_atlasResourcesRef/$encoded';
   }
 
+  Uri _atlasResourcesCommitsUri(String path) {
+    final normalized = path.trim().replaceAll('\\', '/');
+    return Uri.https(
+      'api.github.com',
+      '/repos/$_atlasResourcesOwner/$_atlasResourcesRepo/commits',
+      <String, String>{
+        'sha': _atlasResourcesRef,
+        'path': normalized,
+        'per_page': '1',
+      },
+    );
+  }
+
   Future<List<Map<String, dynamic>>> _fetchAtlasResourceContents(
     String path,
   ) async {
@@ -3068,6 +3189,63 @@ class _LauncherScreenState extends State<LauncherScreen>
           .whereType<Map>()
           .map((entry) => entry.cast<String, dynamic>())
           .toList();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<int> _fetchAtlasResourceLastUpdatedEpochMs(String path) async {
+    final normalized = path.trim().replaceAll('\\', '/');
+    if (normalized.isEmpty) return 0;
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(
+        _atlasResourcesCommitsUri(normalized),
+      );
+      request.followRedirects = true;
+      request.maxRedirects = 6;
+      request.headers.set('Accept', 'application/vnd.github+json');
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        throw 'GitHub commits request failed (HTTP ${response.statusCode})';
+      }
+
+      final body = await response.transform(utf8.decoder).join();
+      final decoded = jsonDecode(body);
+      if (decoded is! List || decoded.isEmpty) return 0;
+
+      Map<String, dynamic>? firstCommit;
+      for (final item in decoded) {
+        if (item is Map<String, dynamic>) {
+          firstCommit = item;
+          break;
+        }
+        if (item is Map) {
+          firstCommit = item.cast<String, dynamic>();
+          break;
+        }
+      }
+      if (firstCommit == null) return 0;
+
+      final commitRaw = firstCommit['commit'];
+      if (commitRaw is! Map) return 0;
+      final commit = commitRaw.cast<String, dynamic>();
+      final committerRaw = commit['committer'];
+      final authorRaw = commit['author'];
+      final committer = committerRaw is Map
+          ? committerRaw.cast<String, dynamic>()
+          : const <String, dynamic>{};
+      final author = authorRaw is Map
+          ? authorRaw.cast<String, dynamic>()
+          : const <String, dynamic>{};
+      final dateText = (committer['date'] ?? author['date'] ?? '')
+          .toString()
+          .trim();
+      final parsed = DateTime.tryParse(dateText);
+      return parsed?.toUtc().millisecondsSinceEpoch ?? 0;
     } finally {
       client.close(force: true);
     }
@@ -3332,6 +3510,26 @@ class _LauncherScreenState extends State<LauncherScreen>
     return files;
   }
 
+  /// Fills in git blob SHAs for [files] using a basename -> sha map built from
+  /// the folder's GitHub entries, so each installable file carries a content
+  /// fingerprint regardless of whether it came from metadata or inference.
+  List<_AtlasModFile> _withAtlasModFileShas(
+    List<_AtlasModFile> files,
+    Map<String, String> shaByName,
+  ) {
+    if (files.isEmpty || shaByName.isEmpty) return files;
+    return [
+      for (final file in files)
+        file.sha.isNotEmpty
+            ? file
+            : file.withSha(
+                shaByName[_basename(file.name).toLowerCase()] ??
+                    shaByName[_basename(file.relativePath).toLowerCase()] ??
+                    '',
+              ),
+    ];
+  }
+
   Future<_AtlasModEntry?> _parseAtlasModFolder(
     _AtlasModType type,
     Map<String, dynamic> folderEntry,
@@ -3390,6 +3588,15 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     var files = _atlasModFilesFromMetadata(metadata, folderPath);
     if (files.isEmpty) files = inferredFiles;
+    final shaByName = <String, String>{};
+    for (final entry in contents) {
+      if ((entry['type'] ?? '').toString().toLowerCase() != 'file') continue;
+      final sha = (entry['sha'] ?? '').toString().trim();
+      final name = (entry['name'] ?? '').toString().trim();
+      if (sha.isEmpty || name.isEmpty) continue;
+      shaByName[name.toLowerCase()] = sha;
+    }
+    files = _withAtlasModFileShas(files, shaByName);
 
     final directMedia = contents
         .where((entry) {
@@ -3605,6 +3812,14 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     var files = _atlasModFilesFromMetadata(metadata, normalizedFolderPath);
     if (files.isEmpty) files = inferredFiles;
+    final shaByName = <String, String>{};
+    for (final entry in childEntries) {
+      if (!isBlob(entry)) continue;
+      final sha = (entry['sha'] ?? '').toString().trim();
+      if (sha.isEmpty) continue;
+      shaByName[_basename(entryPath(entry)).toLowerCase()] = sha;
+    }
+    files = _withAtlasModFileShas(files, shaByName);
 
     final directMedia = directEntries
         .where((entry) {
@@ -3792,13 +4007,85 @@ class _LauncherScreenState extends State<LauncherScreen>
     return mods;
   }
 
-  Future<List<_AtlasModEntry>> _loadModsLibraryFromGitHub() async {
+  Future<List<_AtlasModEntry>> _loadModsLibraryFromGitHub({
+    Map<String, _AtlasModEntry> cachedModsById =
+        const <String, _AtlasModEntry>{},
+  }) async {
+    late final List<_AtlasModEntry> mods;
     try {
-      return await _loadModsLibraryFromGitHubTree();
+      mods = await _loadModsLibraryFromGitHubTree();
     } catch (error) {
       _log('mods', 'GitHub tree load failed, trying contents API: $error');
-      return _loadModsLibraryFromGitHubContents();
+      mods = await _loadModsLibraryFromGitHubContents();
     }
+    return _refreshAtlasModLastUpdatedFromGitHub(mods, cachedModsById);
+  }
+
+  Map<String, _AtlasModEntry> _atlasModsById(List<_AtlasModEntry> mods) {
+    return <String, _AtlasModEntry>{
+      for (final mod in mods)
+        if (mod.id.trim().isNotEmpty) mod.id: mod,
+    };
+  }
+
+  List<_AtlasModEntry> _mergeAtlasModLastUpdatedCache(
+    List<_AtlasModEntry> mods,
+    Map<String, _AtlasModEntry> cachedModsById,
+  ) {
+    if (cachedModsById.isEmpty) return mods;
+    var changed = false;
+    final next = <_AtlasModEntry>[];
+    for (final mod in mods) {
+      if (mod.lastUpdatedEpochMs > 0) {
+        next.add(mod);
+        continue;
+      }
+      final cachedMs = cachedModsById[mod.id]?.lastUpdatedEpochMs ?? 0;
+      if (cachedMs > 0) {
+        changed = true;
+        next.add(mod.copyWith(lastUpdatedEpochMs: cachedMs));
+      } else {
+        next.add(mod);
+      }
+    }
+    return changed ? next : mods;
+  }
+
+  Future<List<_AtlasModEntry>> _refreshAtlasModLastUpdatedFromGitHub(
+    List<_AtlasModEntry> mods,
+    Map<String, _AtlasModEntry> cachedModsById,
+  ) async {
+    final refreshed = <_AtlasModEntry>[];
+    var failures = 0;
+
+    for (final mod in mods) {
+      var lastUpdatedEpochMs = 0;
+      try {
+        lastUpdatedEpochMs = await _fetchAtlasResourceLastUpdatedEpochMs(
+          mod.folderPath,
+        );
+      } catch (_) {
+        failures++;
+      }
+      if (lastUpdatedEpochMs <= 0) {
+        lastUpdatedEpochMs =
+            cachedModsById[mod.id]?.lastUpdatedEpochMs ??
+            mod.lastUpdatedEpochMs;
+      }
+      refreshed.add(
+        lastUpdatedEpochMs > 0
+            ? mod.copyWith(lastUpdatedEpochMs: lastUpdatedEpochMs)
+            : mod,
+      );
+    }
+
+    if (failures > 0) {
+      _log(
+        'mods',
+        'Used cached update dates for $failures mod${failures == 1 ? '' : 's'}.',
+      );
+    }
+    return refreshed;
   }
 
   Future<List<_AtlasModEntry>> _loadModsLibraryCache() async {
@@ -4141,7 +4428,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
   }
 
-  Future<void> _loadModsLibrary({bool forceRefresh = false}) {
+  Future<void> _loadModsLibrary({
+    bool forceRefresh = false,
+    bool silentRefreshToast = false,
+  }) {
     if (_modsRefreshInFlight != null) return _modsRefreshInFlight!;
     if (!forceRefresh && _modsLibrary.isNotEmpty) return Future<void>.value();
     final hadLoadedMods = _modsLibrary.isNotEmpty;
@@ -4157,8 +4447,13 @@ class _LauncherScreenState extends State<LauncherScreen>
         _modsLoadError = '';
       }
 
+      final cachedMods = await _loadModsLibraryCache();
+      final cachedModsById = _atlasModsById(cachedMods);
+
       try {
-        final mods = await _loadModsLibraryFromGitHub();
+        final mods = await _loadModsLibraryFromGitHub(
+          cachedModsById: cachedModsById,
+        );
         _sortAtlasMods(mods);
         await _saveModsLibraryCache(mods);
         if (mounted) {
@@ -4167,15 +4462,21 @@ class _LauncherScreenState extends State<LauncherScreen>
           _modsLibrary = mods;
         }
         await _reconcileDetectedInstalledMods(mods);
-        if (forceRefresh && mounted) {
+        if (forceRefresh && !silentRefreshToast && mounted) {
           _toast('Refreshed ${mods.length} Mods');
         }
       } catch (error) {
         _log('mods', 'Failed to Load Mods Library: $error');
         var fallbackMods = await _loadModsLibraryFromLocalResources();
         var fallbackLabel = 'local ATLAS-Resources';
+        if (fallbackMods.isNotEmpty) {
+          fallbackMods = _mergeAtlasModLastUpdatedCache(
+            fallbackMods,
+            cachedModsById,
+          );
+        }
         if (fallbackMods.isEmpty) {
-          fallbackMods = await _loadModsLibraryCache();
+          fallbackMods = cachedMods;
           fallbackLabel = 'cached mods';
         }
         if (fallbackMods.isNotEmpty) {
@@ -4270,15 +4571,82 @@ class _LauncherScreenState extends State<LauncherScreen>
         entryName.contains(modToken);
   }
 
-  VersionEntry? _targetVersionForPakMod(_AtlasModEntry mod) {
-    final modVersion = mod.version.trim();
-    if (modVersion.isNotEmpty) {
-      for (final version in _settings.versions) {
-        if (_versionEntryMatchesMod(version, modVersion)) return version;
-      }
-      return null;
+  /// Splits a single compatibility clause like `10.00-10.40` into its inclusive
+  /// `[low, high]` bounds. Returns `null` when the clause is a single version
+  /// (no dash) so callers fall back to exact/token matching.
+  List<String>? _modVersionRangeBounds(String clause) {
+    final dash = clause.indexOf('-');
+    if (dash <= 0 || dash >= clause.length - 1) return null;
+    final low = clause.substring(0, dash).trim();
+    final high = clause.substring(dash + 1).trim();
+    if (low.isEmpty || high.isEmpty) return null;
+    return _compareVersionStrings(low, high) > 0
+        ? <String>[high, low]
+        : <String>[low, high];
+  }
+
+  /// A comparable season value for range matching, e.g. `10.40` -> `100040`.
+  ///
+  /// Only the first `major.minor` is used so trailing noise such as a build's
+  /// changelist (`10.40-CL-14550713`) does not skew the comparison. A single
+  /// digit minor follows the launcher's Fortnite convention (`10.4` == `10.40`).
+  int? _modSeasonValue(String version) {
+    final pair = RegExp(r'(\d+)\.(\d+)').firstMatch(version);
+    if (pair != null) {
+      final major = int.parse(pair.group(1)!);
+      final minorStr = pair.group(2)!;
+      final minor = minorStr.length == 1
+          ? int.parse(minorStr) * 10
+          : int.parse(minorStr);
+      return major * 10000 + minor;
     }
-    return _settings.selectedVersion;
+    final single = RegExp(r'\d+').firstMatch(version);
+    if (single == null) return null;
+    return int.parse(single.group(0)!) * 10000;
+  }
+
+  /// Whether a build matches a mod's compatibility tag.
+  ///
+  /// The tag is a comma separated list of clauses. A clause with a dash
+  /// (`10.00-10.40`) matches every version in that inclusive range; a plain
+  /// clause (`10.00`) matches only that exact version. So `10.00, 10.40` covers
+  /// just those two builds while `10.00-10.40` also covers everything between.
+  bool _modSpecMatchesVersionEntry(String spec, VersionEntry entry) {
+    final trimmedSpec = spec.trim();
+    if (trimmedSpec.isEmpty) return false;
+    for (final rawClause in trimmedSpec.split(',')) {
+      final clause = rawClause.trim();
+      if (clause.isEmpty) continue;
+      final bounds = _modVersionRangeBounds(clause);
+      if (bounds != null) {
+        // Compare at season granularity so changelist digits in the build's
+        // version don't push it outside the range.
+        final entryValue = _modSeasonValue(entry.gameVersion.trim());
+        final a = _modSeasonValue(bounds[0]);
+        final b = _modSeasonValue(bounds[1]);
+        if (entryValue != null && a != null && b != null) {
+          final low = a < b ? a : b;
+          final high = a < b ? b : a;
+          if (entryValue >= low && entryValue <= high) return true;
+        }
+      } else if (_versionEntryMatchesMod(entry, clause)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Imported builds the mod can install to. An empty tag falls back to the
+  /// currently selected build (legacy behaviour).
+  List<VersionEntry> _compatibleVersionsForPakMod(_AtlasModEntry mod) {
+    final spec = mod.version.trim();
+    if (spec.isEmpty) {
+      final selected = _settings.selectedVersion;
+      return selected == null ? <VersionEntry>[] : <VersionEntry>[selected];
+    }
+    return _settings.versions
+        .where((version) => _modSpecMatchesVersionEntry(spec, version))
+        .toList();
   }
 
   String _pakModTargetDirectory(VersionEntry version) {
@@ -4289,19 +4657,13 @@ class _LauncherScreenState extends State<LauncherScreen>
     return _joinPath([_dataDir.path, 'mods', 'dlls', _safeFileName(mod.id)]);
   }
 
-  List<String> _expectedAtlasModInstallPaths(
-    _AtlasModEntry mod, {
-    VersionEntry? targetVersion,
-  }) {
-    if (mod.files.isEmpty) return const <String>[];
-    final targetDirectory = switch (mod.type) {
-      _AtlasModType.pak =>
-        targetVersion == null ? '' : _pakModTargetDirectory(targetVersion),
-      _AtlasModType.dll => _dllModTargetDirectory(mod),
-    };
-    if (targetDirectory.trim().isEmpty) return const <String>[];
+  List<String> _atlasModFilePathsInDirectory(
+    _AtlasModEntry mod,
+    String directory,
+  ) {
+    if (mod.files.isEmpty || directory.trim().isEmpty) return const <String>[];
     return mod.files
-        .map((file) => _joinPath([targetDirectory, _safeFileName(file.name)]))
+        .map((file) => _joinPath([directory, _safeFileName(file.name)]))
         .toList();
   }
 
@@ -4311,23 +4673,45 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   _InstalledAtlasMod? _detectExistingAtlasModInstall(_AtlasModEntry mod) {
-    final targetVersion = mod.type == _AtlasModType.pak
-        ? _targetVersionForPakMod(mod)
-        : null;
-    final expectedPaths = _expectedAtlasModInstallPaths(
-      mod,
-      targetVersion: targetVersion,
-    );
-    if (expectedPaths.isEmpty) return null;
-    if (!expectedPaths.every((path) => File(path).existsSync())) return null;
+    if (mod.files.isEmpty) return null;
+    final presentPaths = <String>[];
+    final presentVersionIds = <String>[];
+    if (mod.type == _AtlasModType.dll) {
+      final paths = _atlasModFilePathsInDirectory(
+        mod,
+        _dllModTargetDirectory(mod),
+      );
+      if (paths.isEmpty || !paths.every((path) => File(path).existsSync())) {
+        return null;
+      }
+      presentPaths.addAll(paths);
+    } else {
+      // A pak mod can be installed to several compatible builds at once; treat
+      // it as installed when its files are present in any of them.
+      for (final version in _compatibleVersionsForPakMod(mod)) {
+        final paths = _atlasModFilePathsInDirectory(
+          mod,
+          _pakModTargetDirectory(version),
+        );
+        if (paths.isNotEmpty &&
+            paths.every((path) => File(path).existsSync())) {
+          presentPaths.addAll(paths);
+          presentVersionIds.add(version.id);
+        }
+      }
+      if (presentPaths.isEmpty) return null;
+    }
     return _InstalledAtlasMod(
       id: mod.id,
       type: mod.type,
       name: mod.name,
       version: mod.version,
-      targetVersionId: targetVersion?.id ?? '',
-      installedFilePaths: expectedPaths,
+      targetVersionId: presentVersionIds.isEmpty ? '' : presentVersionIds.first,
+      targetVersionIds: presentVersionIds,
+      installedFilePaths: presentPaths,
       installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+      sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
+      filesFingerprint: _atlasModFilesFingerprint(mod),
     );
   }
 
@@ -4347,6 +4731,26 @@ class _LauncherScreenState extends State<LauncherScreen>
     for (final mod in mods) {
       final existing = _installedModsById[mod.id];
       if (existing != null && _installedAtlasModFilesPresent(existing)) {
+        // Baseline the update markers for installs that predate update tracking
+        // (or were installed before the catalog data was known) so they don't
+        // instantly read as "update available".
+        var baselined = existing;
+        if (baselined.sourceLastUpdatedEpochMs == 0 &&
+            mod.lastUpdatedEpochMs > 0) {
+          baselined = baselined.copyWith(
+            sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
+          );
+        }
+        if (baselined.filesFingerprint.isEmpty) {
+          final fingerprint = _atlasModFilesFingerprint(mod);
+          if (fingerprint.isNotEmpty) {
+            baselined = baselined.copyWith(filesFingerprint: fingerprint);
+          }
+        }
+        if (!identical(baselined, existing)) {
+          _installedModsById[mod.id] = baselined;
+          changed = true;
+        }
         continue;
       }
       final detected = _detectExistingAtlasModInstall(mod);
@@ -4357,6 +4761,96 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (!changed) return;
     await _saveInstalledMods();
     if (mounted) setState(() {});
+  }
+
+  /// Content fingerprint of a mod's installable files: a sorted `name:sha`
+  /// list. Returns empty when any file's SHA is unknown so callers can fall
+  /// back to the commit-time signal.
+  String _atlasModFilesFingerprint(_AtlasModEntry mod) {
+    if (mod.files.isEmpty) return '';
+    final parts = <String>[];
+    for (final file in mod.files) {
+      final sha = file.sha.trim().toLowerCase();
+      if (sha.isEmpty) return '';
+      parts.add('${_safeFileName(file.name).toLowerCase()}:$sha');
+    }
+    parts.sort();
+    return parts.join('|');
+  }
+
+  /// Whether the catalog has a newer copy of an installed mod. Compares the
+  /// installable files' content fingerprint so it only fires when the actual
+  /// game files change (added, removed, renamed, or replaced) — never for
+  /// metadata or screenshot edits. Falls back to the folder commit time only
+  /// when file SHAs aren't available (e.g. local resources / legacy records).
+  bool _atlasModUpdateAvailable(_AtlasModEntry catalogMod) {
+    final installed = _installedModsById[catalogMod.id];
+    if (installed == null || !_installedAtlasModFilesPresent(installed)) {
+      return false;
+    }
+    final catalogFingerprint = _atlasModFilesFingerprint(catalogMod);
+    final installedFingerprint = installed.filesFingerprint.trim();
+    if (catalogFingerprint.isNotEmpty && installedFingerprint.isNotEmpty) {
+      return catalogFingerprint != installedFingerprint;
+    }
+    final catalogMs = catalogMod.lastUpdatedEpochMs;
+    final installedMs = installed.sourceLastUpdatedEpochMs;
+    return catalogMs > 0 && installedMs > 0 && catalogMs > installedMs;
+  }
+
+  bool get _hasAtlasModUpdates => _modsLibrary.any(_atlasModUpdateAvailable);
+
+  String? _atlasModTargetPhrase({
+    required _AtlasModType type,
+    Iterable<String> targetVersionIds = const <String>[],
+    Iterable<VersionEntry> targetBuilds = const <VersionEntry>[],
+  }) {
+    if (type == _AtlasModType.dll) return 'the DLL library';
+
+    final builds = targetBuilds.toList();
+    final ids = targetVersionIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
+    final count = builds.isNotEmpty ? builds.length : ids.length;
+    if (count > 1) return '$count builds';
+    if (count == 1) {
+      final version = builds.isNotEmpty
+          ? builds.single
+          : _findVersionById(ids.single);
+      final versionLabel = _formatLibraryVersionLabel(
+        version?.gameVersion ?? '',
+      );
+      return versionLabel == '?' ? '1 build' : versionLabel;
+    }
+    return null;
+  }
+
+  String _atlasModActionToast({
+    required String action,
+    required String modName,
+    required String preposition,
+    required _AtlasModType type,
+    Iterable<String> targetVersionIds = const <String>[],
+    Iterable<VersionEntry> targetBuilds = const <VersionEntry>[],
+  }) {
+    final target = _atlasModTargetPhrase(
+      type: type,
+      targetVersionIds: targetVersionIds,
+      targetBuilds: targetBuilds,
+    );
+    if (target == null) return '$action "$modName"';
+    return '$action "$modName" $preposition $target';
+  }
+
+  String _atlasModAlreadyInstalledToast(_InstalledAtlasMod installed) {
+    final target = _atlasModTargetPhrase(
+      type: installed.type,
+      targetVersionIds: installed.targetVersionIds,
+    );
+    if (target == null) return '${installed.name} is already installed';
+    final preposition = installed.type == _AtlasModType.dll ? 'in' : 'for';
+    return '${installed.name} is already installed $preposition $target';
   }
 
   Future<void> _installAtlasMod(_AtlasModEntry mod) async {
@@ -4372,7 +4866,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         await _saveInstalledMods();
         if (mounted) setState(() {});
       }
-      _toast('${mod.name} is already installed');
+      _toast(_atlasModAlreadyInstalledToast(detected ?? savedInstall!));
       return;
     }
     if (mod.files.isEmpty) {
@@ -4380,51 +4874,78 @@ class _LauncherScreenState extends State<LauncherScreen>
       return;
     }
 
-    VersionEntry? targetVersion;
-    Directory targetDirectory;
+    // Resolve install destinations. DLL mods go to the shared injector library;
+    // pak mods install into the matching imported build. When the mod is
+    // compatible with more than one of the user's builds we ask which to use;
+    // a single match installs straight away with no prompt.
+    final targetDirectories = <String>[];
+    final targetVersionIds = <String>[];
     if (mod.type == _AtlasModType.pak) {
-      targetVersion = _targetVersionForPakMod(mod);
-      if (targetVersion == null) {
-        final versionLabel = mod.version.trim().isEmpty
-            ? 'a selected build'
-            : 'version ${mod.version.trim()}';
-        _toast('Import $versionLabel before installing ${mod.name}');
+      final compatible = _compatibleVersionsForPakMod(mod);
+      if (compatible.isEmpty) {
+        final spec = mod.version.trim();
+        _toast(
+          spec.isEmpty
+              ? 'Import a build before installing ${mod.name}'
+              : 'No imported build matches $spec for ${mod.name}',
+        );
         return;
       }
-      targetDirectory = Directory(_pakModTargetDirectory(targetVersion));
+      final List<VersionEntry> selected;
+      if (compatible.length == 1) {
+        selected = compatible;
+      } else {
+        final picked = await _promptPakModInstallTargets(mod, compatible);
+        if (picked == null || picked.isEmpty) return;
+        selected = picked;
+      }
+      for (final version in selected) {
+        targetDirectories.add(_pakModTargetDirectory(version));
+        targetVersionIds.add(version.id);
+      }
     } else {
-      targetDirectory = Directory(_dllModTargetDirectory(mod));
+      targetDirectories.add(_dllModTargetDirectory(mod));
     }
 
-    await targetDirectory.create(recursive: true);
     final installedPaths = <String>[];
+    final totalDownloads = targetDirectories.length * mod.files.length;
+    var completed = 0;
     _toastProgress(
       'Downloading ${mod.name}...',
       progress: null,
       indeterminate: true,
     );
     try {
-      for (var index = 0; index < mod.files.length; index++) {
-        final file = mod.files[index];
-        final destination = File(
-          _joinPath([targetDirectory.path, _safeFileName(file.name)]),
-        );
-        await _downloadToFile(
-          file.downloadUrl,
-          destination,
-          onProgress: (received, total) {
-            final fileProgress = total == null || total <= 0
-                ? 0.0
-                : (received / total).clamp(0.0, 1.0);
-            final progress = (index + fileProgress) / mod.files.length;
-            _toastProgress(
-              'Downloading ${mod.name} (${index + 1}/${mod.files.length})',
-              progress: progress,
-              indeterminate: false,
-            );
-          },
-        );
-        installedPaths.add(destination.path);
+      for (final directoryPath in targetDirectories) {
+        final targetDirectory = Directory(directoryPath);
+        await targetDirectory.create(recursive: true);
+        for (final file in mod.files) {
+          final destination = File(
+            _joinPath([targetDirectory.path, _safeFileName(file.name)]),
+          );
+          final base = completed;
+          await _downloadToFile(
+            file.downloadUrl,
+            destination,
+            onProgress: (received, total) {
+              final fileProgress = total == null || total <= 0
+                  ? 0.0
+                  : (received / total).clamp(0.0, 1.0);
+              final progress = totalDownloads == 0
+                  ? null
+                  : (base + fileProgress) / totalDownloads;
+              _toastProgress(
+                'Downloading ${mod.name} (${base + 1}/$totalDownloads)',
+                progress: progress,
+                indeterminate: false,
+              );
+            },
+            resolveShareLinks: true,
+            rejectHtmlResponse: true,
+          );
+          installedPaths.add(destination.path);
+          completed++;
+        }
       }
 
       _installedModsById[mod.id] = _InstalledAtlasMod(
@@ -4432,14 +4953,25 @@ class _LauncherScreenState extends State<LauncherScreen>
         type: mod.type,
         name: mod.name,
         version: mod.version,
-        targetVersionId: targetVersion?.id ?? '',
+        targetVersionId: targetVersionIds.isEmpty ? '' : targetVersionIds.first,
+        targetVersionIds: targetVersionIds,
         installedFilePaths: installedPaths,
         installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+        sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
+        filesFingerprint: _atlasModFilesFingerprint(mod),
       );
       await _saveInstalledMods();
       if (mounted) setState(() {});
       _toastProgressDismiss();
-      _toast('Mod Installed "${mod.name}"');
+      _toast(
+        _atlasModActionToast(
+          action: 'Installed',
+          modName: mod.name,
+          preposition: 'to',
+          type: mod.type,
+          targetVersionIds: targetVersionIds,
+        ),
+      );
     } catch (error) {
       for (final path in installedPaths) {
         try {
@@ -4452,22 +4984,423 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  /// Multi-select build picker shared by the install and uninstall flows.
+  /// Returns the chosen builds, or `null` if the user cancels. Every build
+  /// starts selected so a single tap on the action keeps the common case fast.
+  Future<List<VersionEntry>?> _pickPakModBuilds({
+    required List<VersionEntry> builds,
+    required String title,
+    required String subtitle,
+    required String actionLabel,
+    required IconData actionIcon,
+    Color? actionColor,
+  }) async {
+    final ordered = List<VersionEntry>.from(builds)
+      ..sort((a, b) => _compareVersionStrings(b.gameVersion, a.gameVersion));
+    final selectedIds = ordered.map((version) => version.id).toSet();
+
+    return showGeneralDialog<List<VersionEntry>>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            final secondary = Theme.of(dialogContext).colorScheme.secondary;
+            final actionButtonColor = actionColor ?? secondary;
+            return SafeArea(
+              child: Center(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 480),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(dialogContext),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.1),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(dialogContext),
+                            blurRadius: 30,
+                            offset: const Offset(0, 16),
+                          ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                                color: _onSurface(dialogContext, 0.96),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              subtitle,
+                              style: TextStyle(
+                                color: _onSurface(dialogContext, 0.84),
+                                height: 1.35,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Flexible(
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    for (final version in ordered)
+                                      CheckboxListTile(
+                                        value: selectedIds.contains(version.id),
+                                        activeColor: secondary,
+                                        checkColor: Colors.white,
+                                        onChanged: (checked) => setDialogState(
+                                          () => checked == true
+                                              ? selectedIds.add(version.id)
+                                              : selectedIds.remove(version.id),
+                                        ),
+                                        contentPadding: EdgeInsets.zero,
+                                        controlAffinity:
+                                            ListTileControlAffinity.leading,
+                                        dense: true,
+                                        title: Text(
+                                          version.name.trim().isEmpty
+                                              ? _formatLibraryVersionLabel(
+                                                  version.gameVersion,
+                                                )
+                                              : version.name.trim(),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.94,
+                                            ),
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          'Version ${_formatLibraryVersionLabel(version.gameVersion)}',
+                                          style: TextStyle(
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.6,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Row(
+                              children: [
+                                _dialogCancelButton(
+                                  dialogContext,
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                ),
+                                const Spacer(),
+                                FilledButton.icon(
+                                  onPressed: selectedIds.isEmpty
+                                      ? null
+                                      : () => Navigator.of(dialogContext).pop(
+                                          ordered
+                                              .where(
+                                                (version) => selectedIds
+                                                    .contains(version.id),
+                                              )
+                                              .toList(),
+                                        ),
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: actionButtonColor,
+                                    foregroundColor: Colors.white,
+                                    disabledBackgroundColor: _onSurface(
+                                      dialogContext,
+                                      0.16,
+                                    ),
+                                    disabledForegroundColor: _onSurface(
+                                      dialogContext,
+                                      0.5,
+                                    ),
+                                  ),
+                                  icon: Icon(actionIcon),
+                                  label: Text(
+                                    selectedIds.length > 1
+                                        ? '$actionLabel (${selectedIds.length})'
+                                        : actionLabel,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+  }
+
+  /// Asks which compatible builds to install a pak mod to.
+  Future<List<VersionEntry>?> _promptPakModInstallTargets(
+    _AtlasModEntry mod,
+    List<VersionEntry> compatible,
+  ) {
+    final spec = mod.version.trim();
+    return _pickPakModBuilds(
+      builds: compatible,
+      title: 'Install ${mod.name}',
+      subtitle: spec.isEmpty
+          ? 'Choose which builds to install this mod to.'
+          : 'Compatible with $spec. Choose which of your builds to install to.',
+      actionLabel: 'Install',
+      actionIcon: Icons.download_rounded,
+    );
+  }
+
+  /// Asks which builds to remove a pak mod from.
+  Future<List<VersionEntry>?> _promptPakModUninstallTargets(
+    _AtlasModEntry mod,
+    List<VersionEntry> installedBuilds,
+  ) {
+    return _pickPakModBuilds(
+      builds: installedBuilds,
+      title: 'Uninstall ${mod.name}',
+      subtitle: 'Choose which builds to remove this mod from.',
+      actionLabel: 'Uninstall',
+      actionIcon: Icons.delete_outline_rounded,
+      actionColor: const Color(0xFFB3261E),
+    );
+  }
+
   Future<void> _uninstallAtlasMod(_AtlasModEntry mod) async {
     final installed =
         _installedModsById[mod.id] ?? _detectExistingAtlasModInstall(mod);
     if (installed == null) return;
-    for (final path in installed.installedFilePaths) {
-      try {
-        final file = File(path);
-        if (await file.exists()) await file.delete();
-      } catch (error) {
-        _log('mods', 'Failed to delete installed mod file $path: $error');
+
+    // When a pak mod is installed to more than one build, let the user choose
+    // which builds to remove it from instead of wiping all of them.
+    List<VersionEntry>? selectedBuilds;
+    if (mod.type == _AtlasModType.pak &&
+        installed.targetVersionIds.length > 1) {
+      final installedBuilds = installed.targetVersionIds
+          .map(_findVersionById)
+          .whereType<VersionEntry>()
+          .toList();
+      if (installedBuilds.length > 1) {
+        final picked = await _promptPakModUninstallTargets(
+          mod,
+          installedBuilds,
+        );
+        if (picked == null || picked.isEmpty) return;
+        selectedBuilds = picked;
       }
     }
-    _installedModsById.remove(mod.id);
+
+    Future<void> deletePaths(Iterable<String> paths) async {
+      for (final path in paths) {
+        try {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+        } catch (error) {
+          _log('mods', 'Failed to delete installed mod file $path: $error');
+        }
+      }
+    }
+
+    if (selectedBuilds == null) {
+      // Remove everything (DLL mod, single build, or legacy record).
+      await deletePaths(installed.installedFilePaths);
+      _installedModsById.remove(mod.id);
+    } else {
+      final selectedIds = selectedBuilds.map((build) => build.id).toSet();
+      for (final build in selectedBuilds) {
+        await deletePaths(
+          _atlasModFilePathsInDirectory(mod, _pakModTargetDirectory(build)),
+        );
+      }
+      final remainingIds = installed.targetVersionIds
+          .where((id) => !selectedIds.contains(id))
+          .toList();
+      if (remainingIds.isEmpty) {
+        _installedModsById.remove(mod.id);
+      } else {
+        final remainingPaths = <String>[];
+        for (final id in remainingIds) {
+          final version = _findVersionById(id);
+          if (version == null) continue;
+          remainingPaths.addAll(
+            _atlasModFilePathsInDirectory(mod, _pakModTargetDirectory(version)),
+          );
+        }
+        _installedModsById[mod.id] = installed.copyWith(
+          targetVersionId: remainingIds.first,
+          targetVersionIds: remainingIds,
+          installedFilePaths: remainingPaths,
+        );
+      }
+    }
+
     await _saveInstalledMods();
     if (mounted) setState(() {});
-    _toast('Removed ${installed.name}');
+    _toast(
+      _atlasModActionToast(
+        action: 'Removed',
+        modName: installed.name,
+        preposition: 'from',
+        type: installed.type,
+        targetVersionIds: selectedBuilds == null
+            ? installed.targetVersionIds
+            : const <String>[],
+        targetBuilds: selectedBuilds ?? const <VersionEntry>[],
+      ),
+    );
+  }
+
+  /// Re-syncs an installed mod's files to the current catalog release. Because
+  /// every target build receives the same file set, the rename / replace / add
+  /// scenarios all reduce to: delete files whose names are gone from the new
+  /// release, then (re)download the current file set in place.
+  Future<void> _updateAtlasMod(_AtlasModEntry mod, {bool announce = true}) async {
+    final installed = _installedModsById[mod.id];
+    if (installed == null || !_installedAtlasModFilesPresent(installed)) {
+      // Nothing recorded to update against; treat it as a fresh install.
+      await _installAtlasMod(mod);
+      return;
+    }
+    if (mod.files.isEmpty) {
+      _toast('${mod.name} has no downloadable files');
+      return;
+    }
+
+    // The directories the mod currently lives in (one per installed build, or
+    // the shared DLL library).
+    final targetDirectories = <String>[];
+    final targetVersionIds = <String>[];
+    if (mod.type == _AtlasModType.pak) {
+      for (final id in installed.targetVersionIds) {
+        final version = _findVersionById(id);
+        if (version == null) continue; // build was removed; skip it
+        targetDirectories.add(_pakModTargetDirectory(version));
+        targetVersionIds.add(id);
+      }
+      if (targetDirectories.isEmpty) {
+        _toast('No installed build found to update ${mod.name}');
+        return;
+      }
+    } else {
+      targetDirectories.add(_dllModTargetDirectory(mod));
+    }
+
+    // Files present in the old release but not the new one (renamed/removed).
+    final oldNames = installed.installedFilePaths.map(_basename).toSet();
+    final newNames = mod.files
+        .map((file) => _safeFileName(file.name))
+        .toSet();
+    final staleNames = oldNames.difference(newNames);
+
+    final installedPaths = <String>[];
+    final totalDownloads = targetDirectories.length * mod.files.length;
+    var completed = 0;
+    _toastProgress(
+      'Updating ${mod.name}...',
+      progress: null,
+      indeterminate: true,
+    );
+    try {
+      for (final directoryPath in targetDirectories) {
+        final directory = Directory(directoryPath);
+        await directory.create(recursive: true);
+        // Drop files that were renamed away or dropped from the new release.
+        for (final stale in staleNames) {
+          try {
+            final staleFile = File(_joinPath([directory.path, stale]));
+            if (await staleFile.exists()) await staleFile.delete();
+          } catch (error) {
+            _log('mods', 'Failed to remove stale mod file $stale: $error');
+          }
+        }
+        // (Re)download the current file set: same-name files are replaced in
+        // place, brand new files are added.
+        for (final file in mod.files) {
+          final destination = File(
+            _joinPath([directory.path, _safeFileName(file.name)]),
+          );
+          final base = completed;
+          await _downloadToFile(
+            file.downloadUrl,
+            destination,
+            onProgress: (received, total) {
+              final fileProgress = total == null || total <= 0
+                  ? 0.0
+                  : (received / total).clamp(0.0, 1.0);
+              _toastProgress(
+                'Updating ${mod.name} (${base + 1}/$totalDownloads)',
+                progress: totalDownloads == 0
+                    ? null
+                    : (base + fileProgress) / totalDownloads,
+                indeterminate: false,
+              );
+            },
+            resolveShareLinks: true,
+            rejectHtmlResponse: true,
+          );
+          installedPaths.add(destination.path);
+          completed++;
+        }
+      }
+
+      _installedModsById[mod.id] = installed.copyWith(
+        name: mod.name,
+        version: mod.version,
+        targetVersionId: targetVersionIds.isEmpty
+            ? installed.targetVersionId
+            : targetVersionIds.first,
+        targetVersionIds: targetVersionIds.isEmpty
+            ? installed.targetVersionIds
+            : targetVersionIds,
+        installedFilePaths: installedPaths,
+        installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+        sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
+        filesFingerprint: _atlasModFilesFingerprint(mod),
+      );
+      await _saveInstalledMods();
+      if (mounted) setState(() {});
+      _toastProgressDismiss();
+      if (announce) {
+        _toast(
+          _atlasModActionToast(
+            action: 'Updated',
+            modName: mod.name,
+            preposition: 'in',
+            type: mod.type,
+            targetVersionIds: targetVersionIds,
+          ),
+        );
+      }
+    } catch (error) {
+      // Leave any partially written files and the old record in place so the
+      // mod keeps working and still shows as needing an update to retry.
+      _toastProgressDismiss();
+      if (announce) _toast('Failed to update ${mod.name}');
+      _log('mods', 'Failed to update ${mod.id}: $error');
+    }
   }
 
   Map<String, _InstalledAtlasMod> _installedAtlasModsSnapshot() {
@@ -6858,11 +7791,34 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   Future<void> _handleRefreshPressed() async {
     await _refreshRuntime();
-    await _loadLauncherContent(forceRefresh: true, silent: false);
+    // Run each check silently and surface a single result so the button never
+    // stacks several toasts ("No updates available" + "Files are up to date").
+    await _loadLauncherContent(forceRefresh: true, silent: true);
+    var launcherUpdateShown = false;
     if (_settings.launcherUpdateChecksEnabled) {
-      await _checkForLauncherUpdates(silent: false);
+      launcherUpdateShown = await _checkForLauncherUpdates(silent: true);
     }
-    await _checkForBundledDllDefaultUpdates(silent: false);
+    // When a launcher update dialog is showing, that's the message — skip the
+    // file-status toast so it doesn't appear behind the dialog.
+    await _checkForFileUpdates(silent: launcherUpdateShown);
+  }
+
+  /// Manual "Check For Updates" for launcher-managed files: bundled default
+  /// DLLs plus installed Paks and library DLLs. Refreshes both sources and
+  /// reports a single result so the badges reflect what's available.
+  Future<void> _checkForFileUpdates({required bool silent}) async {
+    await _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: true);
+    try {
+      await _loadModsLibrary(forceRefresh: true, silentRefreshToast: true);
+    } catch (error) {
+      _log('mods', 'Failed to refresh mod catalog during update check: $error');
+    }
+    if (silent || !mounted) return;
+    if (_bundledDllDefaultsUpdateAvailable || _hasAtlasModUpdates) {
+      _toast('File updates are available');
+    } else {
+      _toast('Files are up to date');
+    }
   }
 
   String _resolveLauncherContentImagePath(String value) {
@@ -6952,24 +7908,28 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
-  Future<void> _checkForLauncherUpdates({required bool silent}) async {
-    if (!_settings.launcherUpdateChecksEnabled) return;
-    if (_checkingLauncherUpdate) return;
-    if (_launcherUpdateDialogVisible) return;
+  /// Returns true if an update was found and its dialog was shown.
+  Future<bool> _checkForLauncherUpdates({required bool silent}) async {
+    if (!_settings.launcherUpdateChecksEnabled) return false;
+    if (_checkingLauncherUpdate) return false;
+    if (_launcherUpdateDialogVisible) return false;
     _checkingLauncherUpdate = true;
     try {
       final info = await LauncherUpdateService.checkForUpdate(
         currentVersion: _launcherVersion,
       );
-      if (!mounted) return;
+      if (!mounted) return false;
       if (info == null) {
         if (!silent) _toast('No updates available');
-        return;
+        return false;
       }
       await _showLauncherUpdateDialog(info);
+      return true;
     } catch (_) {
-      if (!mounted || silent) return;
-      _toast('Unable to check for updates right now');
+      if (mounted && !silent) {
+        _toast('Unable to check for updates right now');
+      }
+      return false;
     } finally {
       _checkingLauncherUpdate = false;
     }
@@ -17306,10 +18266,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               Expanded(
                                 child: NotificationListener<ScrollNotification>(
                                   onNotification: (notification) {
-                                    if (notification
-                                            is ScrollStartNotification ||
+                                    final userScrollStart =
                                         notification
-                                            is ScrollUpdateNotification) {
+                                            is ScrollStartNotification &&
+                                        notification.dragDetails != null;
+                                    final userScrollUpdate =
+                                        notification
+                                            is ScrollUpdateNotification &&
+                                        notification.dragDetails != null;
+                                    if (userScrollStart || userScrollUpdate) {
                                       _pauseBackgroundMotionBriefly();
                                     }
                                     return false;
@@ -18512,6 +19477,30 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  // Small red "!" badge reused for the Mods nav alert and the per-mod card.
+  Widget _atlasUpdateBadge({double size = 14}) {
+    final badgeBorder = Theme.of(context).colorScheme.surface;
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xFFD93025),
+        shape: BoxShape.circle,
+        border: Border.all(color: badgeBorder, width: 1.1),
+      ),
+      child: Text(
+        '!',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size * 0.7,
+          fontWeight: FontWeight.w800,
+          height: 1,
+        ),
+      ),
+    );
+  }
+
   Widget _titleActionButton(
     IconData icon,
     VoidCallback onTap, {
@@ -18937,11 +19926,28 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  item.icon,
-                  size: 19,
-                  color: _onSurface(context, item.selected ? 1 : 0.70),
-                ),
+                if (item.key == 'mods' && _hasAtlasModUpdates)
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(
+                        item.icon,
+                        size: 19,
+                        color: _onSurface(context, item.selected ? 1 : 0.70),
+                      ),
+                      Positioned(
+                        top: -4,
+                        right: -6,
+                        child: _atlasUpdateBadge(size: 13),
+                      ),
+                    ],
+                  )
+                else
+                  Icon(
+                    item.icon,
+                    size: 19,
+                    color: _onSurface(context, item.selected ? 1 : 0.70),
+                  ),
                 const SizedBox(height: 2),
                 Text(
                   item.label,
@@ -19211,6 +20217,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final previousTab = _tab;
     final previousContentTabId = _selectedContentTabId;
     final normalizedContentTabId = (contentTabId ?? '').trim();
+    if (tab == LauncherTab.mods && previousTab != LauncherTab.mods) {
+      _resetModsCardEntranceAnimations();
+    }
     setState(() {
       if (tab == LauncherTab.general && previousTab != LauncherTab.general) {
         _settingsReturnTab = previousTab;
@@ -20845,6 +21854,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final visibleMods = _modsInstalledFilter == _ModsInstalledFilter.installed
         ? typeSearchMods.where(_isAtlasModInstalled).toList()
         : typeSearchMods;
+    final cardEntranceSignature =
+        '${_modsType.name}|${_modsInstalledFilter.name}|$query|'
+        '${visibleMods.map((mod) => mod.id).join('|')}';
+    if (_modsCardEntranceSignature != cardEntranceSignature) {
+      _modsCardEntranceSignature = cardEntranceSignature;
+      _animatingModCardEntranceKeys.clear();
+      _settledModCardEntranceKeys.clear();
+    }
     final showFilterBar = _modsLoadError.isEmpty && _modsLibrary.isNotEmpty;
     final hasInstalledMods = _installedAtlasModsSnapshot().isNotEmpty;
     final showBlockingLoading = _modsLoading && _modsLibrary.isEmpty;
@@ -21007,14 +22024,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   title:
                                       _modsInstalledFilter ==
                                           _ModsInstalledFilter.installed
-                                      ? 'No Installed ${_modsType.folderName}'
-                                      : 'No ${_modsType.folderName} available',
+                                      ? 'No Installed ${_modsType.displayPlural}'
+                                      : 'No ${_modsType.displayPlural} available',
                                   subtitle: _modsSearchQuery.trim().isNotEmpty
                                       ? 'No mods match your search.'
                                       : _modsInstalledFilter ==
                                             _ModsInstalledFilter.installed
                                       ? 'Install a mod and it will appear here.'
-                                      : 'There are currently no available ${_modsType.folderName} to download.',
+                                      : 'There are currently no available ${_modsType.displayPlural} to download.',
                                 ),
                               )
                             else
@@ -21241,14 +22258,29 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     required int index,
     required Widget child,
   }) {
-    if (MediaQuery.of(context).disableAnimations) return child;
+    final cardKey = ValueKey('mod-card-$switchKey');
+    final disableAnimations =
+        MediaQuery.of(context).disableAnimations ||
+        _windowResizeBlurPaused ||
+        _suppressModCardEntranceAnimations;
+    final settled = _settledModCardEntranceKeys.contains(switchKey);
+    if (disableAnimations || settled) {
+      _animatingModCardEntranceKeys.remove(switchKey);
+      _settledModCardEntranceKeys.add(switchKey);
+      return KeyedSubtree(key: cardKey, child: child);
+    }
 
+    _animatingModCardEntranceKeys.add(switchKey);
     final delay = (0.045 * min(index, 8)).clamp(0.0, 0.36);
     return TweenAnimationBuilder<double>(
-      key: ValueKey('mod-card-$switchKey'),
+      key: cardKey,
       tween: Tween<double>(begin: 0.0, end: 1.0),
       duration: const Duration(milliseconds: 480),
       curve: Interval(delay, 1.0, curve: Curves.easeOutCubic),
+      onEnd: () {
+        _animatingModCardEntranceKeys.remove(switchKey);
+        _settledModCardEntranceKeys.add(switchKey);
+      },
       builder: (context, t, child) {
         return Opacity(
           opacity: t,
@@ -21266,10 +22298,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _modsHeaderTitle() {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
-    final total = _modsLibrary.length;
-    final subtitle = total == 0
-        ? 'Community mods for your ATLAS builds'
-        : '$total mod${total == 1 ? '' : 's'} available from ATLAS Resources';
+    final isDll = _modsType == _AtlasModType.dll;
+    final typeCount = _modsLibrary.where((mod) => mod.type == _modsType).length;
+    final title = isDll ? 'DLL Library' : 'PAK Library';
+    final singular = isDll ? 'DLL' : 'PAK';
+    final plural = _modsType.displayPlural;
+    final itemLabel = typeCount == 1 ? singular : plural;
+    final subtitle = '$typeCount $itemLabel available from ATLAS Resources';
+    final icon = isDll ? Icons.science_rounded : Icons.inventory_2_rounded;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -21289,11 +22325,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             borderRadius: BorderRadius.circular(14),
             border: Border.all(color: secondary.withValues(alpha: 0.42)),
           ),
-          child: Icon(
-            Icons.extension_rounded,
-            color: secondary.withValues(alpha: 0.95),
-            size: 24,
-          ),
+          child: Icon(icon, color: secondary.withValues(alpha: 0.95), size: 24),
         ),
         const SizedBox(width: 13),
         Column(
@@ -21301,7 +22333,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Mod Library',
+              title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -21326,6 +22358,39 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         ),
       ],
     );
+  }
+
+  String _formatAtlasModLastUpdated(int epochMs) {
+    if (epochMs <= 0) return 'Last Updated: Unknown';
+    final updatedAt = DateTime.fromMillisecondsSinceEpoch(epochMs, isUtc: true);
+    final difference = DateTime.now().toUtc().difference(updatedAt);
+    if (difference.isNegative || difference.inMinutes < 1) {
+      return 'Last Updated: just now';
+    }
+
+    int value;
+    String unit;
+    if (difference.inDays >= 365) {
+      value = difference.inDays ~/ 365;
+      unit = 'year';
+    } else if (difference.inDays >= 30) {
+      value = difference.inDays ~/ 30;
+      unit = 'month';
+    } else if (difference.inDays >= 7) {
+      value = difference.inDays ~/ 7;
+      unit = 'week';
+    } else if (difference.inDays >= 1) {
+      value = difference.inDays;
+      unit = 'day';
+    } else if (difference.inHours >= 1) {
+      value = difference.inHours;
+      unit = 'hour';
+    } else {
+      value = difference.inMinutes;
+      unit = 'minute';
+    }
+
+    return 'Last Updated: $value $unit${value == 1 ? '' : 's'} ago';
   }
 
   // Segmented toggle for the mod type (Paks / DLLs) with live counts. Uses a
@@ -21408,7 +22473,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
               const SizedBox(width: 7),
               Text(
-                type.folderName,
+                type.displayPlural,
                 style: TextStyle(
                   color: selected
                       ? Colors.white
@@ -21428,6 +22493,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
     final installed = _isAtlasModInstalled(mod);
+    final updateAvailable = _atlasModUpdateAvailable(mod);
     final descriptionPreview = _plainTextMarkdownPreview(
       mod.cardDescription.trim().isNotEmpty
           ? mod.cardDescription
@@ -21442,22 +22508,37 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 520;
-        final bgCacheWidth =
-            ((constraints.maxWidth.isFinite ? constraints.maxWidth : 520.0) *
-                    MediaQuery.of(context).devicePixelRatio)
-                .round()
-                .clamp(1, 4096);
+        final dpr = MediaQuery.of(context).devicePixelRatio;
         final thumbSize = compact ? 78.0 : 88.0;
+        final thumbProvider = ResizeImage(
+          image,
+          width: _imageCacheExtent(
+            thumbSize,
+            dpr,
+            qualityScale: 3.0,
+            max: 1024,
+          ),
+        );
+        final bgProvider = ResizeImage(
+          image,
+          width: _imageCacheExtent(
+            compact ? 360 : 520,
+            dpr,
+            qualityScale: 0.7,
+            max: 1024,
+          ),
+        );
 
-        final thumb = ClipRRect(
+        final thumbImage = ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: Image(
-            image: image,
+            image: thumbProvider,
             width: thumbSize,
             height: thumbSize,
             fit: BoxFit.cover,
             alignment: Alignment.center,
             filterQuality: FilterQuality.high,
+            gaplessPlayback: true,
             errorBuilder: (context, error, stackTrace) {
               return Image.asset(
                 'assets/images/missingasset.webp',
@@ -21469,6 +22550,20 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             },
           ),
         );
+        // A "!" badge marks installed mods that have a newer catalog release.
+        final thumb = updateAvailable
+            ? Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  thumbImage,
+                  Positioned(
+                    top: -5,
+                    right: -5,
+                    child: _atlasUpdateBadge(size: 18),
+                  ),
+                ],
+              )
+            : thumbImage;
 
         // Pills are fully metadata-driven: the optional version pill and any
         // free-form tags from the mod's metadata.json. Tags are capped to fit
@@ -21491,7 +22586,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
             for (final tag in visibleTags) _modPill(tag),
             if (hiddenTagCount > 0) _modPill('+$hiddenTagCount'),
-            if (installed)
+            if (updateAvailable)
+              _modPill(
+                'Update',
+                icon: Icons.upgrade_rounded,
+                color: const Color(0xFFE8A23D),
+              )
+            else if (installed)
               _modPill(
                 'Installed',
                 icon: Icons.check_rounded,
@@ -21593,9 +22694,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       child: ImageFiltered(
                         imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
                         child: Image(
-                          image: ResizeImage(image, width: bgCacheWidth),
+                          image: bgProvider,
                           fit: BoxFit.cover,
                           filterQuality: FilterQuality.low,
+                          gaplessPlayback: true,
                           errorBuilder: (context, error, stackTrace) {
                             return Image.asset(
                               'assets/images/missingasset.webp',
@@ -21712,6 +22814,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     IconData? icon,
     Color? color,
     bool prominent = false,
+    double? maxWidth,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final base = color ?? Theme.of(context).colorScheme.secondary;
@@ -21720,7 +22823,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final textColor = color == null
         ? Colors.white.withValues(alpha: prominent ? 1.0 : 0.94)
         : Colors.white;
-    return Container(
+    final labelText = Text(
+      label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        color: textColor,
+        fontSize: 11,
+        fontWeight: FontWeight.w900,
+      ),
+    );
+    final pill = Container(
       padding: EdgeInsets.fromLTRB(icon == null ? 10 : 8, 5, 10, 5),
       decoration: BoxDecoration(
         color: color == null
@@ -21753,18 +22866,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             ),
             const SizedBox(width: 5),
           ],
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: textColor,
-              fontSize: 11,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
+          if (maxWidth == null) labelText else Flexible(child: labelText),
         ],
       ),
+    );
+    if (maxWidth == null) return pill;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: pill,
     );
   }
 
@@ -21774,19 +22883,40 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     required ValueChanged<bool> onWatchingChanged,
   }) {
     if (media.type == _AtlasModMediaType.image) {
-      return Image(
-        image: _launcherContentImageProvider(
-          media.url,
-          fallbackAsset: 'assets/images/missingasset.webp',
-        ),
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) {
-          return Image.asset(
-            'assets/images/missingasset.webp',
+      final provider = _atlasModDetailImageProvider(media, context);
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(
+            color: _adaptiveScrimColor(
+              context,
+              darkAlpha: 0.18,
+              lightAlpha: 0.14,
+            ),
+          ),
+          Image(
+            image: provider,
             fit: BoxFit.cover,
             filterQuality: FilterQuality.medium,
-          );
-        },
+            gaplessPlayback: true,
+            frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+              final visible = wasSynchronouslyLoaded || frame != null;
+              return AnimatedOpacity(
+                opacity: visible ? 1 : 0,
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                child: child,
+              );
+            },
+            errorBuilder: (context, error, stackTrace) {
+              return Image.asset(
+                'assets/images/missingasset.webp',
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
+              );
+            },
+          ),
+        ],
       );
     }
     return _AtlasModPlaybackViewer(
@@ -21796,15 +22926,50 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  ImageProvider<Object> _atlasModDetailImageProvider(
+    _AtlasModMedia media,
+    BuildContext context,
+  ) {
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    return ResizeImage(
+      _launcherContentImageProvider(
+        media.url,
+        fallbackAsset: 'assets/images/missingasset.webp',
+      ),
+      width: _imageCacheExtent(760, dpr, qualityScale: 1.0, max: 2048),
+    );
+  }
+
+  Future<void> _precacheAtlasModDetailImages(List<_AtlasModMedia> media) async {
+    if (!mounted || media.isEmpty) return;
+    final imageMedia = media
+        .where((item) => item.type == _AtlasModMediaType.image)
+        .take(2)
+        .toList();
+    for (final item in imageMedia) {
+      if (!mounted) return;
+      try {
+        await precacheImage(
+          _atlasModDetailImageProvider(item, context),
+          context,
+        );
+      } catch (_) {
+        // Ignore missing or slow media; the dialog has its own fallback.
+      }
+    }
+  }
+
   Future<void> _showAtlasModDetails(_AtlasModEntry mod) async {
     if (!mounted) return;
     final media = mod.detailMedia;
+    unawaited(_precacheAtlasModDetailImages(media));
     final pageController = PageController();
     final detailsScrollController = ScrollController();
     Timer? mediaTimer;
     final watchingMediaIndexes = <int>{};
     var imageIndex = 0;
     var actionBusy = false;
+    var updating = false;
     var mediaHover = false;
     const mediaSwitchDuration = Duration(milliseconds: 360);
     const mediaSwitchCurve = Curves.easeOutCubic;
@@ -21889,6 +23054,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             dialogContext,
                           ).colorScheme.secondary;
                           final installed = _isAtlasModInstalled(mod);
+                          final updateAvailable =
+                              installed && _atlasModUpdateAvailable(mod);
+                          // Pak mods can only install into a build the user has
+                          // imported that the mod is compatible with. With none
+                          // available, the Install action is disabled.
+                          final hasCompatibleBuild =
+                              mod.type != _AtlasModType.pak ||
+                              _compatibleVersionsForPakMod(mod).isNotEmpty;
                           return Container(
                             margin: const EdgeInsets.symmetric(horizontal: 20),
                             padding: const EdgeInsets.fromLTRB(20, 20, 0, 18),
@@ -21988,6 +23161,43 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                               },
                                                             );
                                                           },
+                                                        ),
+                                                        Positioned(
+                                                          top: 12,
+                                                          left: 12,
+                                                          right:
+                                                              mod.version
+                                                                  .trim()
+                                                                  .isNotEmpty
+                                                              ? 94
+                                                              : 12,
+                                                          child: LayoutBuilder(
+                                                            builder:
+                                                                (
+                                                                  context,
+                                                                  constraints,
+                                                                ) {
+                                                                  return Align(
+                                                                    alignment:
+                                                                        Alignment
+                                                                            .centerLeft,
+                                                                    child: _modPill(
+                                                                      _formatAtlasModLastUpdated(
+                                                                        mod.lastUpdatedEpochMs,
+                                                                      ),
+                                                                      icon: Icons
+                                                                          .history_rounded,
+                                                                      prominent:
+                                                                          true,
+                                                                      maxWidth: min(
+                                                                        260,
+                                                                        constraints
+                                                                            .maxWidth,
+                                                                      ),
+                                                                    ),
+                                                                  );
+                                                                },
+                                                          ),
                                                         ),
                                                         if (mod.version
                                                             .trim()
@@ -22201,7 +23411,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                     _modMetaChip(
                                       dialogContext,
                                       Icons.folder_rounded,
-                                      mod.type.folderName,
+                                      mod.type.displayPlural,
                                     ),
                                     _modMetaChip(
                                       dialogContext,
@@ -22270,8 +23480,77 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                 ),
                                                 label: const Text('Source'),
                                               ),
+                                              if (updateAvailable)
+                                                FilledButton.icon(
+                                                  onPressed: actionBusy
+                                                      ? null
+                                                      : () async {
+                                                          setDialogState(() {
+                                                            actionBusy = true;
+                                                            updating = true;
+                                                          });
+                                                          await _updateAtlasMod(
+                                                            mod,
+                                                          );
+                                                          if (dialogContext
+                                                              .mounted) {
+                                                            setDialogState(() {
+                                                              actionBusy = false;
+                                                              updating = false;
+                                                            });
+                                                          }
+                                                        },
+                                                  style:
+                                                      FilledButton.styleFrom(
+                                                        backgroundColor:
+                                                            const Color(
+                                                              0xFFE8A23D,
+                                                            ),
+                                                        foregroundColor:
+                                                            Colors.white,
+                                                        disabledBackgroundColor:
+                                                            _onSurface(
+                                                              dialogContext,
+                                                              0.16,
+                                                            ),
+                                                        disabledForegroundColor:
+                                                            _onSurface(
+                                                              dialogContext,
+                                                              0.5,
+                                                            ),
+                                                        shape:
+                                                            const StadiumBorder(),
+                                                        padding:
+                                                            const EdgeInsets.symmetric(
+                                                              horizontal: 18,
+                                                              vertical: 12,
+                                                            ),
+                                                      ),
+                                                  icon: updating
+                                                      ? const SizedBox(
+                                                          width: 18,
+                                                          height: 18,
+                                                          child:
+                                                              CircularProgressIndicator(
+                                                                strokeWidth: 2,
+                                                                color: Colors
+                                                                    .white,
+                                                              ),
+                                                        )
+                                                      : const Icon(
+                                                          Icons.upgrade_rounded,
+                                                        ),
+                                                  label: Text(
+                                                    updating
+                                                        ? 'Updating...'
+                                                        : 'Update',
+                                                  ),
+                                                ),
                                               FilledButton.icon(
-                                                onPressed: actionBusy
+                                                onPressed:
+                                                    actionBusy ||
+                                                        (!installed &&
+                                                            !hasCompatibleBuild)
                                                     ? null
                                                     : () async {
                                                         setDialogState(
@@ -22317,7 +23596,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                         vertical: 12,
                                                       ),
                                                 ),
-                                                icon: actionBusy
+                                                icon: (actionBusy && !updating)
                                                     ? const SizedBox(
                                                         width: 18,
                                                         height: 18,
@@ -22336,13 +23615,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                                   .download_rounded,
                                                       ),
                                                 label: Text(
-                                                  actionBusy
+                                                  (actionBusy && !updating)
                                                       ? (installed
                                                             ? 'Removing...'
                                                             : 'Installing...')
                                                       : (installed
                                                             ? 'Uninstall'
-                                                            : 'Install'),
+                                                            : (hasCompatibleBuild
+                                                                  ? 'Install'
+                                                                  : 'No Compatible Build')),
                                                 ),
                                               ),
                                             ],
@@ -23293,12 +24574,16 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final dpr = MediaQuery.of(context).devicePixelRatio;
-        final maxWidth = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : 520.0;
-        final bgCacheWidth = (maxWidth * dpr).round().clamp(1, 4096);
-        final thumbCache = _imageCacheExtent(72, dpr, max: 1024);
-        final bgProvider = ResizeImage(splashImage, width: bgCacheWidth);
+        final thumbCache = _imageCacheExtent(
+          72,
+          dpr,
+          qualityScale: 1.15,
+          max: 384,
+        );
+        final bgProvider = ResizeImage(
+          splashImage,
+          width: _imageCacheExtent(520, dpr, qualityScale: 0.7, max: 1024),
+        );
         final thumbProvider = ResizeImage(splashImage, width: thumbCache);
 
         final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
@@ -23361,6 +24646,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           image: bgProvider,
                           fit: BoxFit.cover,
                           filterQuality: FilterQuality.low,
+                          gaplessPlayback: true,
                           errorBuilder: (context, error, stackTrace) {
                             return Image.asset(
                               'assets/images/missingasset.webp',
@@ -23423,6 +24709,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               height: 72,
                               fit: BoxFit.cover,
                               filterQuality: FilterQuality.medium,
+                              gaplessPlayback: true,
                               errorBuilder: (context, error, stackTrace) {
                                 return Image.asset(
                                   'assets/images/missingasset.webp',
@@ -25578,10 +26865,88 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     }
   }
 
+  /// Pulls a Google Drive file id out of any of its common share URL shapes.
+  String? _extractGoogleDriveFileId(String url) {
+    for (final pattern in const <String>[
+      r'/file/d/([A-Za-z0-9_-]{10,})',
+      r'/d/([A-Za-z0-9_-]{10,})',
+      r'[?&]id=([A-Za-z0-9_-]{10,})',
+    ]) {
+      final match = RegExp(pattern).firstMatch(url);
+      if (match != null) return match.group(1);
+    }
+    return null;
+  }
+
+  /// Scrapes a MediaFire file page for its real direct-download URL.
+  Future<String?> _resolveMediaFireDirectUrl(String pageUrl) async {
+    try {
+      final html = await _downloadText(pageUrl);
+      final href = RegExp(
+        r'href="(https?://download[^"]+\.mediafire\.com/[^"]+)"',
+      ).firstMatch(html);
+      if (href != null) return href.group(1);
+      // Newer pages base64-encode the link in a data attribute.
+      final scrambled = RegExp(
+        r'data-scrambled-url="([^"]+)"',
+      ).firstMatch(html);
+      if (scrambled != null) {
+        try {
+          final decoded = utf8.decode(base64.decode(scrambled.group(1)!.trim()));
+          if (decoded.startsWith('http')) return decoded;
+        } catch (_) {}
+      }
+      return null;
+    } catch (error) {
+      _log('mods', 'Failed to resolve MediaFire link $pageUrl: $error');
+      return null;
+    }
+  }
+
+  /// Converts known share-link hosts into direct download URLs. Direct/raw
+  /// links (including GitHub) pass through unchanged. MEGA can't be fetched
+  /// with a plain GET (end-to-end encrypted), so it fails with a clear message.
+  Future<String> _resolveModDownloadUrl(String url) async {
+    final trimmed = url.trim();
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return trimmed;
+    }
+    final host = uri.host.toLowerCase();
+
+    if (host.contains('mega.nz') || host.contains('mega.co.nz')) {
+      throw 'MEGA links are not supported. Host the file on a direct-download '
+          'URL instead.';
+    }
+
+    if (host.contains('drive.google.com') || host.contains('docs.google.com')) {
+      final id = _extractGoogleDriveFileId(trimmed);
+      if (id != null && id.isNotEmpty) {
+        // The usercontent endpoint serves large files without the virus-scan
+        // interstitial that the classic uc?export=download URL shows.
+        return 'https://drive.usercontent.google.com/download'
+            '?id=$id&export=download&confirm=t';
+      }
+      return trimmed;
+    }
+
+    if (host.contains('mediafire.com')) {
+      if (host.startsWith('download')) return trimmed; // already direct
+      return await _resolveMediaFireDirectUrl(trimmed) ?? trimmed;
+    }
+
+    return trimmed;
+  }
+
   Future<void> _downloadToFile(
     String url,
     File destination, {
     void Function(int receivedBytes, int? totalBytes)? onProgress,
+    // For mod files: rewrite known share-link hosts (Google Drive, MediaFire)
+    // into direct download URLs, and reject HTML landing pages so they can't be
+    // saved as a pak/dll.
+    bool resolveShareLinks = false,
+    bool rejectHtmlResponse = false,
   }) async {
     final trimmed = url.trim();
     final uri = Uri.tryParse(trimmed);
@@ -25605,28 +26970,65 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20)
       ..userAgent = 'ATLAS-Link';
+    // Download to a temp file and atomically swap it into place on success, so
+    // an interrupted or stalled download can never leave a partial/corrupt file
+    // at the destination.
+    final partFile = File('${destination.path}.part');
     IOSink? sink;
     try {
-      final request = await client.getUrl(Uri.parse(url));
+      final effectiveUrl = resolveShareLinks
+          ? await _resolveModDownloadUrl(trimmed)
+          : trimmed;
+      final request = await client.getUrl(Uri.parse(effectiveUrl));
       request.followRedirects = true;
       request.maxRedirects = 8;
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw 'Download failed (HTTP ${response.statusCode}).';
       }
-      sink = destination.openWrite();
+      if (rejectHtmlResponse) {
+        final mime =
+            response.headers.contentType?.mimeType.toLowerCase() ?? '';
+        if (mime == 'text/html' || mime == 'application/xhtml+xml') {
+          throw 'Download did not return a file (got an HTML page). Use a '
+              'direct download link.';
+        }
+      }
+      sink = partFile.openWrite();
       final totalBytes = response.contentLength > 0
           ? response.contentLength
           : null;
       var receivedBytes = 0;
-      await for (final chunk in response) {
+      // Idle timeout: if no data arrives for a while, fail instead of hanging
+      // forever on a stalled connection.
+      await for (final chunk in response.timeout(
+        const Duration(seconds: 60),
+      )) {
         sink.add(chunk);
         receivedBytes += chunk.length;
         onProgress?.call(receivedBytes, totalBytes);
       }
       await sink.flush();
+      await sink.close();
+      sink = null;
+      if (await destination.exists()) {
+        await destination.delete();
+      }
+      await partFile.rename(destination.path);
+    } catch (_) {
+      // Drop the partial temp file; leave any existing destination untouched.
+      try {
+        await sink?.close();
+      } catch (_) {}
+      sink = null;
+      try {
+        if (await partFile.exists()) await partFile.delete();
+      } catch (_) {}
+      rethrow;
     } finally {
-      await sink?.close();
+      try {
+        await sink?.close();
+      } catch (_) {}
       client.close(force: true);
     }
   }
@@ -27815,9 +29217,9 @@ foreach ($app in $appPaths) {
                     });
                     unawaited(_saveSettings(toast: false));
                   },
-                  title: const Text('Update Default DLLs on Launch'),
+                  title: const Text('Update Files on Launch'),
                   subtitle: const Text(
-                    'Refresh launcher-managed default DLLs when Link opens. Custom DLL paths are never changed.',
+                    'Refresh launcher-managed default DLLs and update your installed Paks and library DLLs when Link opens. Custom DLL paths are never changed.',
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -28604,16 +30006,37 @@ foreach ($app in $appPaths) {
       },
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(radius),
-              color: _glassSurfaceColor(context),
-              border: Border.all(color: _onSurface(context, 0.08)),
-            ),
-            child: child,
-          ),
+        child: ValueListenableBuilder<bool>(
+          valueListenable: _windowResizeBlurPausedNotifier,
+          child: child,
+          builder: (context, blurPaused, panelChild) {
+            return TweenAnimationBuilder<double>(
+              tween: Tween<double>(end: blurPaused ? 0.0 : 16.0),
+              duration: blurPaused
+                  ? Duration.zero
+                  : _windowResizeBlurFadeInDuration,
+              curve: Curves.easeOutCubic,
+              builder: (context, blurSigma, panelChild) {
+                final panel = Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(radius),
+                    color: _glassSurfaceColor(context),
+                    border: Border.all(color: _onSurface(context, 0.08)),
+                  ),
+                  child: panelChild,
+                );
+                if (blurSigma <= 0.01) return panel;
+                return BackdropFilter(
+                  filter: ImageFilter.blur(
+                    sigmaX: blurSigma,
+                    sigmaY: blurSigma,
+                  ),
+                  child: panel,
+                );
+              },
+              child: panelChild,
+            );
+          },
         ),
       ),
     );
@@ -30291,17 +31714,30 @@ class _AtlasModFile {
     required this.name,
     required this.downloadUrl,
     required this.relativePath,
+    this.sha = '',
   });
 
   final String name;
   final String downloadUrl;
   final String relativePath;
+  // Git blob SHA of the file content. Used as a content fingerprint so update
+  // detection only fires when the actual installable file changes (not when
+  // metadata/screenshots in the same folder change). Empty when unknown.
+  final String sha;
+
+  _AtlasModFile withSha(String value) => _AtlasModFile(
+    name: name,
+    downloadUrl: downloadUrl,
+    relativePath: relativePath,
+    sha: value,
+  );
 
   factory _AtlasModFile.fromJson(Map<String, dynamic> json) {
     return _AtlasModFile(
       name: (json['name'] ?? '').toString(),
       downloadUrl: (json['downloadUrl'] ?? json['url'] ?? '').toString(),
       relativePath: (json['relativePath'] ?? json['path'] ?? '').toString(),
+      sha: (json['sha'] ?? '').toString(),
     );
   }
 
@@ -30310,6 +31746,7 @@ class _AtlasModFile {
       'name': name,
       'downloadUrl': downloadUrl,
       'relativePath': relativePath,
+      'sha': sha,
     };
   }
 }
@@ -30564,6 +32001,7 @@ class _AtlasModEntry {
     required this.media,
     required this.sourceUrl,
     required this.files,
+    this.lastUpdatedEpochMs = 0,
   });
 
   final String id;
@@ -30582,6 +32020,28 @@ class _AtlasModEntry {
   final List<_AtlasModMedia> media;
   final String sourceUrl;
   final List<_AtlasModFile> files;
+  final int lastUpdatedEpochMs;
+
+  _AtlasModEntry copyWith({int? lastUpdatedEpochMs}) {
+    return _AtlasModEntry(
+      id: id,
+      type: type,
+      folderName: folderName,
+      folderPath: folderPath,
+      name: name,
+      author: author,
+      cardDescription: cardDescription,
+      description: description,
+      version: version,
+      tags: tags,
+      cardImage: cardImage,
+      images: images,
+      media: media,
+      sourceUrl: sourceUrl,
+      files: files,
+      lastUpdatedEpochMs: lastUpdatedEpochMs ?? this.lastUpdatedEpochMs,
+    );
+  }
 
   String get primaryImage {
     if (cardImage.trim().isNotEmpty) return cardImage;
@@ -30642,6 +32102,13 @@ class _AtlasModEntry {
           .toList();
     }
 
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
     final filesRaw = json['files'];
     final files = filesRaw is List
         ? filesRaw
@@ -30688,6 +32155,12 @@ class _AtlasModEntry {
       media: media,
       sourceUrl: (json['sourceUrl'] ?? '').toString(),
       files: files,
+      lastUpdatedEpochMs: asInt(
+        json['lastUpdatedEpochMs'] ??
+            json['lastUpdatedAtEpochMs'] ??
+            json['updatedAtEpochMs'],
+        0,
+      ),
     );
   }
 
@@ -30708,6 +32181,7 @@ class _AtlasModEntry {
       'media': media.map((item) => item.toJson()).toList(),
       'sourceUrl': sourceUrl,
       'files': files.map((file) => file.toJson()).toList(),
+      'lastUpdatedEpochMs': lastUpdatedEpochMs,
     };
   }
 }
@@ -30719,17 +32193,56 @@ class _InstalledAtlasMod {
     required this.name,
     required this.version,
     required this.targetVersionId,
+    this.targetVersionIds = const <String>[],
     required this.installedFilePaths,
     required this.installedAtEpochMs,
+    this.sourceLastUpdatedEpochMs = 0,
+    this.filesFingerprint = '',
   });
 
   final String id;
   final _AtlasModType type;
   final String name;
   final String version;
+  // Kept for backwards compatibility (first install target).
   final String targetVersionId;
+  // Every build this mod was installed to. A pak mod can target multiple
+  // compatible builds at once.
+  final List<String> targetVersionIds;
   final List<String> installedFilePaths;
   final int installedAtEpochMs;
+  // The catalog mod's "last updated" commit time at the moment this copy was
+  // installed/updated. Fallback update signal when file SHAs are unavailable.
+  final int sourceLastUpdatedEpochMs;
+  // Content fingerprint of the installable files (sorted name:sha). The library
+  // shows an update when the catalog's fingerprint differs from this, so only
+  // changes to the actual game files count (not metadata/screenshots).
+  final String filesFingerprint;
+
+  _InstalledAtlasMod copyWith({
+    String? name,
+    String? version,
+    String? targetVersionId,
+    List<String>? targetVersionIds,
+    List<String>? installedFilePaths,
+    int? installedAtEpochMs,
+    int? sourceLastUpdatedEpochMs,
+    String? filesFingerprint,
+  }) {
+    return _InstalledAtlasMod(
+      id: id,
+      type: type,
+      name: name ?? this.name,
+      version: version ?? this.version,
+      targetVersionId: targetVersionId ?? this.targetVersionId,
+      targetVersionIds: targetVersionIds ?? this.targetVersionIds,
+      installedFilePaths: installedFilePaths ?? this.installedFilePaths,
+      installedAtEpochMs: installedAtEpochMs ?? this.installedAtEpochMs,
+      sourceLastUpdatedEpochMs:
+          sourceLastUpdatedEpochMs ?? this.sourceLastUpdatedEpochMs,
+      filesFingerprint: filesFingerprint ?? this.filesFingerprint,
+    );
+  }
 
   factory _InstalledAtlasMod.fromJson(Map<String, dynamic> json) {
     int asInt(dynamic value, int fallback) {
@@ -30746,22 +32259,34 @@ class _InstalledAtlasMod {
           : _AtlasModType.pak;
     }
 
+    List<String> stringList(dynamic value) {
+      if (value is! List) return <String>[];
+      return value
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+
     final pathsRaw = json['installedFilePaths'] ?? json['files'];
-    final paths = pathsRaw is List
-        ? pathsRaw
-              .map((path) => path.toString().trim())
-              .where((path) => path.isNotEmpty)
-              .toList()
-        : <String>[];
+    final paths = stringList(pathsRaw);
+
+    final singleTarget = (json['targetVersionId'] ?? '').toString();
+    var targetVersionIds = stringList(json['targetVersionIds']);
+    if (targetVersionIds.isEmpty && singleTarget.trim().isNotEmpty) {
+      targetVersionIds = <String>[singleTarget];
+    }
 
     return _InstalledAtlasMod(
       id: (json['id'] ?? '').toString(),
       type: parseType(json['type']),
       name: (json['name'] ?? '').toString(),
       version: (json['version'] ?? '').toString(),
-      targetVersionId: (json['targetVersionId'] ?? '').toString(),
+      targetVersionId: singleTarget,
+      targetVersionIds: targetVersionIds,
       installedFilePaths: paths,
       installedAtEpochMs: asInt(json['installedAtEpochMs'], 0),
+      sourceLastUpdatedEpochMs: asInt(json['sourceLastUpdatedEpochMs'], 0),
+      filesFingerprint: (json['filesFingerprint'] ?? '').toString(),
     );
   }
 
@@ -30772,8 +32297,11 @@ class _InstalledAtlasMod {
       'name': name,
       'version': version,
       'targetVersionId': targetVersionId,
+      'targetVersionIds': targetVersionIds,
       'installedFilePaths': installedFilePaths,
       'installedAtEpochMs': installedAtEpochMs,
+      'sourceLastUpdatedEpochMs': sourceLastUpdatedEpochMs,
+      'filesFingerprint': filesFingerprint,
     };
   }
 }

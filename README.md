@@ -45,6 +45,20 @@ ATLAS Link is an enhanced OGFN launcher built around a clean desktop experience 
 - Select multiple DLLs before injecting.
 - Bundled DLL support for included patcher tools.
 
+### Mods
+
+- Dedicated Mods tab for browsing an online mod catalog.
+- Separate Pak and DLL mod categories.
+- Mod cards with image and video previews, descriptions, and versions.
+- One-click install and uninstall.
+- Version compatibility tags support a single version, a list (`10.00, 10.40` for those exact versions), or a range (`10.00-10.40` for those and everything between).
+- When a mod fits more than one of your imported builds, choose which builds to install it to, and which to remove it from when uninstalling.
+- Filter by all or installed mods.
+- Search mods by name.
+- Installed mods are tracked and detected automatically.
+- Update notifications when a newer release of an installed mod is published: a badge on the Mods nav item and a `!` marker on the affected mod, with a one-click Update that re-syncs its files (handling renamed, replaced, and newly added files) across every build it is installed to.
+- Optional "Update Files on Launch" keeps installed Paks and library DLLs (and bundled default DLLs) up to date automatically; turn it off to update manually.
+
 ### Backend
 
 - Embedded optional backend support for LawinServer and Neonite.
@@ -67,6 +81,7 @@ ATLAS Link is an enhanced OGFN launcher built around a clean desktop experience 
 - Startup animation toggle in the Startup settings tab.
 - Discord Rich Presence support.
 - Default DLL preset management.
+- Update Files on Launch toggle to auto-refresh bundled default DLLs, installed Paks, and library DLLs when the launcher opens.
 - Update notes and launcher update checks.
 - Data management tools for logs, internal files, and launcher reset.
 

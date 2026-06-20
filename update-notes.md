@@ -1,4 +1,4 @@
-<!-- version: 1.4.0 -->
+<!-- version: 1.4.1 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,11 +15,8 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added Optional Embedded Backend Installs
-- Fixed Launcher Lag on Start Up
-- Changed Some Visual Elements
-- Fixed Window Resizing Issues
-- Lowered Set-Up Size
-- Added Mods Tab
+- Mods Can Now Target Multiple Game Versions
+- Added Update Notifications for Installed Mods
+- Renamed "Update Default DLLs on Launch" to "Update Files on Launch" (now also updates Paks and library DLLs)
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
