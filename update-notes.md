@@ -1,4 +1,4 @@
-<!-- version: 1.4.1 -->
+<!-- version: 1.4.2 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,8 +15,9 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Mods Can Now Target Multiple Game Versions
-- Added Update Notifications for Installed Mods
-- Renamed "Update Default DLLs on Launch" to "Update Files on Launch" (now also updates Paks and library DLLs)
+- Added EXEs Section to Mods (Patched EXEs) with Automatic Backup & Restore of the Original EXE
+- Added Mod Dependencies, Required Mods Are Offered for Install First
+- Added Version Sorting and a "Recent" Filter to the Mods Page
+- Locked the Mod Window While a Mod Is Installing
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

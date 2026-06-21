@@ -415,11 +415,17 @@ class _SmoothScrollPhysics extends ScrollPhysics {
 
 enum LauncherTab { home, library, mods, stats, backend, general }
 
-enum _ModsInstalledFilter { all, installed }
+enum _ModsInstalledFilter { all, installed, recent }
+
+// Sort order for the mods grid. Versions with no numeric component (or empty)
+// are always pinned to the top alphabetically; numeric versions sort by the
+// chosen direction below them.
+enum _ModsSortMode { highestFirst, lowestFirst }
 
 enum _AtlasModType {
   pak('Paks', 'Pak'),
-  dll('DLLs', 'DLL');
+  dll('DLLs', 'DLL'),
+  exe('EXEs', 'EXE');
 
   const _AtlasModType(this.folderName, this.label);
 
@@ -428,7 +434,15 @@ enum _AtlasModType {
   final String label;
 
   // User-facing plural label. Paks are shown as "PAKs".
-  String get displayPlural => this == _AtlasModType.pak ? 'PAKs' : 'DLLs';
+  String get displayPlural => switch (this) {
+    _AtlasModType.pak => 'PAKs',
+    _AtlasModType.dll => 'DLLs',
+    _AtlasModType.exe => 'EXEs',
+  };
+
+  // Build-targeted mods install into an imported Fortnite build (a chosen
+  // version), unlike DLL mods which live in the shared injector library.
+  bool get isBuildTargeted => this == _AtlasModType.pak || this == _AtlasModType.exe;
 }
 
 enum _AtlasModMediaType { image, video }
@@ -770,8 +784,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.1';
-  static const String _launcherBuildLabel = 'Stable 1.4.1';
+  static const String _launcherVersion = '1.4.2';
+  static const String _launcherBuildLabel = 'Stable 1.4.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1120,6 +1134,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       <String, _InstalledAtlasMod>{};
   _AtlasModType _modsType = _AtlasModType.pak;
   _ModsInstalledFilter _modsInstalledFilter = _ModsInstalledFilter.all;
+  _ModsSortMode _modsSortMode = _ModsSortMode.highestFirst;
   bool _modsLoading = false;
   String _modsLoadError = '';
   Future<void>? _modsRefreshInFlight;
@@ -3296,6 +3311,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final lower = name.toLowerCase();
     return switch (type) {
       _AtlasModType.dll => lower.endsWith('.dll'),
+      _AtlasModType.exe => lower.endsWith('.exe'),
       _AtlasModType.pak =>
         lower.endsWith('.pak') ||
             lower.endsWith('.sig') ||
@@ -3694,9 +3710,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       description: _stringFromJson(
         metadata,
         const <String>['description', 'detailDescription', 'details', 'body'],
-        type == _AtlasModType.pak
-            ? 'Pak mod for ATLAS builds.'
-            : 'DLL mod for the injector.',
+        _atlasModDefaultDescription(type),
       ),
       version: _stringFromJson(metadata, const <String>[
         'version',
@@ -3718,9 +3732,20 @@ class _LauncherScreenState extends State<LauncherScreen>
         'repository',
         'url',
       ], _atlasResourcesTreeUrl(folderPath)),
+      dependencies: _stringListFromJson(metadata, const <String>[
+        'dependencies',
+        'requires',
+        'dependsOn',
+      ]),
       files: files,
     );
   }
+
+  String _atlasModDefaultDescription(_AtlasModType type) => switch (type) {
+    _AtlasModType.pak => 'Pak mod for ATLAS builds.',
+    _AtlasModType.dll => 'DLL mod for the injector.',
+    _AtlasModType.exe => 'Patched executable for ATLAS builds.',
+  };
 
   Future<_AtlasModEntry?> _parseAtlasModFolderFromTree(
     _AtlasModType type,
@@ -3929,9 +3954,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       description: _stringFromJson(
         metadata,
         const <String>['description', 'detailDescription', 'details', 'body'],
-        type == _AtlasModType.pak
-            ? 'Pak mod for ATLAS builds.'
-            : 'DLL mod for the injector.',
+        _atlasModDefaultDescription(type),
       ),
       version: _stringFromJson(metadata, const <String>[
         'version',
@@ -3953,6 +3976,11 @@ class _LauncherScreenState extends State<LauncherScreen>
         'repository',
         'url',
       ], _atlasResourcesTreeUrl(normalizedFolderPath)),
+      dependencies: _stringListFromJson(metadata, const <String>[
+        'dependencies',
+        'requires',
+        'dependsOn',
+      ]),
       files: files,
     );
   }
@@ -4377,9 +4405,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       description: _stringFromJson(
         metadata,
         const <String>['description', 'detailDescription', 'details', 'body'],
-        type == _AtlasModType.pak
-            ? 'Pak mod for ATLAS builds.'
-            : 'DLL mod for the injector.',
+        _atlasModDefaultDescription(type),
       ),
       version: _stringFromJson(metadata, const <String>[
         'version',
@@ -4395,6 +4421,11 @@ class _LauncherScreenState extends State<LauncherScreen>
       images: images,
       media: media,
       sourceUrl: resourcesRoot.path,
+      dependencies: _stringListFromJson(metadata, const <String>[
+        'dependencies',
+        'requires',
+        'dependsOn',
+      ]),
       files: files,
     );
   }
@@ -4636,9 +4667,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     return false;
   }
 
-  /// Imported builds the mod can install to. An empty tag falls back to the
-  /// currently selected build (legacy behaviour).
-  List<VersionEntry> _compatibleVersionsForPakMod(_AtlasModEntry mod) {
+  /// Imported builds a build-targeted (pak/exe) mod can install to. An empty
+  /// version spec falls back to the currently selected build (legacy behaviour).
+  List<VersionEntry> _compatibleVersionsForMod(_AtlasModEntry mod) {
     final spec = mod.version.trim();
     if (spec.isEmpty) {
       final selected = _settings.selectedVersion;
@@ -4653,8 +4684,88 @@ class _LauncherScreenState extends State<LauncherScreen>
     return _joinPath([version.location, 'FortniteGame', 'Content', 'Paks']);
   }
 
+  /// Patched EXEs drop into the build's Win64 binaries folder, replacing the
+  /// stock executable (e.g. FortniteClient-Win64-Shipping.exe).
+  String _exeModTargetDirectory(VersionEntry version) {
+    return _joinPath([version.location, 'FortniteGame', 'Binaries', 'Win64']);
+  }
+
+  /// Install directory for a build-targeted mod's files in a specific build.
+  String _buildModTargetDirectory(_AtlasModEntry mod, VersionEntry version) {
+    return mod.type == _AtlasModType.exe
+        ? _exeModTargetDirectory(version)
+        : _pakModTargetDirectory(version);
+  }
+
+  // A patched EXE renames the file it replaces to this suffix so it can be
+  // restored verbatim on uninstall.
+  static const String _exeBackupSuffix = '.atlas-original';
+  // Sidecar marker written next to an installed patched EXE. A patched EXE is
+  // byte-identically named to the stock executable it replaces, so file
+  // presence alone can't tell whether (or which) patch is installed. The marker
+  // holds the owning mod's id and is the source of truth for EXE install state.
+  static const String _exeMarkerSuffix = '.atlas-mod';
+
   String _dllModTargetDirectory(_AtlasModEntry mod) {
     return _joinPath([_dataDir.path, 'mods', 'dlls', _safeFileName(mod.id)]);
+  }
+
+  /// Backs up the stock executable at [destination] before a patched EXE
+  /// overwrites it. Only the first install creates the backup; later installs /
+  /// updates to the same slot keep the original true backup intact.
+  Future<void> _backupOriginalExe(File destination) async {
+    if (!await destination.exists()) return;
+    final backup = File('${destination.path}$_exeBackupSuffix');
+    if (await backup.exists()) return; // true original already preserved
+    await destination.rename(backup.path);
+  }
+
+  /// Records which mod owns the patched EXE at [exePath] so install state (and
+  /// which specific patch it is) survives restarts and can't be confused with
+  /// the identically-named stock executable.
+  Future<void> _writeExeMarker(String exePath, String modId) async {
+    try {
+      await File('$exePath$_exeMarkerSuffix').writeAsString(modId);
+    } catch (error) {
+      _log('mods', 'Failed to write exe marker for $exePath: $error');
+    }
+  }
+
+  /// Whether the patched EXE at [exePath] is present and owned by [modId] (its
+  /// marker exists and names this mod). Synchronous so it can drive UI state.
+  bool _exeSlotOwnedBy(String exePath, String modId) {
+    if (!File(exePath).existsSync()) return false;
+    final marker = File('$exePath$_exeMarkerSuffix');
+    if (!marker.existsSync()) return false;
+    try {
+      return marker.readAsStringSync().trim() == modId;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Removes a patched EXE (and its marker) and restores the stock executable it
+  /// replaced (if a backup exists). Used on uninstall and rollback so the build
+  /// returns to its prior state.
+  Future<void> _restorePatchedExe(String path) async {
+    final file = File(path);
+    final backup = File('$path$_exeBackupSuffix');
+    final marker = File('$path$_exeMarkerSuffix');
+    try {
+      if (await marker.exists()) await marker.delete();
+    } catch (error) {
+      _log('mods', 'Failed to remove exe marker for $path: $error');
+    }
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      _log('mods', 'Failed to remove patched exe $path: $error');
+    }
+    try {
+      if (await backup.exists()) await backup.rename(path);
+    } catch (error) {
+      _log('mods', 'Failed to restore original exe for $path: $error');
+    }
   }
 
   List<String> _atlasModFilePathsInDirectory(
@@ -4668,14 +4779,50 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   bool _installedAtlasModFilesPresent(_InstalledAtlasMod installed) {
-    return installed.installedFilePaths.isNotEmpty &&
-        installed.installedFilePaths.every((path) => File(path).existsSync());
+    if (installed.installedFilePaths.isEmpty) return false;
+    // Patched EXEs share the stock executable's name, so "file exists" isn't
+    // enough — the slot must still be marked as owned by this mod.
+    if (installed.type == _AtlasModType.exe) {
+      return installed.installedFilePaths.every(
+        (path) => _exeSlotOwnedBy(path, installed.id),
+      );
+    }
+    return installed.installedFilePaths.every((path) => File(path).existsSync());
   }
 
   _InstalledAtlasMod? _detectExistingAtlasModInstall(_AtlasModEntry mod) {
     if (mod.files.isEmpty) return null;
     final presentPaths = <String>[];
     final presentVersionIds = <String>[];
+    if (mod.type == _AtlasModType.exe) {
+      // A patched EXE is named exactly like the stock executable it replaces, so
+      // we detect it by the marker we drop beside it — present and naming this
+      // mod means this specific patch is installed in that build.
+      for (final version in _compatibleVersionsForMod(mod)) {
+        final paths = _atlasModFilePathsInDirectory(
+          mod,
+          _exeModTargetDirectory(version),
+        );
+        if (paths.isNotEmpty &&
+            paths.every((path) => _exeSlotOwnedBy(path, mod.id))) {
+          presentPaths.addAll(paths);
+          presentVersionIds.add(version.id);
+        }
+      }
+      if (presentPaths.isEmpty) return null;
+      return _InstalledAtlasMod(
+        id: mod.id,
+        type: mod.type,
+        name: mod.name,
+        version: mod.version,
+        targetVersionId: presentVersionIds.first,
+        targetVersionIds: presentVersionIds,
+        installedFilePaths: presentPaths,
+        installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+        sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
+        filesFingerprint: _atlasModFilesFingerprint(mod),
+      );
+    }
     if (mod.type == _AtlasModType.dll) {
       final paths = _atlasModFilePathsInDirectory(
         mod,
@@ -4688,7 +4835,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     } else {
       // A pak mod can be installed to several compatible builds at once; treat
       // it as installed when its files are present in any of them.
-      for (final version in _compatibleVersionsForPakMod(mod)) {
+      for (final version in _compatibleVersionsForMod(mod)) {
         final paths = _atlasModFilePathsInDirectory(
           mod,
           _pakModTargetDirectory(version),
@@ -4853,7 +5000,187 @@ class _LauncherScreenState extends State<LauncherScreen>
     return '${installed.name} is already installed $preposition $target';
   }
 
-  Future<void> _installAtlasMod(_AtlasModEntry mod) async {
+  /// Resolves a mod's metadata dependency references against the loaded catalog.
+  /// Each reference can be a mod id, a folder path ("EXEs/27.11"), or a display
+  /// name (case-insensitive). Unresolvable references are skipped.
+  List<_AtlasModEntry> _resolveModDependencies(_AtlasModEntry mod) {
+    if (mod.dependencies.isEmpty) return const <_AtlasModEntry>[];
+    final resolved = <_AtlasModEntry>[];
+    final seen = <String>{};
+    for (final rawRef in mod.dependencies) {
+      final ref = rawRef.trim();
+      if (ref.isEmpty) continue;
+      final lower = ref.toLowerCase().replaceAll('\\', '/');
+      _AtlasModEntry? match;
+      for (final candidate in _modsLibrary) {
+        if (candidate.id == mod.id) continue;
+        final id = candidate.id.toLowerCase();
+        final folderPath = candidate.folderPath.toLowerCase().replaceAll(
+          '\\',
+          '/',
+        );
+        final name = candidate.name.trim().toLowerCase();
+        if (id == lower || folderPath == lower || name == lower) {
+          match = candidate;
+          break;
+        }
+      }
+      if (match != null && seen.add(match.id)) resolved.add(match);
+    }
+    return resolved;
+  }
+
+  /// Asks the user to install a mod's missing dependencies before continuing.
+  /// Returns true if the user chose to proceed.
+  Future<bool> _promptInstallDependencies(
+    _AtlasModEntry mod,
+    List<_AtlasModEntry> missing,
+  ) async {
+    final result = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Dependency Required',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          missing.length > 1
+                              ? '"${mod.name}" needs to have the following dependencies:'
+                              : '"${mod.name}" needs to have the following dependency:',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.84),
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        for (final dep in missing)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.link_rounded,
+                                  size: 18,
+                                  color: secondary.withValues(alpha: 0.9),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    dep.name,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: _onSurface(dialogContext, 0.92),
+                                    ),
+                                  ),
+                                ),
+                                if (dep.version.trim().isNotEmpty)
+                                  Text(
+                                    dep.version.trim(),
+                                    style: TextStyle(
+                                      color: _onSurface(dialogContext, 0.6),
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            _dialogCancelButton(
+                              dialogContext,
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
+                            ),
+                            const Spacer(),
+                            FilledButton.icon(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: secondary,
+                                foregroundColor: Colors.white,
+                              ),
+                              icon: const Icon(Icons.download_rounded),
+                              label: Text(
+                                missing.length > 1
+                                    ? 'Install ${missing.length} & Continue'
+                                    : 'Install & Continue',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+    return result ?? false;
+  }
+
+  /// Drops any other installed EXE-mod record that occupies [destinationPath],
+  /// keeping the "one patched EXE per slot" invariant when a different patched
+  /// EXE is installed over an existing one. The original backup is preserved.
+  void _forgetConflictingExeInstall(String destinationPath, String exceptModId) {
+    final conflicting = _installedModsById.entries
+        .where(
+          (entry) =>
+              entry.key != exceptModId &&
+              entry.value.type == _AtlasModType.exe &&
+              entry.value.installedFilePaths.contains(destinationPath),
+        )
+        .map((entry) => entry.key)
+        .toList();
+    for (final id in conflicting) {
+      _installedModsById.remove(id);
+    }
+  }
+
+  Future<void> _installAtlasMod(
+    _AtlasModEntry mod, {
+    bool resolveDependencies = true,
+    Set<String> dependencyChain = const <String>{},
+  }) async {
     final detected = _detectExistingAtlasModInstall(mod);
     final savedInstall = _installedModsById[mod.id];
     if ((savedInstall != null &&
@@ -4869,19 +5196,48 @@ class _LauncherScreenState extends State<LauncherScreen>
       _toast(_atlasModAlreadyInstalledToast(detected ?? savedInstall!));
       return;
     }
+
+    // Dependencies: prompt for and install any required mods first, then come
+    // back to install the mod the user originally chose. The dependency chain
+    // guards against cycles (A requires B requires A).
+    if (resolveDependencies) {
+      final missing = _resolveModDependencies(mod)
+          .where(
+            (dep) =>
+                !dependencyChain.contains(dep.id) && !_isAtlasModInstalled(dep),
+          )
+          .toList();
+      if (missing.isNotEmpty) {
+        final proceed = await _promptInstallDependencies(mod, missing);
+        if (!proceed) return;
+        final nextChain = <String>{...dependencyChain, mod.id};
+        for (final dep in missing) {
+          await _installAtlasMod(
+            dep,
+            resolveDependencies: true,
+            dependencyChain: nextChain,
+          );
+          if (!_isAtlasModInstalled(dep)) {
+            _toast('${mod.name} needs "${dep.name}" installed first');
+            return;
+          }
+        }
+      }
+    }
+
     if (mod.files.isEmpty) {
       _toast('${mod.name} has no downloadable files');
       return;
     }
 
     // Resolve install destinations. DLL mods go to the shared injector library;
-    // pak mods install into the matching imported build. When the mod is
-    // compatible with more than one of the user's builds we ask which to use;
-    // a single match installs straight away with no prompt.
+    // build-targeted mods (paks, patched EXEs) install into the matching
+    // imported build. When the mod is compatible with more than one of the
+    // user's builds we ask which to use; a single match installs straight away.
     final targetDirectories = <String>[];
     final targetVersionIds = <String>[];
-    if (mod.type == _AtlasModType.pak) {
-      final compatible = _compatibleVersionsForPakMod(mod);
+    if (mod.type.isBuildTargeted) {
+      final compatible = _compatibleVersionsForMod(mod);
       if (compatible.isEmpty) {
         final spec = mod.version.trim();
         _toast(
@@ -4900,7 +5256,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         selected = picked;
       }
       for (final version in selected) {
-        targetDirectories.add(_pakModTargetDirectory(version));
+        targetDirectories.add(_buildModTargetDirectory(mod, version));
         targetVersionIds.add(version.id);
       }
     } else {
@@ -4923,6 +5279,13 @@ class _LauncherScreenState extends State<LauncherScreen>
           final destination = File(
             _joinPath([targetDirectory.path, _safeFileName(file.name)]),
           );
+          // Patched EXEs replace a stock executable: preserve the original so we
+          // can restore it on uninstall, and release the slot from any other
+          // patched EXE previously installed there.
+          if (mod.type == _AtlasModType.exe) {
+            await _backupOriginalExe(destination);
+            _forgetConflictingExeInstall(destination.path, mod.id);
+          }
           final base = completed;
           await _downloadToFile(
             file.downloadUrl,
@@ -4943,6 +5306,11 @@ class _LauncherScreenState extends State<LauncherScreen>
             resolveShareLinks: true,
             rejectHtmlResponse: true,
           );
+          // Mark the slot so this specific patch is distinguishable from the
+          // stock executable (and from other patched EXEs).
+          if (mod.type == _AtlasModType.exe) {
+            await _writeExeMarker(destination.path, mod.id);
+          }
           installedPaths.add(destination.path);
           completed++;
         }
@@ -4973,10 +5341,21 @@ class _LauncherScreenState extends State<LauncherScreen>
         ),
       );
     } catch (error) {
-      for (final path in installedPaths) {
-        try {
-          await File(path).delete();
-        } catch (_) {}
+      if (mod.type == _AtlasModType.exe) {
+        // Roll back: drop any patched EXE we wrote and restore the originals.
+        for (final directoryPath in targetDirectories) {
+          for (final file in mod.files) {
+            await _restorePatchedExe(
+              _joinPath([directoryPath, _safeFileName(file.name)]),
+            );
+          }
+        }
+      } else {
+        for (final path in installedPaths) {
+          try {
+            await File(path).delete();
+          } catch (_) {}
+        }
       }
       _toastProgressDismiss();
       _toast('Failed to install ${mod.name}');
@@ -5194,11 +5573,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         _installedModsById[mod.id] ?? _detectExistingAtlasModInstall(mod);
     if (installed == null) return;
 
-    // When a pak mod is installed to more than one build, let the user choose
-    // which builds to remove it from instead of wiping all of them.
+    // When a build-targeted mod is installed to more than one build, let the
+    // user choose which builds to remove it from instead of wiping all of them.
     List<VersionEntry>? selectedBuilds;
-    if (mod.type == _AtlasModType.pak &&
-        installed.targetVersionIds.length > 1) {
+    if (mod.type.isBuildTargeted && installed.targetVersionIds.length > 1) {
       final installedBuilds = installed.targetVersionIds
           .map(_findVersionById)
           .whereType<VersionEntry>()
@@ -5213,26 +5591,32 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
     }
 
-    Future<void> deletePaths(Iterable<String> paths) async {
+    // Patched EXEs are restored to their original (stock) executable; everything
+    // else is simply deleted from disk.
+    Future<void> removePaths(Iterable<String> paths) async {
       for (final path in paths) {
         try {
-          final file = File(path);
-          if (await file.exists()) await file.delete();
+          if (mod.type == _AtlasModType.exe) {
+            await _restorePatchedExe(path);
+          } else {
+            final file = File(path);
+            if (await file.exists()) await file.delete();
+          }
         } catch (error) {
-          _log('mods', 'Failed to delete installed mod file $path: $error');
+          _log('mods', 'Failed to remove installed mod file $path: $error');
         }
       }
     }
 
     if (selectedBuilds == null) {
       // Remove everything (DLL mod, single build, or legacy record).
-      await deletePaths(installed.installedFilePaths);
+      await removePaths(installed.installedFilePaths);
       _installedModsById.remove(mod.id);
     } else {
       final selectedIds = selectedBuilds.map((build) => build.id).toSet();
       for (final build in selectedBuilds) {
-        await deletePaths(
-          _atlasModFilePathsInDirectory(mod, _pakModTargetDirectory(build)),
+        await removePaths(
+          _atlasModFilePathsInDirectory(mod, _buildModTargetDirectory(mod, build)),
         );
       }
       final remainingIds = installed.targetVersionIds
@@ -5246,7 +5630,10 @@ class _LauncherScreenState extends State<LauncherScreen>
           final version = _findVersionById(id);
           if (version == null) continue;
           remainingPaths.addAll(
-            _atlasModFilePathsInDirectory(mod, _pakModTargetDirectory(version)),
+            _atlasModFilePathsInDirectory(
+              mod,
+              _buildModTargetDirectory(mod, version),
+            ),
           );
         }
         _installedModsById[mod.id] = installed.copyWith(
@@ -5293,11 +5680,11 @@ class _LauncherScreenState extends State<LauncherScreen>
     // the shared DLL library).
     final targetDirectories = <String>[];
     final targetVersionIds = <String>[];
-    if (mod.type == _AtlasModType.pak) {
+    if (mod.type.isBuildTargeted) {
       for (final id in installed.targetVersionIds) {
         final version = _findVersionById(id);
         if (version == null) continue; // build was removed; skip it
-        targetDirectories.add(_pakModTargetDirectory(version));
+        targetDirectories.add(_buildModTargetDirectory(mod, version));
         targetVersionIds.add(id);
       }
       if (targetDirectories.isEmpty) {
@@ -5328,20 +5715,31 @@ class _LauncherScreenState extends State<LauncherScreen>
         final directory = Directory(directoryPath);
         await directory.create(recursive: true);
         // Drop files that were renamed away or dropped from the new release.
+        // (For EXEs this restores the stock executable for any name no longer
+        // shipped, instead of leaving a stray patched binary behind.)
         for (final stale in staleNames) {
+          final stalePath = _joinPath([directory.path, stale]);
           try {
-            final staleFile = File(_joinPath([directory.path, stale]));
-            if (await staleFile.exists()) await staleFile.delete();
+            if (mod.type == _AtlasModType.exe) {
+              await _restorePatchedExe(stalePath);
+            } else {
+              final staleFile = File(stalePath);
+              if (await staleFile.exists()) await staleFile.delete();
+            }
           } catch (error) {
             _log('mods', 'Failed to remove stale mod file $stale: $error');
           }
         }
         // (Re)download the current file set: same-name files are replaced in
-        // place, brand new files are added.
+        // place, brand new files are added. The original stock EXE was already
+        // backed up at first install, so updating just swaps the patched binary.
         for (final file in mod.files) {
           final destination = File(
             _joinPath([directory.path, _safeFileName(file.name)]),
           );
+          if (mod.type == _AtlasModType.exe) {
+            await _backupOriginalExe(destination);
+          }
           final base = completed;
           await _downloadToFile(
             file.downloadUrl,
@@ -5361,6 +5759,9 @@ class _LauncherScreenState extends State<LauncherScreen>
             resolveShareLinks: true,
             rejectHtmlResponse: true,
           );
+          if (mod.type == _AtlasModType.exe) {
+            await _writeExeMarker(destination.path, mod.id);
+          }
           installedPaths.add(destination.path);
           completed++;
         }
@@ -5457,7 +5858,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Clear installed mods?',
+                          'Clear all installed mods?',
                           style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.w800,
@@ -5466,7 +5867,7 @@ class _LauncherScreenState extends State<LauncherScreen>
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'This will delete ${installed.length} installed mod${installed.length == 1 ? '' : 's'} from the launcher mods folder and matching build Paks folders.',
+                          'This will delete and clear all ${installed.length} mod${installed.length == 1 ? '' : 's'} you have currently installed. Are you sure you want to continue?',
                           style: TextStyle(
                             color: _onSurface(dialogContext, 0.84),
                             height: 1.35,
@@ -21851,11 +22252,32 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     }).toList();
     final allCount = typeSearchMods.length;
     final installedCount = typeSearchMods.where(_isAtlasModInstalled).length;
-    final visibleMods = _modsInstalledFilter == _ModsInstalledFilter.installed
-        ? typeSearchMods.where(_isAtlasModInstalled).toList()
-        : typeSearchMods;
+    // "Recent" = mods whose catalog entry was updated within the last 7 days.
+    final recentCutoffMs =
+        DateTime.now().millisecondsSinceEpoch -
+        const Duration(days: 7).inMilliseconds;
+    bool isRecentMod(_AtlasModEntry mod) =>
+        mod.lastUpdatedEpochMs >= recentCutoffMs;
+    final recentCount = typeSearchMods.where(isRecentMod).length;
+    final List<_AtlasModEntry> visibleMods;
+    if (_modsInstalledFilter == _ModsInstalledFilter.recent) {
+      // Recent ignores the version sort: only mods updated in the last week,
+      // newest first.
+      visibleMods = typeSearchMods.where(isRecentMod).toList()
+        ..sort((a, b) {
+          final byUpdated = b.lastUpdatedEpochMs.compareTo(a.lastUpdatedEpochMs);
+          if (byUpdated != 0) return byUpdated;
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+    } else {
+      final filteredMods =
+          _modsInstalledFilter == _ModsInstalledFilter.installed
+          ? typeSearchMods.where(_isAtlasModInstalled).toList()
+          : typeSearchMods;
+      visibleMods = _sortModsForDisplay(filteredMods);
+    }
     final cardEntranceSignature =
-        '${_modsType.name}|${_modsInstalledFilter.name}|$query|'
+        '${_modsType.name}|${_modsInstalledFilter.name}|${_modsSortMode.name}|$query|'
         '${visibleMods.map((mod) => mod.id).join('|')}';
     if (_modsCardEntranceSignature != cardEntranceSignature) {
       _modsCardEntranceSignature = cardEntranceSignature;
@@ -21897,10 +22319,21 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
     final clearInstalled = _versionCardAction(
       icon: Icons.delete_sweep_rounded,
-      tooltip: 'Clear installed mods',
+      tooltip: 'Clear all installed mods',
       onTap: hasInstalledMods
           ? () => unawaited(_clearInstalledAtlasMods())
           : null,
+    );
+    // The version sort doesn't apply to the Recent tab (it's ordered by update
+    // time), so the button is disabled there.
+    final sortDisabled = _modsInstalledFilter == _ModsInstalledFilter.recent;
+    final sort = _versionCardAction(
+      icon: _modsSortIcon,
+      tooltip: sortDisabled
+          ? 'Sorting by version (switch off Recent to use)'
+          : _modsSortTooltip,
+      iconRotation: _modsSortMode == _ModsSortMode.lowestFirst ? pi : 0,
+      onTap: sortDisabled ? null : _advanceModsSortMode,
     );
 
     return Column(
@@ -21983,9 +22416,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 child: _modsFilterBar(
                                   allCount: allCount,
                                   installedCount: installedCount,
+                                  recentCount: recentCount,
                                   search: search,
                                   refresh: refresh,
                                   clearInstalled: clearInstalled,
+                                  sort: sort,
                                 ),
                               ),
                               const SliverToBoxAdapter(
@@ -22016,22 +22451,32 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 hasScrollBody: false,
                                 child: _modsCenteredState(
                                   key: const ValueKey('mods-empty'),
-                                  icon:
-                                      _modsInstalledFilter ==
-                                          _ModsInstalledFilter.installed
-                                      ? Icons.download_done_rounded
-                                      : Icons.extension_off_rounded,
-                                  title:
-                                      _modsInstalledFilter ==
-                                          _ModsInstalledFilter.installed
-                                      ? 'No Installed ${_modsType.displayPlural}'
-                                      : 'No ${_modsType.displayPlural} available',
+                                  icon: switch (_modsInstalledFilter) {
+                                    _ModsInstalledFilter.installed =>
+                                      Icons.download_done_rounded,
+                                    _ModsInstalledFilter.recent =>
+                                      Icons.history_rounded,
+                                    _ModsInstalledFilter.all =>
+                                      Icons.extension_off_rounded,
+                                  },
+                                  title: switch (_modsInstalledFilter) {
+                                    _ModsInstalledFilter.installed =>
+                                      'No Installed ${_modsType.displayPlural}',
+                                    _ModsInstalledFilter.recent =>
+                                      'No Recent ${_modsType.displayPlural}',
+                                    _ModsInstalledFilter.all =>
+                                      'No ${_modsType.displayPlural} Available',
+                                  },
                                   subtitle: _modsSearchQuery.trim().isNotEmpty
                                       ? 'No mods match your search.'
-                                      : _modsInstalledFilter ==
-                                            _ModsInstalledFilter.installed
-                                      ? 'Install a mod and it will appear here.'
-                                      : 'There are currently no available ${_modsType.displayPlural} to download.',
+                                      : switch (_modsInstalledFilter) {
+                                          _ModsInstalledFilter.installed =>
+                                            'Install a mod and it will appear here.',
+                                          _ModsInstalledFilter.recent =>
+                                            'No ${_modsType.displayPlural} updated in the last week.',
+                                          _ModsInstalledFilter.all =>
+                                            'There are currently no available ${_modsType.displayPlural} to download.',
+                                        },
                                 ),
                               )
                             else
@@ -22132,9 +22577,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _modsFilterBar({
     required int allCount,
     required int installedCount,
+    required int recentCount,
     required Widget search,
     required Widget refresh,
     required Widget clearInstalled,
+    required Widget sort,
   }) {
     final chips = Row(
       mainAxisSize: MainAxisSize.min,
@@ -22155,6 +22602,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             () => _modsInstalledFilter = _ModsInstalledFilter.installed,
           ),
         ),
+        const SizedBox(width: 8),
+        _modsFilterChip(
+          label: 'Recent',
+          count: recentCount,
+          selected: _modsInstalledFilter == _ModsInstalledFilter.recent,
+          onTap: () => setState(
+            () => _modsInstalledFilter = _ModsInstalledFilter.recent,
+          ),
+        ),
       ],
     );
 
@@ -22163,6 +22619,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         clearInstalled,
         const SizedBox(width: 8),
         refresh,
+        const SizedBox(width: 8),
+        sort,
         const SizedBox(width: 8),
         Expanded(child: search),
       ],
@@ -22182,7 +22640,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           children: [
             chips,
             const Spacer(),
-            SizedBox(width: 360, child: tools),
+            SizedBox(width: 404, child: tools),
           ],
         );
       },
@@ -22298,14 +22756,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _modsHeaderTitle() {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
-    final isDll = _modsType == _AtlasModType.dll;
     final typeCount = _modsLibrary.where((mod) => mod.type == _modsType).length;
-    final title = isDll ? 'DLL Library' : 'PAK Library';
-    final singular = isDll ? 'DLL' : 'PAK';
+    final (title, singular, icon) = switch (_modsType) {
+      _AtlasModType.pak => ('PAK Library', 'PAK', Icons.inventory_2_rounded),
+      _AtlasModType.dll => ('DLL Library', 'DLL', Icons.science_rounded),
+      _AtlasModType.exe => ('EXE Library', 'EXE', Icons.bolt_rounded),
+    };
     final plural = _modsType.displayPlural;
     final itemLabel = typeCount == 1 ? singular : plural;
     final subtitle = '$typeCount $itemLabel available from ATLAS Resources';
-    final icon = isDll ? Icons.science_rounded : Icons.inventory_2_rounded;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -22447,12 +22906,57 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  void _advanceModsSortMode() {
+    setState(() {
+      _modsSortMode = _modsSortMode == _ModsSortMode.highestFirst
+          ? _ModsSortMode.lowestFirst
+          : _ModsSortMode.highestFirst;
+    });
+  }
+
+  IconData get _modsSortIcon => Icons.filter_list_rounded;
+
+  String get _modsSortTooltip => switch (_modsSortMode) {
+    _ModsSortMode.highestFirst => 'Sort: highest version at top',
+    _ModsSortMode.lowestFirst => 'Sort: lowest version at top',
+  };
+
+  /// Orders mods for display. Versions with no numeric component (or an empty
+  /// version) are pinned to the top, sorted alphabetically. Numeric versions
+  /// follow, ordered by the current sort direction (highest-first by default).
+  /// Returns a new list; the input is not mutated.
+  List<_AtlasModEntry> _sortModsForDisplay(List<_AtlasModEntry> mods) {
+    bool isNumericVersion(String v) => RegExp(r'\d').hasMatch(v);
+    final sorted = List<_AtlasModEntry>.from(mods);
+    sorted.sort((a, b) {
+      final aNumeric = isNumericVersion(a.version);
+      final bNumeric = isNumericVersion(b.version);
+      // Non-numeric / blank versions always sit at the top, alphabetically.
+      if (aNumeric != bNumeric) return aNumeric ? 1 : -1;
+      if (!aNumeric) {
+        final byVersion = a.version.trim().toLowerCase().compareTo(
+          b.version.trim().toLowerCase(),
+        );
+        if (byVersion != 0) return byVersion;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+      final byVersion = _modsSortMode == _ModsSortMode.lowestFirst
+          ? _compareVersionStrings(a.version, b.version)
+          : _compareVersionStrings(b.version, a.version);
+      if (byVersion != 0) return byVersion;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return sorted;
+  }
+
   Widget _modsSegmentLabel(_AtlasModType type) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final selected = _modsType == type;
-    final icon = type == _AtlasModType.pak
-        ? Icons.inventory_2_rounded
-        : Icons.science_rounded;
+    final icon = switch (type) {
+      _AtlasModType.pak => Icons.inventory_2_rounded,
+      _AtlasModType.dll => Icons.science_rounded,
+      _AtlasModType.exe => Icons.bolt_rounded,
+    };
     // GestureDetector (not InkWell) so there's no ripple/circle on tap — only
     // the sliding highlight animates.
     return MouseRegion(
@@ -23060,9 +23564,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           // imported that the mod is compatible with. With none
                           // available, the Install action is disabled.
                           final hasCompatibleBuild =
-                              mod.type != _AtlasModType.pak ||
-                              _compatibleVersionsForPakMod(mod).isNotEmpty;
-                          return Container(
+                              !mod.type.isBuildTargeted ||
+                              _compatibleVersionsForMod(mod).isNotEmpty;
+                          return PopScope(
+                            // Lock the dialog while a mod is installing,
+                            // updating, or being removed — no Esc / back /
+                            // tap-outside dismissal mid-operation.
+                            canPop: !actionBusy,
+                            child: Container(
                             margin: const EdgeInsets.symmetric(horizontal: 20),
                             padding: const EdgeInsets.fromLTRB(20, 20, 0, 18),
                             decoration: BoxDecoration(
@@ -23396,6 +23905,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                       await _openUrl(href);
                                                     },
                                               ),
+                                              _atlasModDependencySection(
+                                                dialogContext,
+                                                mod,
+                                              ),
                                             ],
                                           ),
                                         ),
@@ -23635,6 +24148,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 ),
                               ],
                             ),
+                            ),
                           );
                         },
                       ),
@@ -23703,6 +24217,76 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               fontWeight: FontWeight.w800,
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // "Requires" block for the mod details dialog: lists the mod's resolved
+  // dependencies and whether each is already installed. Hidden when the mod has
+  // no (resolvable) dependencies.
+  Widget _atlasModDependencySection(BuildContext context, _AtlasModEntry mod) {
+    final deps = _resolveModDependencies(mod);
+    if (deps.isEmpty) return const SizedBox.shrink();
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return Padding(
+      padding: const EdgeInsets.only(top: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.account_tree_rounded,
+                size: 16,
+                color: onSurface.withValues(alpha: 0.7),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                'Requires',
+                style: TextStyle(
+                  color: onSurface.withValues(alpha: 0.82),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 13,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          for (final dep in deps)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      dep.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: onSurface.withValues(alpha: 0.86),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (_isAtlasModInstalled(dep))
+                    _modPill(
+                      'Installed',
+                      icon: Icons.check_rounded,
+                      color: secondary,
+                    )
+                  else
+                    _modPill(
+                      'Required',
+                      icon: Icons.priority_high_rounded,
+                      color: const Color(0xFFE8A23D),
+                    ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -32001,6 +32585,7 @@ class _AtlasModEntry {
     required this.media,
     required this.sourceUrl,
     required this.files,
+    this.dependencies = const <String>[],
     this.lastUpdatedEpochMs = 0,
   });
 
@@ -32020,6 +32605,10 @@ class _AtlasModEntry {
   final List<_AtlasModMedia> media;
   final String sourceUrl;
   final List<_AtlasModFile> files;
+  // Other mods this one needs installed first. Each entry references a catalog
+  // mod by folder path ("EXEs/27.11"), id, or display name. Resolved against the
+  // loaded library; the user is prompted to install any missing ones first.
+  final List<String> dependencies;
   final int lastUpdatedEpochMs;
 
   _AtlasModEntry copyWith({int? lastUpdatedEpochMs}) {
@@ -32039,6 +32628,7 @@ class _AtlasModEntry {
       media: media,
       sourceUrl: sourceUrl,
       files: files,
+      dependencies: dependencies,
       lastUpdatedEpochMs: lastUpdatedEpochMs ?? this.lastUpdatedEpochMs,
     );
   }
@@ -32089,9 +32679,9 @@ class _AtlasModEntry {
   factory _AtlasModEntry.fromJson(Map<String, dynamic> json) {
     _AtlasModType parseType(dynamic value) {
       final text = value.toString().trim().toLowerCase();
-      return text == 'dll' || text == 'dlls'
-          ? _AtlasModType.dll
-          : _AtlasModType.pak;
+      if (text == 'dll' || text == 'dlls') return _AtlasModType.dll;
+      if (text == 'exe' || text == 'exes') return _AtlasModType.exe;
+      return _AtlasModType.pak;
     }
 
     List<String> stringList(dynamic value) {
@@ -32155,6 +32745,9 @@ class _AtlasModEntry {
       media: media,
       sourceUrl: (json['sourceUrl'] ?? '').toString(),
       files: files,
+      dependencies: stringList(
+        json['dependencies'] ?? json['requires'] ?? json['dependsOn'],
+      ),
       lastUpdatedEpochMs: asInt(
         json['lastUpdatedEpochMs'] ??
             json['lastUpdatedAtEpochMs'] ??
@@ -32181,6 +32774,7 @@ class _AtlasModEntry {
       'media': media.map((item) => item.toJson()).toList(),
       'sourceUrl': sourceUrl,
       'files': files.map((file) => file.toJson()).toList(),
+      'dependencies': dependencies,
       'lastUpdatedEpochMs': lastUpdatedEpochMs,
     };
   }
@@ -32254,9 +32848,9 @@ class _InstalledAtlasMod {
 
     _AtlasModType parseType(dynamic value) {
       final text = value.toString().trim().toLowerCase();
-      return text == 'dll' || text == 'dlls'
-          ? _AtlasModType.dll
-          : _AtlasModType.pak;
+      if (text == 'dll' || text == 'dlls') return _AtlasModType.dll;
+      if (text == 'exe' || text == 'exes') return _AtlasModType.exe;
+      return _AtlasModType.pak;
     }
 
     List<String> stringList(dynamic value) {
