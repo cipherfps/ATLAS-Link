@@ -422,6 +422,54 @@ enum _ModsInstalledFilter { all, installed, recent }
 // chosen direction below them.
 enum _ModsSortMode { highestFirst, lowestFirst }
 
+// The Data Management DLL slots an installed DLL mod can be assigned to. A mod
+// declares its target slot in metadata via "dataSlot" (aliases accepted), which
+// is what lets the launcher offer it from each slot's library picker.
+enum _DataDllSlot {
+  unrealEnginePatcher('Unreal Engine Patcher'),
+  authenticationPatcher('Authentication Patcher'),
+  memoryPatcher('Memory Patcher'),
+  gameServer('Game Server');
+
+  const _DataDllSlot(this.label);
+
+  final String label;
+
+  // Maps a free-form metadata value to a slot. Case/space/underscore/hyphen
+  // insensitive. Returns null when the value doesn't name a known slot.
+  static _DataDllSlot? resolve(String raw) {
+    final key = raw.toLowerCase().replaceAll(RegExp(r'[\s_\-]+'), '');
+    switch (key) {
+      case 'unrealenginepatcher':
+      case 'unrealengine':
+      case 'unreal':
+      case 'console':
+      case 'consolepatcher':
+      case 'ue':
+        return _DataDllSlot.unrealEnginePatcher;
+      case 'authenticationpatcher':
+      case 'authentication':
+      case 'auth':
+      case 'authenticator':
+        return _DataDllSlot.authenticationPatcher;
+      case 'memorypatcher':
+      case 'memory':
+        return _DataDllSlot.memoryPatcher;
+      case 'gameserver':
+      case 'gameserverfile':
+      case 'gs':
+      case 'server':
+        return _DataDllSlot.gameServer;
+      default:
+        return null;
+    }
+  }
+}
+
+// Sentinel thrown to unwind a mod download when the user cancels it, so the
+// install/update flow can tell a cancellation apart from a real failure.
+const String _kModDownloadCancelled = '__ATLAS_MOD_DOWNLOAD_CANCELLED__';
+
 enum _AtlasModType {
   pak('Paks', 'Pak'),
   dll('DLLs', 'DLL'),
@@ -442,7 +490,8 @@ enum _AtlasModType {
 
   // Build-targeted mods install into an imported Fortnite build (a chosen
   // version), unlike DLL mods which live in the shared injector library.
-  bool get isBuildTargeted => this == _AtlasModType.pak || this == _AtlasModType.exe;
+  bool get isBuildTargeted =>
+      this == _AtlasModType.pak || this == _AtlasModType.exe;
 }
 
 enum _AtlasModMediaType { image, video }
@@ -784,8 +833,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.2';
-  static const String _launcherBuildLabel = 'Stable 1.4.2';
+  static const String _launcherVersion = '1.4.3';
+  static const String _launcherBuildLabel = 'Stable 1.4.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -850,15 +899,8 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://api.github.com/repos/cipherfps/ATLAS-Link/contents/atlas_link_flutter/assets/dlls?ref=main';
   static const String _atlasLinkBundledDllFallbackBaseUrl =
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
-  static const int _bundledDllPresetSeedVersion = 7;
-  static const String _rebootUltimateDefaultPresetName =
-      'Reboot Ultimate GS Preset';
-  static const String _legacyRebootUltimateDefaultPresetName =
-      'Reboot Ultimate V1 Gameserver';
+  static const int _bundledDllPresetSeedVersion = 8;
   static const String _remixDefaultPresetName = 'Remix Preset';
-  static const String _retracPakDefaultPresetName = '14.40 Pak Authenticator';
-  static const String _legacyRetracPakDefaultPresetName =
-      'Retrac Pak Authentication';
   static const String _retracPakDefaultDllFileName =
       '14.40 Pak Authenticator.dll';
   static const String _legacyRetracPakDefaultDllFileName =
@@ -1132,6 +1174,19 @@ class _LauncherScreenState extends State<LauncherScreen>
   List<_AtlasModEntry> _modsLibrary = <_AtlasModEntry>[];
   Map<String, _InstalledAtlasMod> _installedModsById =
       <String, _InstalledAtlasMod>{};
+  // True while a mod install/update download is running. Used to block starting
+  // another one (the user can still close the details dialog and browse).
+  bool _atlasModBusy = false;
+  // Set by the progress toast's Cancel button to abort the running download.
+  bool _cancelModDownload = false;
+  // Build version ids a mod is currently downloading into. Those builds can't be
+  // launched, hosted, edited, or removed until the download finishes (their
+  // files may be incomplete, or for a patched EXE the stock executable is
+  // temporarily moved aside).
+  Set<String> _modInstallTargetVersionIds = <String>{};
+  // Intercepts the window close button so we can warn before discarding a
+  // mod download in progress.
+  AppLifecycleListener? _appExitListener;
   _AtlasModType _modsType = _AtlasModType.pak;
   _ModsInstalledFilter _modsInstalledFilter = _ModsInstalledFilter.all;
   _ModsSortMode _modsSortMode = _ModsSortMode.highestFirst;
@@ -1150,6 +1205,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _appExitListener = AppLifecycleListener(
+      onExitRequested: _handleAppExitRequest,
+    );
     _shellEntranceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 720),
@@ -1178,9 +1236,24 @@ class _LauncherScreenState extends State<LauncherScreen>
     _startHomeHeroAutoRotate();
   }
 
+  /// Blocks the window close button while a mod download is running so it isn't
+  /// discarded by accident. (A force-kill is still handled on next launch by
+  /// [_recoverInterruptedModInstalls].)
+  Future<AppExitResponse> _handleAppExitRequest() async {
+    if (_atlasModBusy) {
+      _toast(
+        'A mod is still downloading — cancel it (✕ on the toast) or let it '
+        'finish before closing',
+      );
+      return AppExitResponse.cancel;
+    }
+    return AppExitResponse.exit;
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _appExitListener?.dispose();
     _killManagedBackendProcessOnShutdown();
     _checkpointActivePlaytime(syncSave: true);
     _playtimeCheckpointTimer?.cancel();
@@ -1247,6 +1320,9 @@ class _LauncherScreenState extends State<LauncherScreen>
       await _loadInstalledMods();
       await _loadLauncherContent();
       await _reconcileInstallState();
+      // Repair anything a download interrupted by a previous close/crash left
+      // behind (notably a build left without its stock executable).
+      await _recoverInterruptedModInstalls();
       final priorLauncherVersion = _installState.lastSeenLauncherVersion.trim();
       final currentLauncherVersion = _launcherVersion.trim();
       var launcherUpdated =
@@ -3707,11 +3783,12 @@ class _LauncherScreenState extends State<LauncherScreen>
         'summary',
         'teaser',
       ]),
-      description: _stringFromJson(
-        metadata,
-        const <String>['description', 'detailDescription', 'details', 'body'],
-        _atlasModDefaultDescription(type),
-      ),
+      description: _stringFromJson(metadata, const <String>[
+        'description',
+        'detailDescription',
+        'details',
+        'body',
+      ], _atlasModDefaultDescription(type)),
       version: _stringFromJson(metadata, const <String>[
         'version',
         'gameVersion',
@@ -3736,6 +3813,13 @@ class _LauncherScreenState extends State<LauncherScreen>
         'dependencies',
         'requires',
         'dependsOn',
+      ]),
+      dataSlot: _stringFromJson(metadata, const <String>[
+        'dataSlot',
+        'dataManagementSlot',
+        'patcherSlot',
+        'dllRole',
+        'slot',
       ]),
       files: files,
     );
@@ -3951,11 +4035,12 @@ class _LauncherScreenState extends State<LauncherScreen>
         'summary',
         'teaser',
       ]),
-      description: _stringFromJson(
-        metadata,
-        const <String>['description', 'detailDescription', 'details', 'body'],
-        _atlasModDefaultDescription(type),
-      ),
+      description: _stringFromJson(metadata, const <String>[
+        'description',
+        'detailDescription',
+        'details',
+        'body',
+      ], _atlasModDefaultDescription(type)),
       version: _stringFromJson(metadata, const <String>[
         'version',
         'gameVersion',
@@ -3980,6 +4065,13 @@ class _LauncherScreenState extends State<LauncherScreen>
         'dependencies',
         'requires',
         'dependsOn',
+      ]),
+      dataSlot: _stringFromJson(metadata, const <String>[
+        'dataSlot',
+        'dataManagementSlot',
+        'patcherSlot',
+        'dllRole',
+        'slot',
       ]),
       files: files,
     );
@@ -4402,11 +4494,12 @@ class _LauncherScreenState extends State<LauncherScreen>
         'summary',
         'teaser',
       ]),
-      description: _stringFromJson(
-        metadata,
-        const <String>['description', 'detailDescription', 'details', 'body'],
-        _atlasModDefaultDescription(type),
-      ),
+      description: _stringFromJson(metadata, const <String>[
+        'description',
+        'detailDescription',
+        'details',
+        'body',
+      ], _atlasModDefaultDescription(type)),
       version: _stringFromJson(metadata, const <String>[
         'version',
         'gameVersion',
@@ -4425,6 +4518,13 @@ class _LauncherScreenState extends State<LauncherScreen>
         'dependencies',
         'requires',
         'dependsOn',
+      ]),
+      dataSlot: _stringFromJson(metadata, const <String>[
+        'dataSlot',
+        'dataManagementSlot',
+        'patcherSlot',
+        'dllRole',
+        'slot',
       ]),
       files: files,
     );
@@ -4706,8 +4806,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   // holds the owning mod's id and is the source of truth for EXE install state.
   static const String _exeMarkerSuffix = '.atlas-mod';
 
-  String _dllModTargetDirectory(_AtlasModEntry mod) {
-    return _joinPath([_dataDir.path, 'mods', 'dlls', _safeFileName(mod.id)]);
+  String _dllModTargetDirectory(_AtlasModEntry _) {
+    return _joinPath([_dataDir.path, 'dlls']);
   }
 
   /// Backs up the stock executable at [destination] before a patched EXE
@@ -4768,6 +4868,66 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  /// Repairs state left by a download interrupted mid-install (launcher closed,
+  /// crash, power loss). Runs once on startup. Two cases matter:
+  ///  - A patched EXE install renames the stock executable to
+  ///    `<name>$_exeBackupSuffix` before downloading. If the real executable is
+  ///    now missing, the patched download never finished — restore the backup so
+  ///    the build can still launch.
+  ///  - Orphaned `<file>.part` temp files from any interrupted download.
+  Future<void> _recoverInterruptedModInstalls() async {
+    Future<void> sweep(String dirPath, {required bool restoreExe}) async {
+      final dir = Directory(dirPath);
+      if (!dir.existsSync()) return;
+      List<FileSystemEntity> entries;
+      try {
+        entries = dir.listSync(followLinks: false);
+      } catch (_) {
+        return;
+      }
+      for (final entity in entries) {
+        if (entity is! File) continue;
+        final path = entity.path;
+        final lower = path.toLowerCase();
+        // Drop leftover partial downloads.
+        if (lower.endsWith('.part')) {
+          try {
+            await entity.delete();
+            _log('mods', 'Removed orphaned partial download: $path');
+          } catch (_) {}
+          continue;
+        }
+        // Restore a stock executable whose patch never finished downloading.
+        if (restoreExe && lower.endsWith(_exeBackupSuffix)) {
+          final original = path.substring(
+            0,
+            path.length - _exeBackupSuffix.length,
+          );
+          if (!File(original).existsSync()) {
+            try {
+              final marker = File('$original$_exeMarkerSuffix');
+              if (await marker.exists()) await marker.delete();
+              await entity.rename(original);
+              _log(
+                'mods',
+                'Recovered interrupted EXE install: restored $original',
+              );
+            } catch (error) {
+              _log('mods', 'Failed to recover EXE backup $path: $error');
+            }
+          }
+        }
+      }
+    }
+
+    for (final version in _settings.versions) {
+      await sweep(_exeModTargetDirectory(version), restoreExe: true);
+      await sweep(_pakModTargetDirectory(version), restoreExe: false);
+    }
+    // DLL mods share the same managed user DLL folder as launcher DLL assets.
+    await sweep(_joinPath([_dataDir.path, 'dlls']), restoreExe: false);
+  }
+
   List<String> _atlasModFilePathsInDirectory(
     _AtlasModEntry mod,
     String directory,
@@ -4787,7 +4947,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         (path) => _exeSlotOwnedBy(path, installed.id),
       );
     }
-    return installed.installedFilePaths.every((path) => File(path).existsSync());
+    return installed.installedFilePaths.every(
+      (path) => File(path).existsSync(),
+    );
   }
 
   _InstalledAtlasMod? _detectExistingAtlasModInstall(_AtlasModEntry mod) {
@@ -4821,17 +4983,13 @@ class _LauncherScreenState extends State<LauncherScreen>
         installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
         filesFingerprint: _atlasModFilesFingerprint(mod),
+        dataSlot: mod.dataSlot,
       );
     }
     if (mod.type == _AtlasModType.dll) {
-      final paths = _atlasModFilePathsInDirectory(
-        mod,
-        _dllModTargetDirectory(mod),
-      );
-      if (paths.isEmpty || !paths.every((path) => File(path).existsSync())) {
-        return null;
-      }
-      presentPaths.addAll(paths);
+      // Flat DLL-folder installs are tracked by saved install records. Do not
+      // auto-detect by filename here; _dataDir/dlls also contains bundled DLLs.
+      return null;
     } else {
       // A pak mod can be installed to several compatible builds at once; treat
       // it as installed when its files are present in any of them.
@@ -4859,6 +5017,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
       sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
       filesFingerprint: _atlasModFilesFingerprint(mod),
+      dataSlot: mod.dataSlot,
     );
   }
 
@@ -4998,6 +5157,80 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (target == null) return '${installed.name} is already installed';
     final preposition = installed.type == _AtlasModType.dll ? 'in' : 'for';
     return '${installed.name} is already installed $preposition $target';
+  }
+
+  /// Runs a single mod download operation (install/update) under a global lock
+  /// so only one can run at a time. A second attempt while one is in flight is
+  /// rejected with a toast — the user can still close the details dialog and
+  /// browse other mods while the current download finishes.
+  bool _isModDownloadLockedVersion(String versionId) {
+    final id = versionId.trim();
+    return _atlasModBusy &&
+        id.isNotEmpty &&
+        _modInstallTargetVersionIds.contains(id);
+  }
+
+  bool _hasModDownloadLockedVersions() {
+    if (!_atlasModBusy || _modInstallTargetVersionIds.isEmpty) return false;
+    return _settings.versions.any(
+      (version) => _modInstallTargetVersionIds.contains(version.id),
+    );
+  }
+
+  void _setModInstallTargetVersionIds(Iterable<String> versionIds) {
+    final next = versionIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (mounted) {
+      setState(() => _modInstallTargetVersionIds = next);
+    } else {
+      _modInstallTargetVersionIds = next;
+    }
+  }
+
+  bool _blockModDownloadForRunningTargets(Iterable<String> versionIds) {
+    final running = versionIds
+        .map(_findVersionById)
+        .whereType<VersionEntry>()
+        .where((version) => _isVersionRunning(version.id))
+        .toList();
+    if (running.isEmpty) return false;
+
+    final name = running.first.name.trim().isEmpty
+        ? _formatLibraryVersionLabel(running.first.gameVersion)
+        : running.first.name.trim();
+    _toast(
+      running.length == 1
+          ? 'Close $name before downloading mods for it'
+          : 'Close running builds before downloading mods for them',
+    );
+    return true;
+  }
+
+  Future<void> _runExclusiveModOp(Future<void> Function() op) async {
+    if (_atlasModBusy) {
+      _toast('Finish the current download before starting another');
+      return;
+    }
+    if (mounted) {
+      setState(() => _atlasModBusy = true);
+    } else {
+      _atlasModBusy = true;
+    }
+    try {
+      await op();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _atlasModBusy = false;
+          _modInstallTargetVersionIds = <String>{};
+        });
+      } else {
+        _atlasModBusy = false;
+        _modInstallTargetVersionIds = <String>{};
+      }
+    }
   }
 
   /// Resolves a mod's metadata dependency references against the loaded catalog.
@@ -5161,7 +5394,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   /// Drops any other installed EXE-mod record that occupies [destinationPath],
   /// keeping the "one patched EXE per slot" invariant when a different patched
   /// EXE is installed over an existing one. The original backup is preserved.
-  void _forgetConflictingExeInstall(String destinationPath, String exceptModId) {
+  void _forgetConflictingExeInstall(
+    String destinationPath,
+    String exceptModId,
+  ) {
     final conflicting = _installedModsById.entries
         .where(
           (entry) =>
@@ -5255,6 +5491,11 @@ class _LauncherScreenState extends State<LauncherScreen>
         if (picked == null || picked.isEmpty) return;
         selected = picked;
       }
+      if (_blockModDownloadForRunningTargets(
+        selected.map((version) => version.id),
+      )) {
+        return;
+      }
       for (final version in selected) {
         targetDirectories.add(_buildModTargetDirectory(mod, version));
         targetVersionIds.add(version.id);
@@ -5266,16 +5507,22 @@ class _LauncherScreenState extends State<LauncherScreen>
     final installedPaths = <String>[];
     final totalDownloads = targetDirectories.length * mod.files.length;
     var completed = 0;
+    _cancelModDownload = false;
+    // Lock the build(s) this mod is downloading into until it's done.
+    _setModInstallTargetVersionIds(targetVersionIds);
+    void onCancel() => _cancelModDownload = true;
     _toastProgress(
-      'Downloading ${mod.name}...',
+      'Downloading "${mod.name}"...',
       progress: null,
       indeterminate: true,
+      onCancel: onCancel,
     );
     try {
       for (final directoryPath in targetDirectories) {
         final targetDirectory = Directory(directoryPath);
         await targetDirectory.create(recursive: true);
         for (final file in mod.files) {
+          if (_cancelModDownload) throw _kModDownloadCancelled;
           final destination = File(
             _joinPath([targetDirectory.path, _safeFileName(file.name)]),
           );
@@ -5297,14 +5544,19 @@ class _LauncherScreenState extends State<LauncherScreen>
               final progress = totalDownloads == 0
                   ? null
                   : (base + fileProgress) / totalDownloads;
+              final pct = progress == null
+                  ? ''
+                  : ' ${(progress * 100).round()}%';
               _toastProgress(
-                'Downloading ${mod.name} (${base + 1}/$totalDownloads)',
+                'Downloading "${mod.name}" (${base + 1}/$totalDownloads)$pct',
                 progress: progress,
                 indeterminate: false,
+                onCancel: onCancel,
               );
             },
             resolveShareLinks: true,
             rejectHtmlResponse: true,
+            isCancelled: () => _cancelModDownload,
           );
           // Mark the slot so this specific patch is distinguishable from the
           // stock executable (and from other patched EXEs).
@@ -5327,6 +5579,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
         filesFingerprint: _atlasModFilesFingerprint(mod),
+        dataSlot: mod.dataSlot,
       );
       await _saveInstalledMods();
       if (mounted) setState(() {});
@@ -5341,6 +5594,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         ),
       );
     } catch (error) {
+      final cancelled = error == _kModDownloadCancelled;
       if (mod.type == _AtlasModType.exe) {
         // Roll back: drop any patched EXE we wrote and restore the originals.
         for (final directoryPath in targetDirectories) {
@@ -5358,8 +5612,15 @@ class _LauncherScreenState extends State<LauncherScreen>
         }
       }
       _toastProgressDismiss();
-      _toast('Failed to install ${mod.name}');
-      _log('mods', 'Failed to install ${mod.id}: $error');
+      if (cancelled) {
+        _toast('Cancelled installing "${mod.name}"');
+        _log('mods', 'Install cancelled by user: ${mod.id}');
+      } else {
+        _toast('Failed to install ${mod.name}');
+        _log('mods', 'Failed to install ${mod.id}: $error');
+      }
+    } finally {
+      _cancelModDownload = false;
     }
   }
 
@@ -5372,11 +5633,15 @@ class _LauncherScreenState extends State<LauncherScreen>
     required String subtitle,
     required String actionLabel,
     required IconData actionIcon,
+    Set<String> disabledVersionIds = const <String>{},
     Color? actionColor,
   }) async {
     final ordered = List<VersionEntry>.from(builds)
       ..sort((a, b) => _compareVersionStrings(b.gameVersion, a.gameVersion));
-    final selectedIds = ordered.map((version) => version.id).toSet();
+    final selectedIds = ordered
+        .where((version) => !disabledVersionIds.contains(version.id))
+        .map((version) => version.id)
+        .toSet();
 
     return showGeneralDialog<List<VersionEntry>>(
       context: context,
@@ -5440,14 +5705,26 @@ class _LauncherScreenState extends State<LauncherScreen>
                                   children: [
                                     for (final version in ordered)
                                       CheckboxListTile(
+                                        enabled: !disabledVersionIds.contains(
+                                          version.id,
+                                        ),
                                         value: selectedIds.contains(version.id),
                                         activeColor: secondary,
                                         checkColor: Colors.white,
-                                        onChanged: (checked) => setDialogState(
-                                          () => checked == true
-                                              ? selectedIds.add(version.id)
-                                              : selectedIds.remove(version.id),
-                                        ),
+                                        onChanged:
+                                            disabledVersionIds.contains(
+                                              version.id,
+                                            )
+                                            ? null
+                                            : (checked) => setDialogState(
+                                                () => checked == true
+                                                    ? selectedIds.add(
+                                                        version.id,
+                                                      )
+                                                    : selectedIds.remove(
+                                                        version.id,
+                                                      ),
+                                              ),
                                         contentPadding: EdgeInsets.zero,
                                         controlAffinity:
                                             ListTileControlAffinity.leading,
@@ -5467,7 +5744,11 @@ class _LauncherScreenState extends State<LauncherScreen>
                                           ),
                                         ),
                                         subtitle: Text(
-                                          'Version ${_formatLibraryVersionLabel(version.gameVersion)}',
+                                          disabledVersionIds.contains(
+                                                version.id,
+                                              )
+                                              ? 'Version ${_formatLibraryVersionLabel(version.gameVersion)} - Running'
+                                              : 'Version ${_formatLibraryVersionLabel(version.gameVersion)}',
                                           style: TextStyle(
                                             color: _onSurface(
                                               dialogContext,
@@ -5542,14 +5823,23 @@ class _LauncherScreenState extends State<LauncherScreen>
     List<VersionEntry> compatible,
   ) {
     final spec = mod.version.trim();
+    final runningVersionIds = compatible
+        .where((version) => _isVersionRunning(version.id))
+        .map((version) => version.id)
+        .toSet();
     return _pickPakModBuilds(
       builds: compatible,
       title: 'Install ${mod.name}',
       subtitle: spec.isEmpty
-          ? 'Choose which builds to install this mod to.'
-          : 'Compatible with $spec. Choose which of your builds to install to.',
+          ? runningVersionIds.isEmpty
+                ? 'Choose which builds to install this mod to.'
+                : 'Choose which builds to install this mod to. Running builds are disabled.'
+          : runningVersionIds.isEmpty
+          ? 'Compatible with $spec. Choose which of your builds to install to.'
+          : 'Compatible with $spec. Choose which of your builds to install to. Running builds are disabled.',
       actionLabel: 'Install',
       actionIcon: Icons.download_rounded,
+      disabledVersionIds: runningVersionIds,
     );
   }
 
@@ -5616,7 +5906,10 @@ class _LauncherScreenState extends State<LauncherScreen>
       final selectedIds = selectedBuilds.map((build) => build.id).toSet();
       for (final build in selectedBuilds) {
         await removePaths(
-          _atlasModFilePathsInDirectory(mod, _buildModTargetDirectory(mod, build)),
+          _atlasModFilePathsInDirectory(
+            mod,
+            _buildModTargetDirectory(mod, build),
+          ),
         );
       }
       final remainingIds = installed.targetVersionIds
@@ -5664,7 +5957,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   /// every target build receives the same file set, the rename / replace / add
   /// scenarios all reduce to: delete files whose names are gone from the new
   /// release, then (re)download the current file set in place.
-  Future<void> _updateAtlasMod(_AtlasModEntry mod, {bool announce = true}) async {
+  Future<void> _updateAtlasMod(
+    _AtlasModEntry mod, {
+    bool announce = true,
+  }) async {
     final installed = _installedModsById[mod.id];
     if (installed == null || !_installedAtlasModFilesPresent(installed)) {
       // Nothing recorded to update against; treat it as a fresh install.
@@ -5691,24 +5987,28 @@ class _LauncherScreenState extends State<LauncherScreen>
         _toast('No installed build found to update ${mod.name}');
         return;
       }
+      if (_blockModDownloadForRunningTargets(targetVersionIds)) return;
     } else {
       targetDirectories.add(_dllModTargetDirectory(mod));
     }
 
     // Files present in the old release but not the new one (renamed/removed).
     final oldNames = installed.installedFilePaths.map(_basename).toSet();
-    final newNames = mod.files
-        .map((file) => _safeFileName(file.name))
-        .toSet();
+    final newNames = mod.files.map((file) => _safeFileName(file.name)).toSet();
     final staleNames = oldNames.difference(newNames);
 
     final installedPaths = <String>[];
     final totalDownloads = targetDirectories.length * mod.files.length;
     var completed = 0;
+    _cancelModDownload = false;
+    // Lock the build(s) this mod is downloading into until it's done.
+    _setModInstallTargetVersionIds(targetVersionIds);
+    void onCancel() => _cancelModDownload = true;
     _toastProgress(
-      'Updating ${mod.name}...',
+      'Updating "${mod.name}"...',
       progress: null,
       indeterminate: true,
+      onCancel: onCancel,
     );
     try {
       for (final directoryPath in targetDirectories) {
@@ -5734,6 +6034,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         // place, brand new files are added. The original stock EXE was already
         // backed up at first install, so updating just swaps the patched binary.
         for (final file in mod.files) {
+          if (_cancelModDownload) throw _kModDownloadCancelled;
           final destination = File(
             _joinPath([directory.path, _safeFileName(file.name)]),
           );
@@ -5748,16 +6049,22 @@ class _LauncherScreenState extends State<LauncherScreen>
               final fileProgress = total == null || total <= 0
                   ? 0.0
                   : (received / total).clamp(0.0, 1.0);
+              final progress = totalDownloads == 0
+                  ? null
+                  : (base + fileProgress) / totalDownloads;
+              final pct = progress == null
+                  ? ''
+                  : ' ${(progress * 100).round()}%';
               _toastProgress(
-                'Updating ${mod.name} (${base + 1}/$totalDownloads)',
-                progress: totalDownloads == 0
-                    ? null
-                    : (base + fileProgress) / totalDownloads,
+                'Updating "${mod.name}" (${base + 1}/$totalDownloads)$pct',
+                progress: progress,
                 indeterminate: false,
+                onCancel: onCancel,
               );
             },
             resolveShareLinks: true,
             rejectHtmlResponse: true,
+            isCancelled: () => _cancelModDownload,
           );
           if (mod.type == _AtlasModType.exe) {
             await _writeExeMarker(destination.path, mod.id);
@@ -5780,6 +6087,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         installedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
         filesFingerprint: _atlasModFilesFingerprint(mod),
+        dataSlot: mod.dataSlot,
       );
       await _saveInstalledMods();
       if (mounted) setState(() {});
@@ -5799,8 +6107,16 @@ class _LauncherScreenState extends State<LauncherScreen>
       // Leave any partially written files and the old record in place so the
       // mod keeps working and still shows as needing an update to retry.
       _toastProgressDismiss();
-      if (announce) _toast('Failed to update ${mod.name}');
-      _log('mods', 'Failed to update ${mod.id}: $error');
+      final cancelled = error == _kModDownloadCancelled;
+      if (cancelled) {
+        if (announce) _toast('Cancelled updating "${mod.name}"');
+        _log('mods', 'Update cancelled by user: ${mod.id}');
+      } else {
+        if (announce) _toast('Failed to update ${mod.name}');
+        _log('mods', 'Failed to update ${mod.id}: $error');
+      }
+    } finally {
+      _cancelModDownload = false;
     }
   }
 
@@ -6670,6 +6986,15 @@ class _LauncherScreenState extends State<LauncherScreen>
       final nextPresets = List<_DllPreset>.from(_dllPresets);
       var changed = _dllPresetSeedVersion < _bundledDllPresetSeedVersion;
 
+      if (_dllPresetSeedVersion < _bundledDllPresetSeedVersion) {
+        final retiredAliases = _retiredBundledDefaultDllPresetAliases();
+        final beforeCount = nextPresets.length;
+        nextPresets.removeWhere(
+          (item) => retiredAliases.contains(item.name.trim().toLowerCase()),
+        );
+        changed = changed || nextPresets.length != beforeCount;
+      }
+
       for (final preset in seededPresets) {
         final aliases = _bundledDefaultDllPresetAliases(preset.name);
         final existing = nextPresets
@@ -6742,44 +7067,13 @@ class _LauncherScreenState extends State<LauncherScreen>
       return _bundledDefaultDllPresetPath(_bundledDllSpecByFileName(fileName));
     }
 
-    Future<String> bundledPath(String fileName, String label) async {
-      final path = await _ensureBundledDll(
-        bundledAssetPath: 'assets/dlls/$fileName',
-        bundledFileName: fileName,
-        label: label,
-        showFeedback: false,
-      );
-      return path?.trim() ?? '';
-    }
-
-    final consolePath = await defaultDllPath('Console.dll');
-    final telluriumAuthPath = await defaultDllPath('Tellurium.dll');
-    final retracAuthPath = await bundledPath(
-      _retracPakDefaultDllFileName,
-      'Pak authentication patcher',
-    );
     final memoryPath = await defaultDllPath('Memory.dll');
-    final magnesiumPath = await defaultDllPath('Magnesium.dll');
     final remixConsolePath = await defaultDllPath('Remix Console.dll');
     final starfallAuthPath = await defaultDllPath('Starfall.dll');
     final remixGameServerPath = await defaultDllPath('Remix.dll');
-    final rebootGameServerPath = await bundledPath(
-      'Reboot Ultimate V1 Gameserver.dll',
-      'Reboot Ultimate V1 game server',
-    );
     final now = DateTime.now().millisecondsSinceEpoch;
 
     return <_DllPreset>[
-      _DllPreset(
-        name: _rebootUltimateDefaultPresetName,
-        createdAtEpochMs: now,
-        updatedAtEpochMs: now + 1,
-        unrealEnginePatcherPath: consolePath,
-        authenticationPatcherPath: telluriumAuthPath,
-        memoryPatcherPath: memoryPath,
-        gameServerFilePath: rebootGameServerPath,
-        largePakPatcherFilePath: '',
-      ),
       _DllPreset(
         name: _remixDefaultPresetName,
         createdAtEpochMs: now,
@@ -6790,46 +7084,29 @@ class _LauncherScreenState extends State<LauncherScreen>
         gameServerFilePath: remixGameServerPath,
         largePakPatcherFilePath: '',
       ),
-      _DllPreset(
-        name: _retracPakDefaultPresetName,
-        createdAtEpochMs: now,
-        updatedAtEpochMs: now,
-        unrealEnginePatcherPath: consolePath,
-        authenticationPatcherPath: retracAuthPath,
-        memoryPatcherPath: memoryPath,
-        gameServerFilePath: magnesiumPath,
-        largePakPatcherFilePath: '',
-      ),
     ];
   }
 
   Set<String> _bundledDefaultDllPresetAliases(String name) {
     final lowerName = name.trim().toLowerCase();
-    if (lowerName == _rebootUltimateDefaultPresetName.toLowerCase() ||
-        lowerName == _legacyRebootUltimateDefaultPresetName.toLowerCase()) {
-      return <String>{
-        _rebootUltimateDefaultPresetName.toLowerCase(),
-        _legacyRebootUltimateDefaultPresetName.toLowerCase(),
-      };
-    }
-    if (lowerName == _retracPakDefaultPresetName.toLowerCase() ||
-        lowerName == _legacyRetracPakDefaultPresetName.toLowerCase()) {
-      return <String>{
-        _retracPakDefaultPresetName.toLowerCase(),
-        _legacyRetracPakDefaultPresetName.toLowerCase(),
-      };
-    }
     if (lowerName == _remixDefaultPresetName.toLowerCase()) {
       return <String>{_remixDefaultPresetName.toLowerCase()};
     }
     return <String>{lowerName};
   }
 
+  Set<String> _retiredBundledDefaultDllPresetAliases() {
+    return <String>{
+      'reboot ultimate gs preset',
+      'reboot ultimate v1 gameserver',
+      '14.40 pak authenticator',
+      'retrac pak authentication',
+    };
+  }
+
   bool _isBundledDefaultDllPresetName(String name) {
     final aliases = _bundledDefaultDllPresetAliases(name);
-    return aliases.contains(_rebootUltimateDefaultPresetName.toLowerCase()) ||
-        aliases.contains(_remixDefaultPresetName.toLowerCase()) ||
-        aliases.contains(_retracPakDefaultPresetName.toLowerCase());
+    return aliases.contains(_remixDefaultPresetName.toLowerCase());
   }
 
   bool _isBundledDefaultDllPreset(_DllPreset preset) {
@@ -7479,6 +7756,18 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (client.versionId == versionId) return true;
     }
     return false;
+  }
+
+  bool _isVersionRunning(String versionId) {
+    final id = versionId.trim();
+    if (id.isEmpty) return false;
+    if (_settings.selectedVersionId == id &&
+        (_gameAction == _GameActionState.launching || _gameServerLaunching)) {
+      return true;
+    }
+    if (_hasRunningClientForVersion(id)) return true;
+    final host = _gameServerInstance;
+    return host != null && !host.killed && host.versionId == id;
   }
 
   void _recordGameplaySessionStart(String versionId) {
@@ -11106,6 +11395,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       _toast('Fortnite launch is only available on Windows');
       return;
     }
+    if (_isModDownloadLockedVersion(version.id)) {
+      _toast(
+        'A mod is still downloading for this build — wait for it to finish',
+      );
+      return;
+    }
 
     _FortniteProcessState? linkedHosting;
     _clearStaleHostStoppedWarningOnNewSession();
@@ -11610,6 +11905,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     if (_gameServerProcess != null) {
       if (!triggeredByAutoRestart) {
         _toast('Hosting is already running');
+      }
+      return;
+    }
+    if (_isModDownloadLockedVersion(version.id)) {
+      if (!triggeredByAutoRestart) {
+        _toast(
+          'A mod is still downloading for this build - wait for it to finish',
+        );
       }
       return;
     }
@@ -14906,6 +15209,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   }
 
   Future<void> _editVersion(VersionEntry entry) async {
+    if (_isModDownloadLockedVersion(entry.id)) {
+      _toast(
+        'A mod is still downloading for this build - wait for it to finish',
+      );
+      return;
+    }
+
     final editRequest = await _promptImportBuildDialog(
       title: 'Edit Build',
       description:
@@ -16111,6 +16421,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   }
 
   Future<void> _removeVersion(String id) async {
+    if (_isModDownloadLockedVersion(id)) {
+      _toast(
+        'A mod is still downloading for this build - wait for it to finish',
+      );
+      return;
+    }
+
     setState(() {
       final remaining = _settings.versions
           .where((element) => element.id != id)
@@ -16130,6 +16447,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   Future<void> _clearAllVersions() async {
     if (_settings.versions.isEmpty) return;
+    if (_hasModDownloadLockedVersions()) {
+      _toast('A mod is still downloading for a build - wait for it to finish');
+      return;
+    }
 
     final confirmed = await showGeneralDialog<bool>(
       context: context,
@@ -18379,6 +18700,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     String message, {
     required double? progress,
     required bool indeterminate,
+    VoidCallback? onCancel,
   }) {
     if (!mounted) return;
     if (!_ensureToastOverlayReady()) return;
@@ -18389,6 +18711,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         message,
         progress: progress,
         indeterminate: indeterminate,
+        onCancel: onCancel,
       );
     }
 
@@ -21118,6 +21441,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         hasRunningGameClient && !_settings.allowMultipleGameClients;
     final showCloseAllGamesButton =
         hasRunningGameClient && _settings.allowMultipleGameClients;
+    final selectedLockedByModDownload =
+        selected != null && _isModDownloadLockedVersion(selected.id);
+    final launchDisabledByModDownload =
+        selectedLockedByModDownload && !launchActsAsClose;
+    final hostActsAsClose = _gameServerProcess != null;
+    final hostDisabledByModDownload =
+        selectedLockedByModDownload && !hostActsAsClose;
 
     final topPanel = _menuItemEntrance(
       menuKey: LauncherTab.library,
@@ -21203,7 +21533,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               else
                                 FilledButton.icon(
                                   onPressed:
-                                      _gameAction != _GameActionState.idle
+                                      _gameAction != _GameActionState.idle ||
+                                          launchDisabledByModDownload
                                       ? null
                                       : _onLaunchButtonPressed,
                                   style: FilledButton.styleFrom(
@@ -21290,13 +21621,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 FilledButton.icon(
                                   onPressed:
                                       _gameAction != _GameActionState.idle ||
-                                          _gameServerLaunching
+                                          _gameServerLaunching ||
+                                          hostDisabledByModDownload
                                       ? null
-                                      : _gameServerProcess != null
+                                      : hostActsAsClose
                                       ? _closeHosting
                                       : _startHosting,
                                   style: FilledButton.styleFrom(
-                                    backgroundColor: _gameServerProcess != null
+                                    backgroundColor: hostActsAsClose
                                         ? const Color(0xFFDC3545)
                                         : Theme.of(context)
                                               .colorScheme
@@ -21318,12 +21650,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                     shape: const StadiumBorder(),
                                   ),
                                   icon: Icon(
-                                    _gameServerProcess != null
+                                    hostActsAsClose
                                         ? Icons.stop_rounded
                                         : Icons.cloud_upload_rounded,
                                   ),
                                   label: Text(
-                                    _gameServerProcess != null
+                                    hostActsAsClose
                                         ? 'Close Host'
                                         : _gameServerLaunching
                                         ? 'Starting...'
@@ -21494,8 +21826,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       );
       final clearAllButton = _versionCardAction(
         icon: Icons.delete_sweep_rounded,
-        tooltip: 'Clear all versions',
-        onTap: () => unawaited(_clearAllVersions()),
+        tooltip: _hasModDownloadLockedVersions()
+            ? 'Finish mod download before clearing builds'
+            : 'Clear all versions',
+        onTap: _hasModDownloadLockedVersions()
+            ? null
+            : () => unawaited(_clearAllVersions()),
       );
       final sortButton = _versionCardAction(
         icon: _librarySortIcon,
@@ -22265,7 +22601,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       // newest first.
       visibleMods = typeSearchMods.where(isRecentMod).toList()
         ..sort((a, b) {
-          final byUpdated = b.lastUpdatedEpochMs.compareTo(a.lastUpdatedEpochMs);
+          final byUpdated = b.lastUpdatedEpochMs.compareTo(
+            a.lastUpdatedEpochMs,
+          );
           if (byUpdated != 0) return byUpdated;
           return a.name.toLowerCase().compareTo(b.name.toLowerCase());
         });
@@ -23560,18 +23898,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           final installed = _isAtlasModInstalled(mod);
                           final updateAvailable =
                               installed && _atlasModUpdateAvailable(mod);
-                          // Pak mods can only install into a build the user has
-                          // imported that the mod is compatible with. With none
-                          // available, the Install action is disabled.
+                          // Build-targeted mods can only install into a
+                          // compatible imported build that is not running.
+                          final compatibleBuilds = mod.type.isBuildTargeted
+                              ? _compatibleVersionsForMod(mod)
+                              : const <VersionEntry>[];
                           final hasCompatibleBuild =
                               !mod.type.isBuildTargeted ||
-                              _compatibleVersionsForMod(mod).isNotEmpty;
-                          return PopScope(
-                            // Lock the dialog while a mod is installing,
-                            // updating, or being removed — no Esc / back /
-                            // tap-outside dismissal mid-operation.
-                            canPop: !actionBusy,
-                            child: Container(
+                              compatibleBuilds.isNotEmpty;
+                          final installBlockedByRunningBuild =
+                              !installed &&
+                              mod.type.isBuildTargeted &&
+                              compatibleBuilds.isNotEmpty &&
+                              compatibleBuilds.every(
+                                (version) => _isVersionRunning(version.id),
+                              );
+                          return Container(
                             margin: const EdgeInsets.symmetric(horizontal: 20),
                             padding: const EdgeInsets.fromLTRB(20, 20, 0, 18),
                             decoration: BoxDecoration(
@@ -23950,11 +24292,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                     children: [
                                       _dialogCancelButton(
                                         dialogContext,
-                                        onPressed: actionBusy
-                                            ? null
-                                            : () => Navigator.of(
-                                                dialogContext,
-                                              ).pop(),
+                                        // Always allow closing — a download keeps
+                                        // running in the background after exit.
+                                        onPressed: () =>
+                                            Navigator.of(dialogContext).pop(),
                                       ),
                                       const SizedBox(width: 12),
                                       Expanded(
@@ -23998,47 +24339,54 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                   onPressed: actionBusy
                                                       ? null
                                                       : () async {
+                                                          if (_atlasModBusy) {
+                                                            _toast(
+                                                              'Finish the current download before starting another',
+                                                            );
+                                                            return;
+                                                          }
                                                           setDialogState(() {
                                                             actionBusy = true;
                                                             updating = true;
                                                           });
-                                                          await _updateAtlasMod(
-                                                            mod,
+                                                          await _runExclusiveModOp(
+                                                            () =>
+                                                                _updateAtlasMod(
+                                                                  mod,
+                                                                ),
                                                           );
                                                           if (dialogContext
                                                               .mounted) {
                                                             setDialogState(() {
-                                                              actionBusy = false;
+                                                              actionBusy =
+                                                                  false;
                                                               updating = false;
                                                             });
                                                           }
                                                         },
-                                                  style:
-                                                      FilledButton.styleFrom(
-                                                        backgroundColor:
-                                                            const Color(
-                                                              0xFFE8A23D,
-                                                            ),
-                                                        foregroundColor:
-                                                            Colors.white,
-                                                        disabledBackgroundColor:
-                                                            _onSurface(
-                                                              dialogContext,
-                                                              0.16,
-                                                            ),
-                                                        disabledForegroundColor:
-                                                            _onSurface(
-                                                              dialogContext,
-                                                              0.5,
-                                                            ),
-                                                        shape:
-                                                            const StadiumBorder(),
-                                                        padding:
-                                                            const EdgeInsets.symmetric(
-                                                              horizontal: 18,
-                                                              vertical: 12,
-                                                            ),
-                                                      ),
+                                                  style: FilledButton.styleFrom(
+                                                    backgroundColor:
+                                                        const Color(0xFFE8A23D),
+                                                    foregroundColor:
+                                                        Colors.white,
+                                                    disabledBackgroundColor:
+                                                        _onSurface(
+                                                          dialogContext,
+                                                          0.16,
+                                                        ),
+                                                    disabledForegroundColor:
+                                                        _onSurface(
+                                                          dialogContext,
+                                                          0.5,
+                                                        ),
+                                                    shape:
+                                                        const StadiumBorder(),
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 18,
+                                                          vertical: 12,
+                                                        ),
+                                                  ),
                                                   icon: updating
                                                       ? const SizedBox(
                                                           width: 18,
@@ -24063,9 +24411,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                 onPressed:
                                                     actionBusy ||
                                                         (!installed &&
-                                                            !hasCompatibleBuild)
+                                                            (!hasCompatibleBuild ||
+                                                                installBlockedByRunningBuild))
                                                     ? null
                                                     : () async {
+                                                        if (!installed &&
+                                                            _atlasModBusy) {
+                                                          _toast(
+                                                            'Finish the current download before starting another',
+                                                          );
+                                                          return;
+                                                        }
                                                         setDialogState(
                                                           () =>
                                                               actionBusy = true,
@@ -24075,8 +24431,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                                             mod,
                                                           );
                                                         } else {
-                                                          await _installAtlasMod(
-                                                            mod,
+                                                          await _runExclusiveModOp(
+                                                            () =>
+                                                                _installAtlasMod(
+                                                                  mod,
+                                                                ),
                                                           );
                                                         }
                                                         if (dialogContext
@@ -24147,7 +24506,6 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   ),
                                 ),
                               ],
-                            ),
                             ),
                           );
                         },
@@ -25150,6 +25508,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _installedVersionCard(VersionEntry entry) {
     final active = _settings.selectedVersionId == entry.id;
     final favorite = entry.isFavorite;
+    final lockedByModDownload = _isModDownloadLockedVersion(entry.id);
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
     final splashImage = _libraryCoverImage(entry);
@@ -25362,14 +25721,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           const SizedBox(width: 6),
                           _versionCardAction(
                             icon: Icons.edit_rounded,
-                            tooltip: 'Edit build',
-                            onTap: () => _editVersion(entry),
+                            tooltip: lockedByModDownload
+                                ? 'Finish mod download before editing'
+                                : 'Edit build',
+                            onTap: lockedByModDownload
+                                ? null
+                                : () => _editVersion(entry),
                           ),
                           const SizedBox(width: 6),
                           _versionCardAction(
                             icon: Icons.delete_outline_rounded,
-                            tooltip: 'Remove build',
-                            onTap: () => _removeVersion(entry.id),
+                            tooltip: lockedByModDownload
+                                ? 'Finish mod download before removing'
+                                : 'Remove build',
+                            onTap: lockedByModDownload
+                                ? null
+                                : () => _removeVersion(entry.id),
                           ),
                         ],
                       ),
@@ -25393,7 +25760,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     bool busy = false,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
-    final resolvedColor = iconColor ?? onSurface.withValues(alpha: 0.92);
+    final enabled = onTap != null;
+    final resolvedColor = enabled
+        ? iconColor ?? onSurface.withValues(alpha: 0.92)
+        : onSurface.withValues(alpha: 0.38);
     return Tooltip(
       message: tooltip,
       child: IconButton(
@@ -25417,10 +25787,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           padding: const EdgeInsets.all(6),
           backgroundColor: _adaptiveScrimColor(
             context,
-            darkAlpha: 0.22,
-            lightAlpha: 0.24,
+            darkAlpha: enabled ? 0.22 : 0.10,
+            lightAlpha: enabled ? 0.24 : 0.10,
           ),
-          side: BorderSide(color: onSurface.withValues(alpha: 0.24)),
+          side: BorderSide(
+            color: onSurface.withValues(alpha: enabled ? 0.24 : 0.12),
+          ),
         ),
       ),
     );
@@ -27476,7 +27848,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       ).firstMatch(html);
       if (scrambled != null) {
         try {
-          final decoded = utf8.decode(base64.decode(scrambled.group(1)!.trim()));
+          final decoded = utf8.decode(
+            base64.decode(scrambled.group(1)!.trim()),
+          );
           if (decoded.startsWith('http')) return decoded;
         } catch (_) {}
       }
@@ -27531,7 +27905,11 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     // saved as a pak/dll.
     bool resolveShareLinks = false,
     bool rejectHtmlResponse = false,
+    // Polled during the transfer; returning true aborts the download (the
+    // partial file is dropped and [_kModDownloadCancelled] is thrown).
+    bool Function()? isCancelled,
   }) async {
+    if (isCancelled?.call() ?? false) throw _kModDownloadCancelled;
     final trimmed = url.trim();
     final uri = Uri.tryParse(trimmed);
     if (uri?.scheme.toLowerCase() == 'file') {
@@ -27571,8 +27949,7 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
         throw 'Download failed (HTTP ${response.statusCode}).';
       }
       if (rejectHtmlResponse) {
-        final mime =
-            response.headers.contentType?.mimeType.toLowerCase() ?? '';
+        final mime = response.headers.contentType?.mimeType.toLowerCase() ?? '';
         if (mime == 'text/html' || mime == 'application/xhtml+xml') {
           throw 'Download did not return a file (got an HTML page). Use a '
               'direct download link.';
@@ -27585,9 +27962,8 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       var receivedBytes = 0;
       // Idle timeout: if no data arrives for a while, fail instead of hanging
       // forever on a stalled connection.
-      await for (final chunk in response.timeout(
-        const Duration(seconds: 60),
-      )) {
+      await for (final chunk in response.timeout(const Duration(seconds: 60))) {
+        if (isCancelled?.call() ?? false) throw _kModDownloadCancelled;
         sink.add(chunk);
         receivedBytes += chunk.length;
         onProgress?.call(receivedBytes, totalBytes);
@@ -29182,7 +29558,225 @@ foreach ($app in $appPaths) {
     );
   }
 
+  /// Installed DLL mods assigned to [slot], paired with the on-disk `.dll` to
+  /// use. Slot assignment comes from the install record's `dataSlot`, falling
+  /// back to the catalog entry for installs made before slot tracking existed.
+  List<({_InstalledAtlasMod mod, String dllPath})> _installedDllsForSlot(
+    _DataDllSlot slot,
+  ) {
+    final result = <({_InstalledAtlasMod mod, String dllPath})>[];
+    for (final installed in _installedModsById.values) {
+      if (installed.type != _AtlasModType.dll) continue;
+      var slotValue = installed.dataSlot.trim();
+      if (slotValue.isEmpty) {
+        for (final mod in _modsLibrary) {
+          if (mod.id == installed.id) {
+            slotValue = mod.dataSlot.trim();
+            break;
+          }
+        }
+      }
+      if (slotValue.isEmpty || _DataDllSlot.resolve(slotValue) != slot) {
+        continue;
+      }
+      final dllPath = installed.installedFilePaths.firstWhere(
+        (path) =>
+            path.toLowerCase().endsWith('.dll') && File(path).existsSync(),
+        orElse: () => '',
+      );
+      if (dllPath.isEmpty) continue;
+      result.add((mod: installed, dllPath: dllPath));
+    }
+    result.sort(
+      (a, b) => a.mod.name.toLowerCase().compareTo(b.mod.name.toLowerCase()),
+    );
+    return result;
+  }
+
+  /// Opens the installed-DLL library for [slot] and, on selection, points the
+  /// slot's path field at the chosen mod's `.dll`.
+  Future<void> _pickInstalledDllForSlot(
+    _DataDllSlot slot,
+    TextEditingController controller,
+    ValueChanged<String> onChanged,
+  ) async {
+    final candidates = _installedDllsForSlot(slot);
+    final currentPath = controller.text.trim().toLowerCase();
+    final selected = await showGeneralDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 480),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${slot.label} DLLs',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(dialogContext, 0.96),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          candidates.isEmpty
+                              ? 'You currently have no DLLs downloaded from the Mod library. Install a DLL from there to see it appear here.'
+                              : 'Choose an installed DLL mod to use for the ${slot.label}.',
+                          style: TextStyle(
+                            color: _onSurface(dialogContext, 0.84),
+                            height: 1.35,
+                          ),
+                        ),
+                        if (candidates.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Flexible(
+                            child: SingleChildScrollView(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  for (final candidate in candidates)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 8),
+                                      child: Material(
+                                        color: _onSurface(dialogContext, 0.05),
+                                        borderRadius: BorderRadius.circular(14),
+                                        child: InkWell(
+                                          borderRadius: BorderRadius.circular(
+                                            14,
+                                          ),
+                                          onTap: () => Navigator.of(
+                                            dialogContext,
+                                          ).pop(candidate.dllPath),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 14,
+                                              vertical: 12,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.extension_rounded,
+                                                  size: 20,
+                                                  color: secondary.withValues(
+                                                    alpha: 0.9,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 12),
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      Text(
+                                                        candidate.mod.name,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w700,
+                                                          color: _onSurface(
+                                                            dialogContext,
+                                                            0.92,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        _basename(
+                                                          candidate.dllPath,
+                                                        ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: TextStyle(
+                                                          fontSize: 12,
+                                                          color: _onSurface(
+                                                            dialogContext,
+                                                            0.6,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                if (candidate.dllPath
+                                                        .toLowerCase() ==
+                                                    currentPath)
+                                                  Icon(
+                                                    Icons.check_circle_rounded,
+                                                    size: 18,
+                                                    color: secondary,
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            _dialogCancelButton(
+                              dialogContext,
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(),
+                            ),
+                            const Spacer(),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+    if (selected != null && selected.trim().isNotEmpty) {
+      controller.text = selected;
+      onChanged(selected);
+      _toast('Set ${slot.label} to ${_basename(selected)}');
+    }
+  }
+
   Widget _dataPathPicker({
+    required _DataDllSlot slot,
     required TextEditingController controller,
     required String placeholder,
     required ValueChanged<String> onChanged,
@@ -29255,6 +29849,19 @@ foreach ($app in $appPaths) {
         ),
         const SizedBox(width: 8),
         if (statusIcon != null) ...[statusIcon, const SizedBox(width: 8)],
+        IconButton(
+          onPressed: () =>
+              unawaited(_pickInstalledDllForSlot(slot, controller, onChanged)),
+          tooltip: 'Choose from installed DLL mods',
+          icon: const Icon(Icons.expand_more_rounded, size: 20),
+          style: IconButton.styleFrom(
+            minimumSize: const Size(42, 42),
+            backgroundColor: onSurface.withValues(alpha: 0.06),
+            foregroundColor: onSurface.withValues(alpha: 0.9),
+            side: BorderSide(color: onSurface.withValues(alpha: 0.18)),
+          ),
+        ),
+        const SizedBox(width: 6),
         IconButton(
           onPressed: onPick,
           tooltip: 'Choose file',
@@ -30046,6 +30653,7 @@ foreach ($app in $appPaths) {
                   subtitle: 'Unlocks the Unreal Engine Console',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
+                    slot: _DataDllSlot.unrealEnginePatcher,
                     controller: _unrealEnginePatcherController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
@@ -30070,6 +30678,7 @@ foreach ($app in $appPaths) {
                   subtitle: 'Redirects all HTTP requests to the backend',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
+                    slot: _DataDllSlot.authenticationPatcher,
                     controller: _authenticationPatcherController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
@@ -30095,6 +30704,7 @@ foreach ($app in $appPaths) {
                       'Prevents the client from crashing because of a memory leak',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
+                    slot: _DataDllSlot.memoryPatcher,
                     controller: _memoryPatcherController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
@@ -30119,6 +30729,7 @@ foreach ($app in $appPaths) {
                   subtitle: 'The file injected to create the game server',
                   trailingWidth: 500,
                   trailing: _dataPathPicker(
+                    slot: _DataDllSlot.gameServer,
                     controller: _gameServerFileController,
                     placeholder: 'No file selected',
                     updateWarningMessage: _dllRowUpdateWarningMessage(
@@ -31914,6 +32525,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
   bool _progressMode = false;
   double? _progress;
   bool _progressIndeterminate = false;
+  VoidCallback? _onCancel;
 
   void show(String message) {
     if (!mounted) return;
@@ -31925,6 +32537,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
     _progressMode = false;
     _progress = null;
     _progressIndeterminate = false;
+    _onCancel = null;
 
     if (mounted) {
       setState(() {});
@@ -31944,6 +32557,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
     String message, {
     required double? progress,
     required bool indeterminate,
+    VoidCallback? onCancel,
   }) {
     if (!mounted) return;
     final trimmed = message.trim();
@@ -31954,6 +32568,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
     _progressMode = true;
     _progress = progress;
     _progressIndeterminate = indeterminate;
+    _onCancel = onCancel;
 
     setState(() {});
 
@@ -31962,6 +32577,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
         _message,
         progress: _progress,
         indeterminate: _progressIndeterminate,
+        onCancel: _onCancel,
       );
     });
   }
@@ -31970,6 +32586,7 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
     if (!mounted) return;
     if (!_progressMode) return;
     _timer?.cancel();
+    if (_onCancel != null) setState(() => _onCancel = null);
     _timer = Timer(const Duration(milliseconds: 550), () {
       if (!mounted) return;
       _cardKey.currentState?.dismiss();
@@ -31984,7 +32601,10 @@ class _ToastOverlayHostState extends State<_ToastOverlayHost> {
 
   @override
   Widget build(BuildContext context) {
+    // Toasts are normally click-through; only a progress toast offering a Cancel
+    // action needs to receive taps.
     return IgnorePointer(
+      ignoring: _onCancel == null,
       child: _AnimatedToastCard(
         key: _cardKey,
         initialMessage: _message,
@@ -32018,6 +32638,7 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
   bool _showProgressBar = false;
   double? _progress;
   bool _progressIndeterminate = false;
+  VoidCallback? _onCancel;
 
   @override
   void initState() {
@@ -32054,6 +32675,7 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       _showProgressBar = false;
       _progress = null;
       _progressIndeterminate = false;
+      _onCancel = null;
     });
 
     final wasHidden = _controller.value <= 0.001;
@@ -32075,6 +32697,7 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
     String message, {
     required double? progress,
     required bool indeterminate,
+    VoidCallback? onCancel,
   }) {
     if (!mounted) return;
     final trimmed = message.trim();
@@ -32085,6 +32708,7 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
       _showProgressBar = true;
       _progress = progress;
       _progressIndeterminate = indeterminate;
+      _onCancel = onCancel;
     });
 
     final wasHidden = _controller.value <= 0.001;
@@ -32153,16 +32777,50 @@ class _AnimatedToastCardState extends State<_AnimatedToastCard>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                      child: Text(
-                        _message,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: onSurface,
-                          fontWeight: FontWeight.w600,
-                          height: 1.2,
-                        ),
+                      padding: EdgeInsets.fromLTRB(
+                        16,
+                        12,
+                        _onCancel == null ? 16 : 8,
+                        12,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _message,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: onSurface,
+                                fontWeight: FontWeight.w600,
+                                height: 1.2,
+                              ),
+                            ),
+                          ),
+                          if (_onCancel != null) ...[
+                            const SizedBox(width: 8),
+                            Tooltip(
+                              message: 'Cancel',
+                              child: InkWell(
+                                onTap: () {
+                                  final cancel = _onCancel;
+                                  setState(() => _onCancel = null);
+                                  cancel?.call();
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                    color: _onSurface(context, 0.7),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                     if (_showProgressBar)
@@ -32586,6 +33244,7 @@ class _AtlasModEntry {
     required this.sourceUrl,
     required this.files,
     this.dependencies = const <String>[],
+    this.dataSlot = '',
     this.lastUpdatedEpochMs = 0,
   });
 
@@ -32609,6 +33268,10 @@ class _AtlasModEntry {
   // mod by folder path ("EXEs/27.11"), id, or display name. Resolved against the
   // loaded library; the user is prompted to install any missing ones first.
   final List<String> dependencies;
+  // For DLL mods: which Data Management patcher slot this DLL is meant for
+  // (free-form metadata value, resolved via [_DataDllSlot.resolve]). Empty when
+  // the mod doesn't target a slot.
+  final String dataSlot;
   final int lastUpdatedEpochMs;
 
   _AtlasModEntry copyWith({int? lastUpdatedEpochMs}) {
@@ -32629,6 +33292,7 @@ class _AtlasModEntry {
       sourceUrl: sourceUrl,
       files: files,
       dependencies: dependencies,
+      dataSlot: dataSlot,
       lastUpdatedEpochMs: lastUpdatedEpochMs ?? this.lastUpdatedEpochMs,
     );
   }
@@ -32748,6 +33412,15 @@ class _AtlasModEntry {
       dependencies: stringList(
         json['dependencies'] ?? json['requires'] ?? json['dependsOn'],
       ),
+      dataSlot:
+          (json['dataSlot'] ??
+                  json['dataManagementSlot'] ??
+                  json['patcherSlot'] ??
+                  json['dllRole'] ??
+                  json['slot'] ??
+                  '')
+              .toString()
+              .trim(),
       lastUpdatedEpochMs: asInt(
         json['lastUpdatedEpochMs'] ??
             json['lastUpdatedAtEpochMs'] ??
@@ -32775,6 +33448,7 @@ class _AtlasModEntry {
       'sourceUrl': sourceUrl,
       'files': files.map((file) => file.toJson()).toList(),
       'dependencies': dependencies,
+      'dataSlot': dataSlot,
       'lastUpdatedEpochMs': lastUpdatedEpochMs,
     };
   }
@@ -32792,12 +33466,17 @@ class _InstalledAtlasMod {
     required this.installedAtEpochMs,
     this.sourceLastUpdatedEpochMs = 0,
     this.filesFingerprint = '',
+    this.dataSlot = '',
   });
 
   final String id;
   final _AtlasModType type;
   final String name;
   final String version;
+  // For DLL mods: the Data Management slot this DLL targets (copied from the
+  // catalog entry at install time so the slot picker works without the catalog
+  // loaded). Empty for non-DLL mods or mods that don't declare a slot.
+  final String dataSlot;
   // Kept for backwards compatibility (first install target).
   final String targetVersionId;
   // Every build this mod was installed to. A pak mod can target multiple
@@ -32822,6 +33501,7 @@ class _InstalledAtlasMod {
     int? installedAtEpochMs,
     int? sourceLastUpdatedEpochMs,
     String? filesFingerprint,
+    String? dataSlot,
   }) {
     return _InstalledAtlasMod(
       id: id,
@@ -32835,6 +33515,7 @@ class _InstalledAtlasMod {
       sourceLastUpdatedEpochMs:
           sourceLastUpdatedEpochMs ?? this.sourceLastUpdatedEpochMs,
       filesFingerprint: filesFingerprint ?? this.filesFingerprint,
+      dataSlot: dataSlot ?? this.dataSlot,
     );
   }
 
@@ -32881,6 +33562,7 @@ class _InstalledAtlasMod {
       installedAtEpochMs: asInt(json['installedAtEpochMs'], 0),
       sourceLastUpdatedEpochMs: asInt(json['sourceLastUpdatedEpochMs'], 0),
       filesFingerprint: (json['filesFingerprint'] ?? '').toString(),
+      dataSlot: (json['dataSlot'] ?? '').toString().trim(),
     );
   }
 
@@ -32896,6 +33578,7 @@ class _InstalledAtlasMod {
       'installedAtEpochMs': installedAtEpochMs,
       'sourceLastUpdatedEpochMs': sourceLastUpdatedEpochMs,
       'filesFingerprint': filesFingerprint,
+      'dataSlot': dataSlot,
     };
   }
 }
