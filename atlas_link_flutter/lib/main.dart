@@ -833,8 +833,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.3';
-  static const String _launcherBuildLabel = 'Stable 1.4.3';
+  static const String _launcherVersion = '1.4.4';
+  static const String _launcherBuildLabel = 'Stable 1.4.4';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -901,10 +901,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/';
   static const int _bundledDllPresetSeedVersion = 8;
   static const String _remixDefaultPresetName = 'Remix Preset';
-  static const String _retracPakDefaultDllFileName =
-      '14.40 Pak Authenticator.dll';
-  static const String _legacyRetracPakDefaultDllFileName =
-      'Retrac 14.40 Authenticator.dll';
   static const List<_BundledDllSpec> _bundledDllSpecs = <_BundledDllSpec>[
     _BundledDllSpec(
       assetPath: 'assets/dlls/Magnesium.dll',
@@ -1370,7 +1366,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       // Load the mod catalog in the background so the Mods nav can flag
       // available updates without the user opening the tab first.
-      unawaited(_loadModsLibrary());
+      unawaited(_loadModsLibrary(silentRefreshToast: true));
       if (currentLauncherVersion.isNotEmpty &&
           _installState.lastSeenLauncherVersion != currentLauncherVersion) {
         _installState = _installState.copyWith(
@@ -1541,7 +1537,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _installedModAutoUpdateOnLaunchStarted = true;
     try {
       // Ensure the catalog is loaded so we can compare it against installs.
-      await _loadModsLibrary();
+      await _loadModsLibrary(silentRefreshToast: true);
       final pending = _modsLibrary.where(_atlasModUpdateAvailable).toList();
       if (pending.isEmpty) return;
       var updated = 0;
@@ -2917,18 +2913,6 @@ class _LauncherScreenState extends State<LauncherScreen>
       default:
         return '';
     }
-  }
-
-  bool _shouldMigrateLegacyRetracPakAuthPath(String configuredPath) {
-    final raw = configuredPath.trim();
-    if (raw.isEmpty) return false;
-    if (_basename(raw).toLowerCase() !=
-        _legacyRetracPakDefaultDllFileName.toLowerCase()) {
-      return false;
-    }
-    return !File(raw).existsSync() ||
-        _isManagedBundledDllPath(raw, _legacyRetracPakDefaultDllFileName) ||
-        _looksLikeBundledAssetDllPath(raw, _legacyRetracPakDefaultDllFileName);
   }
 
   Future<String?> _computeGitBlobShaForFile(File file) async {
@@ -4617,7 +4601,7 @@ class _LauncherScreenState extends State<LauncherScreen>
               _modsLibrary = fallbackMods;
               _modsLoadError = '';
             });
-            if (forceRefresh || !hadLoadedMods) {
+            if (!silentRefreshToast && (forceRefresh || !hadLoadedMods)) {
               _toast('Loaded ${fallbackMods.length} $fallbackLabel');
             }
           } else {
@@ -5616,7 +5600,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         _toast('Cancelled installing "${mod.name}"');
         _log('mods', 'Install cancelled by user: ${mod.id}');
       } else {
-        _toast('Failed to install ${mod.name}');
+        _toast('Failed to install "${mod.name}"');
         _log('mods', 'Failed to install ${mod.id}: $error');
       }
     } finally {
@@ -6645,28 +6629,6 @@ class _LauncherScreenState extends State<LauncherScreen>
             'Memory patcher DLL missing at $configuredMemory. Restored bundled default.',
           );
         }
-      }
-    }
-
-    final configuredLegacyRetracAuth = nextSettings.authenticationPatcherPath
-        .trim();
-    if (_shouldMigrateLegacyRetracPakAuthPath(configuredLegacyRetracAuth)) {
-      final retracAuthPath = await _ensureBundledDll(
-        bundledAssetPath: 'assets/dlls/$_retracPakDefaultDllFileName',
-        bundledFileName: _retracPakDefaultDllFileName,
-        label: 'Pak authentication patcher',
-        overwriteFallbackCopy: forceResetBundledPaths,
-      );
-      if (retracAuthPath != null && retracAuthPath.trim().isNotEmpty) {
-        nextSettings = nextSettings.copyWith(
-          authenticationPatcherPath: retracAuthPath,
-        );
-        _authenticationPatcherController.text = retracAuthPath;
-        changed = true;
-        _log(
-          'settings',
-          'Migrated Retrac Pak authentication DLL path from $configuredLegacyRetracAuth to $retracAuthPath.',
-        );
       }
     }
 
@@ -13813,16 +13775,6 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         assetPath: 'assets/dlls/Large Pak Patcher.dll',
         fileName: 'Large Pak Patcher.dll',
         label: 'Large Pak Patcher',
-      ),
-      _BundledInjectorDll(
-        assetPath: 'assets/dlls/$_retracPakDefaultDllFileName',
-        fileName: _retracPakDefaultDllFileName,
-        label: '14.40 Pak Authenticator',
-      ),
-      const _BundledInjectorDll(
-        assetPath: 'assets/dlls/Reboot Ultimate V1 Gameserver.dll',
-        fileName: 'Reboot Ultimate V1 Gameserver.dll',
-        label: 'Reboot Ultimate V1 Gameserver',
       ),
     ];
 
@@ -29593,6 +29545,22 @@ foreach ($app in $appPaths) {
     return result;
   }
 
+  Future<void> _uninstallInstalledDllMod(_InstalledAtlasMod installed) async {
+    if (installed.type != _AtlasModType.dll) return;
+    for (final path in installed.installedFilePaths) {
+      try {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      } catch (error) {
+        _log('mods', 'Failed to remove installed DLL mod file $path: $error');
+      }
+    }
+    _installedModsById.remove(installed.id);
+    await _saveInstalledMods();
+    if (mounted) setState(() {});
+    _toast('Removed ${installed.name}');
+  }
+
   /// Opens the installed-DLL library for [slot] and, on selection, points the
   /// slot's path field at the chosen mod's `.dll`.
   Future<void> _pickInstalledDllForSlot(
@@ -29600,8 +29568,9 @@ foreach ($app in $appPaths) {
     TextEditingController controller,
     ValueChanged<String> onChanged,
   ) async {
-    final candidates = _installedDllsForSlot(slot);
-    final currentPath = controller.text.trim().toLowerCase();
+    var candidates = _installedDllsForSlot(slot);
+    var currentPath = controller.text.trim().toLowerCase();
+    var searchQuery = '';
     final selected = await showGeneralDialog<String>(
       context: context,
       barrierDismissible: true,
@@ -29609,157 +29578,216 @@ foreach ($app in $appPaths) {
       barrierColor: Colors.transparent,
       transitionDuration: const Duration(milliseconds: 220),
       pageBuilder: (dialogContext, animation, secondaryAnimation) {
-        final secondary = Theme.of(dialogContext).colorScheme.secondary;
         return SafeArea(
           child: Center(
             child: Material(
               type: MaterialType.transparency,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 480),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: _dialogSurfaceColor(dialogContext),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: _dialogShadowColor(dialogContext),
-                        blurRadius: 30,
-                        offset: const Offset(0, 16),
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: StatefulBuilder(
+                  builder: (dialogContext, setDialogState) {
+                    final onSurface = Theme.of(
+                      dialogContext,
+                    ).colorScheme.onSurface;
+                    final normalizedSearch = searchQuery.trim().toLowerCase();
+                    final visibleCandidates = normalizedSearch.isEmpty
+                        ? candidates
+                        : candidates.where((candidate) {
+                            return candidate.mod.name.toLowerCase().contains(
+                                  normalizedSearch,
+                                ) ||
+                                candidate.dllPath.toLowerCase().contains(
+                                  normalizedSearch,
+                                ) ||
+                                _basename(
+                                  candidate.dllPath,
+                                ).toLowerCase().contains(normalizedSearch);
+                          }).toList();
+
+                    Future<void> removeCandidate(
+                      ({_InstalledAtlasMod mod, String dllPath}) candidate,
+                    ) async {
+                      final removedPath = candidate.dllPath.toLowerCase();
+                      await _uninstallInstalledDllMod(candidate.mod);
+                      if (!dialogContext.mounted) return;
+                      setDialogState(() {
+                        candidates = _installedDllsForSlot(slot);
+                        if (currentPath == removedPath) {
+                          currentPath = '';
+                          controller.clear();
+                          onChanged('');
+                        }
+                      });
+                    }
+
+                    final searchInput = TextFormField(
+                      key: ValueKey(
+                        searchQuery.isEmpty
+                            ? 'installed-dll-search-empty'
+                            : 'installed-dll-search-active',
                       ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${slot.label} DLLs',
-                          style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w800,
-                            color: _onSurface(dialogContext, 0.96),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          candidates.isEmpty
-                              ? 'You currently have no DLLs downloaded from the Mod library. Install a DLL from there to see it appear here.'
-                              : 'Choose an installed DLL mod to use for the ${slot.label}.',
-                          style: TextStyle(
-                            color: _onSurface(dialogContext, 0.84),
-                            height: 1.35,
-                          ),
-                        ),
-                        if (candidates.isNotEmpty) ...[
-                          const SizedBox(height: 14),
-                          Flexible(
-                            child: SingleChildScrollView(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  for (final candidate in candidates)
-                                    Padding(
-                                      padding: const EdgeInsets.only(bottom: 8),
-                                      child: Material(
-                                        color: _onSurface(dialogContext, 0.05),
-                                        borderRadius: BorderRadius.circular(14),
-                                        child: InkWell(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
+                      initialValue: searchQuery,
+                      onChanged: (value) {
+                        setDialogState(() => searchQuery = value);
+                      },
+                      decoration:
+                          _backendFieldDecoration(
+                            hintText: 'Search DLLs by name',
+                          ).copyWith(
+                            prefixIcon: Icon(
+                              Icons.search_rounded,
+                              size: 18,
+                              color: onSurface.withValues(alpha: 0.72),
+                            ),
+                            suffixIconConstraints:
+                                const BoxConstraints.tightFor(
+                                  width: 40,
+                                  height: 40,
+                                ),
+                            suffixIcon: searchQuery.trim().isEmpty
+                                ? null
+                                : SizedBox(
+                                    width: 40,
+                                    height: 40,
+                                    child: IconButton(
+                                      tooltip: 'Clear search',
+                                      padding: EdgeInsets.zero,
+                                      constraints:
+                                          const BoxConstraints.tightFor(
+                                            width: 40,
+                                            height: 40,
                                           ),
+                                      onPressed: () {
+                                        setDialogState(() => searchQuery = '');
+                                      },
+                                      icon: const Icon(
+                                        Icons.close_rounded,
+                                        size: 18,
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                    );
+
+                    return Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 20),
+                      padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(dialogContext),
+                        borderRadius: BorderRadius.circular(22),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.12),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(dialogContext),
+                            blurRadius: 34,
+                            offset: const Offset(0, 18),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${slot.label} DLLs',
+                                  style: Theme.of(dialogContext)
+                                      .textTheme
+                                      .headlineSmall
+                                      ?.copyWith(fontWeight: FontWeight.w800),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Close',
+                                onPressed: () =>
+                                    Navigator.of(dialogContext).pop(),
+                                icon: const Icon(Icons.close_rounded),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            candidates.isEmpty
+                                ? 'You currently have no DLLs downloaded from the Mod library. Install a DLL from there to see it appear here.'
+                                : 'Choose an installed DLL mod to use for the ${slot.label}.',
+                            style: TextStyle(
+                              color: onSurface.withValues(alpha: 0.74),
+                              fontWeight: FontWeight.w600,
+                              height: 1.35,
+                            ),
+                          ),
+                          if (candidates.isNotEmpty) ...[
+                            const SizedBox(height: 14),
+                            searchInput,
+                            const SizedBox(height: 10),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 360),
+                              child: ScrollConfiguration(
+                                behavior: ScrollConfiguration.of(
+                                  dialogContext,
+                                ).copyWith(scrollbars: false),
+                                child: ListView(
+                                  shrinkWrap: true,
+                                  primary: false,
+                                  children: [
+                                    if (visibleCandidates.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 12,
+                                        ),
+                                        child: Text(
+                                          'No DLLs match your search.',
+                                          style: TextStyle(
+                                            color: onSurface.withValues(
+                                              alpha: 0.56,
+                                            ),
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      for (final candidate
+                                          in visibleCandidates) ...[
+                                        _installedDllChoiceTile(
+                                          context: dialogContext,
+                                          title: candidate.mod.name,
+                                          subtitle: candidate.dllPath,
+                                          selected:
+                                              candidate.dllPath.toLowerCase() ==
+                                              currentPath,
                                           onTap: () => Navigator.of(
                                             dialogContext,
                                           ).pop(candidate.dllPath),
-                                          child: Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 14,
-                                              vertical: 12,
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.extension_rounded,
-                                                  size: 20,
-                                                  color: secondary.withValues(
-                                                    alpha: 0.9,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 12),
-                                                Expanded(
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        candidate.mod.name,
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                        style: TextStyle(
-                                                          fontWeight:
-                                                              FontWeight.w700,
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.92,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 2),
-                                                      Text(
-                                                        _basename(
-                                                          candidate.dllPath,
-                                                        ),
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                        style: TextStyle(
-                                                          fontSize: 12,
-                                                          color: _onSurface(
-                                                            dialogContext,
-                                                            0.6,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                                if (candidate.dllPath
-                                                        .toLowerCase() ==
-                                                    currentPath)
-                                                  Icon(
-                                                    Icons.check_circle_rounded,
-                                                    size: 18,
-                                                    color: secondary,
-                                                  ),
-                                              ],
-                                            ),
+                                          onRemove: () => unawaited(
+                                            removeCandidate(candidate),
                                           ),
                                         ),
-                                      ),
-                                    ),
-                                ],
+                                        const SizedBox(height: 8),
+                                      ],
+                                  ],
+                                ),
                               ),
                             ),
+                          ],
+                          const SizedBox(height: 14),
+                          Row(
+                            children: [
+                              _dialogCancelButton(
+                                dialogContext,
+                                onPressed: () =>
+                                    Navigator.of(dialogContext).pop(),
+                              ),
+                              const Spacer(),
+                            ],
                           ),
                         ],
-                        const SizedBox(height: 14),
-                        Row(
-                          children: [
-                            _dialogCancelButton(
-                              dialogContext,
-                              onPressed: () =>
-                                  Navigator.of(dialogContext).pop(),
-                            ),
-                            const Spacer(),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -29773,6 +29801,76 @@ foreach ($app in $appPaths) {
       onChanged(selected);
       _toast('Set ${slot.label} to ${_basename(selected)}');
     }
+  }
+
+  Widget _installedDllChoiceTile({
+    required BuildContext context,
+    required String title,
+    required String subtitle,
+    required bool selected,
+    required VoidCallback onTap,
+    required VoidCallback onRemove,
+  }) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: selected
+                ? secondary.withValues(alpha: 0.16)
+                : onSurface.withValues(alpha: 0.055),
+            border: Border.all(
+              color: selected
+                  ? secondary.withValues(alpha: 0.72)
+                  : onSurface.withValues(alpha: 0.11),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: onSurface.withValues(alpha: 0.94),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: onSurface.withValues(alpha: 0.62),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                tooltip: 'Uninstall DLL',
+                onPressed: onRemove,
+                icon: const Icon(Icons.close_rounded, size: 18),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _dataPathPicker({

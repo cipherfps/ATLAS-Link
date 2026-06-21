@@ -1,4 +1,4 @@
-<!-- version: 1.4.3 -->
+<!-- version: 1.4.4 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,8 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added Mod Safe-Guards
-- More Mods in the Library
-- Downloaded "Mod" DLLs now appear in your Data Management
+- Fixed Downloaded DLL Appearance in Data Management
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
