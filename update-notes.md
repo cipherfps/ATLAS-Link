@@ -1,4 +1,4 @@
-<!-- version: 1.4.4 -->
+<!-- version: 1.4.5 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,6 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fixed Downloaded DLL Appearance in Data Management
+- Fixed mods showing incompatible builds as install targets (e.g. a 7.40 mod no longer offered 17.40)
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

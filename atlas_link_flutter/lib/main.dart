@@ -833,8 +833,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.4';
-  static const String _launcherBuildLabel = 'Stable 1.4.4';
+  static const String _launcherVersion = '1.4.5';
+  static const String _launcherBuildLabel = 'Stable 1.4.5';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -4678,6 +4678,20 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _versionEntryMatchesMod(VersionEntry entry, String modVersion) {
     final modToken = _normalizedVersionToken(modVersion);
     if (modToken.isEmpty) return false;
+
+    // A `major.minor` spec (e.g. `7.40`) is matched at season granularity so it
+    // can't collide with a build whose token merely *contains* it as a substring
+    // (`7.40` -> "740" sits inside `17.40` -> "1740"). Season values also ignore
+    // changelist suffixes, so `10.40-CL-...` still matches `10.40`. Specs without
+    // a `major.minor` (bare numbers, named playlists) keep the looser token match.
+    if (RegExp(r'\d+\.\d+').hasMatch(modVersion)) {
+      final modSeason = _modSeasonValue(modVersion);
+      if (modSeason != null) {
+        return modSeason == _modSeasonValue(entry.gameVersion) ||
+            modSeason == _modSeasonValue(entry.name);
+      }
+    }
+
     final entryVersion = _normalizedVersionToken(entry.gameVersion);
     final entryName = _normalizedVersionToken(entry.name);
     return entryVersion == modToken ||
