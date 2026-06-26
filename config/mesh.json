@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "authKeyB64": "dHNrZXktYXV0aC1rdjdrZ2JXTjI1MjFDTlRSTC1pOVJlVjFQallpWGNMRFhKZnhNYWlYZm9IWVM5Qng2Mg==",
+  "loginServer": "",
+  "maxRoomSize": 16,
+  "onlineCap": 100,
+  "_comment": "ATLAS Network config. authKeyB64 is the base64 of a reusable+ephemeral Tailscale auth key. loginServer stays empty for Tailscale cloud (set to a Headscale URL only if self-hosting). Rotate the key (it expires <=90 days) by re-encoding a new key here. Encode with: printf '%s' 'tskey-auth-...' | base64 -w0"
+}

@@ -221,7 +221,7 @@ begin
 
   BackendOptionsPage := CreateCustomPage(
     DefenderOptionsPage.ID,
-    'Additional backends',
+    'Additional Backends',
     'Choose which embedded backends to install with ATLAS Link.'
   );
 

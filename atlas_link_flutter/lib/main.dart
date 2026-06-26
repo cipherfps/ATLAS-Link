@@ -25,6 +25,8 @@ import 'package:win32/win32.dart';
 import 'build_import.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
+import 'mesh_controller.dart';
+import 'tailscale_mesh.dart';
 
 String _joinAtlasBackendInstallPath(List<String> pieces) {
   return pieces.join(Platform.pathSeparator);
@@ -995,6 +997,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   final _statsSearchController = TextEditingController();
   final _savedBackendSearchController = TextEditingController();
   final _modsSearchController = TextEditingController();
+  final _meshSearchController = TextEditingController();
+  late final MeshController _mesh;
   final ScrollController _libraryScrollController = ScrollController();
   final ScrollController _modsScrollController = ScrollController();
   final _unrealEnginePatcherController = TextEditingController();
@@ -1201,6 +1205,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _mesh = MeshController(logger: (message) => _log('tailscale', message));
     _appExitListener = AppLifecycleListener(
       onExitRequested: _handleAppExitRequest,
     );
@@ -1277,6 +1282,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     _statsSearchController.dispose();
     _savedBackendSearchController.dispose();
     _modsSearchController.dispose();
+    _meshSearchController.dispose();
+    _mesh.dispose();
     _libraryScrollController.dispose();
     _modsScrollController.dispose();
     _unrealEnginePatcherController.dispose();
@@ -13914,6 +13921,898 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return _normalizedInjectorDllLibrary(dlls);
   }
 
+  Future<void> _showNetworkDialog() async {
+    if (!mounted) return;
+    // Refresh remote config (enabled flag, key, caps) each time the menu opens,
+    // and poll live while it's visible if we're already connected.
+    unawaited(_mesh.loadConfig());
+    if (_mesh.connected) _mesh.startPolling();
+    _meshSearchController.clear();
+    final createRoomController = TextEditingController();
+    var meshSearch = '';
+    var busy = false;
+
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.black.withValues(alpha: 0.35),
+        transitionDuration: const Duration(milliseconds: 200),
+        transitionBuilder: (context, animation, secondaryAnimation, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          return FadeTransition(
+            opacity: curved,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
+              alignment: Alignment.center,
+              child: child,
+            ),
+          );
+        },
+        pageBuilder: (dialogContext, animation, secondaryAnimation) {
+          return SafeArea(
+            child: Center(
+              child: Material(
+                type: MaterialType.transparency,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: StatefulBuilder(
+                    builder: (dialogContext, setDialogState) {
+                      return ListenableBuilder(
+                        listenable: _mesh,
+                        builder: (context, _) {
+                          final onSurface = Theme.of(
+                            dialogContext,
+                          ).colorScheme.onSurface;
+                          final secondary = Theme.of(
+                            dialogContext,
+                          ).colorScheme.secondary;
+
+                          Future<void> runAction(
+                            Future<void> Function() action,
+                          ) async {
+                            if (busy) return;
+                            setDialogState(() => busy = true);
+                            try {
+                              await action();
+                            } finally {
+                              if (dialogContext.mounted) {
+                                setDialogState(() => busy = false);
+                              }
+                            }
+                          }
+
+                          Future<void> copyIp(String ip) async {
+                            await Clipboard.setData(ClipboardData(text: ip));
+                            _toast('Copied $ip');
+                          }
+
+                          Widget body;
+                          if (!_mesh.tailscaleInstalled) {
+                            body = _meshInstallBody(onSurface);
+                          } else if (_mesh.loadingConfig &&
+                              !_mesh.connected &&
+                              !_mesh.isUsable) {
+                            body = _meshLoadingBody(onSurface);
+                          } else if (!_mesh.connected && !_mesh.isUsable) {
+                            body = _meshUnavailableBody(
+                              onSurface,
+                              busy,
+                              () => runAction(_mesh.loadConfig),
+                            );
+                          } else if (!_mesh.connected) {
+                            body = _meshConnectBody(
+                              onSurface,
+                              secondary,
+                              busy || _mesh.connecting,
+                              () => runAction(() async {
+                                final ok = await _mesh.connect(
+                                  username: _settings.username,
+                                );
+                                if (ok) _mesh.startPolling();
+                              }),
+                            );
+                          } else {
+                            body = _meshConnectedBody(
+                              dialogContext,
+                              onSurface,
+                              secondary,
+                              search: meshSearch,
+                              busy: busy,
+                              onSearch: (value) =>
+                                  setDialogState(() => meshSearch = value),
+                              createRoomController: createRoomController,
+                              onCreateRoom: (name) => runAction(() async {
+                                if (name.trim().isEmpty) return;
+                                await _mesh.joinRoom(name);
+                                createRoomController.clear();
+                              }),
+                              onJoinRoom: (room) =>
+                                  runAction(() => _mesh.joinRoom(room)),
+                              onCopyIp: copyIp,
+                              onDisconnect: () => runAction(_mesh.disconnect),
+                            );
+                          }
+
+                          return Container(
+                            width: 480,
+                            height: 480,
+                            margin: const EdgeInsets.symmetric(horizontal: 20),
+                            padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                            decoration: BoxDecoration(
+                              color: _dialogSurfaceColor(dialogContext),
+                              borderRadius: BorderRadius.circular(22),
+                              border: Border.all(
+                                color: _onSurface(dialogContext, 0.12),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _dialogShadowColor(dialogContext),
+                                  blurRadius: 34,
+                                  offset: const Offset(0, 18),
+                                ),
+                              ],
+                            ),
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: _mesh.connected
+                                      ? Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 52,
+                                          ),
+                                          child: body,
+                                        )
+                                      : body,
+                                ),
+                                Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.groups_rounded,
+                                        color: secondary,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          'Network',
+                                          style: Theme.of(dialogContext)
+                                              .textTheme
+                                              .headlineSmall
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                        ),
+                                      ),
+                                      if (_mesh.connected) ...[
+                                        _meshOnlineChip(onSurface),
+                                        const SizedBox(width: 8),
+                                      ],
+                                      IconButton(
+                                        tooltip: 'Close',
+                                        onPressed: () =>
+                                            Navigator.of(dialogContext).pop(),
+                                        icon: const Icon(Icons.close_rounded),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      _mesh.stopPolling();
+      createRoomController.dispose();
+    }
+  }
+
+  Widget _meshOnlineChip(Color onSurface) {
+    final near = _mesh.nearOnlineCap;
+    final dotColor = near ? const Color(0xFFF59E0B) : const Color(0xFF16C47F);
+    return Tooltip(
+      message: near
+          ? 'Network is nearly full (${_mesh.onlineCount}/${_mesh.onlineCap})'
+          : '${_mesh.onlineCount} online',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: onSurface.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: dotColor.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: dotColor,
+                boxShadow: [
+                  BoxShadow(
+                    color: dotColor.withValues(alpha: 0.6),
+                    blurRadius: 6,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '${_mesh.onlineCount} online',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: onSurface.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _meshCenteredBody({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String message,
+    required Color onSurface,
+    List<Widget> actions = const <Widget>[],
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 24, 8, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 76,
+            height: 76,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: iconColor.withValues(alpha: 0.12),
+              border: Border.all(color: iconColor.withValues(alpha: 0.28)),
+            ),
+            child: Icon(icon, size: 34, color: iconColor),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+              color: onSurface.withValues(alpha: 0.95),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: onSurface.withValues(alpha: 0.66),
+              ),
+            ),
+          ),
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 10,
+              runSpacing: 10,
+              children: actions,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _meshInstallBody(Color onSurface) {
+    return _meshCenteredBody(
+      icon: Icons.download_rounded,
+      iconColor: Theme.of(context).colorScheme.secondary,
+      title: 'Tailscale isn\'t installed',
+      message:
+          'The ATLAS Network uses Tailscale to connect you to friends. Install '
+          'the free Tailscale client, then re-check.',
+      onSurface: onSurface,
+      actions: [
+        FilledButton.icon(
+          onPressed: () =>
+              unawaited(_openUrl('https://tailscale.com/download/windows')),
+          icon: const Icon(Icons.open_in_new_rounded, size: 18),
+          label: const Text('Download Tailscale'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _mesh.recheckTailscale,
+          icon: const Icon(Icons.refresh_rounded, size: 18),
+          label: const Text('I\'ve installed it'),
+        ),
+      ],
+    );
+  }
+
+  Widget _meshLoadingBody(Color onSurface) {
+    final secondary = Theme.of(context).colorScheme.secondary;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 24, 8, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 76,
+            height: 76,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: secondary.withValues(alpha: 0.12),
+              border: Border.all(color: secondary.withValues(alpha: 0.28)),
+            ),
+            child: Center(
+              child: SizedBox(
+                width: 30,
+                height: 30,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.6,
+                  valueColor: AlwaysStoppedAnimation<Color>(secondary),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Loading network…',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+              color: onSurface.withValues(alpha: 0.95),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Text(
+              'Checking the ATLAS network…',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: onSurface.withValues(alpha: 0.66),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _meshUnavailableBody(
+    Color onSurface,
+    bool busy,
+    VoidCallback onRetry,
+  ) {
+    return _meshCenteredBody(
+      icon: Icons.cloud_off_rounded,
+      iconColor: onSurface.withValues(alpha: 0.55),
+      title: 'ATLAS Network is unavailable',
+      message: _mesh.errorKind == MeshErrorKind.expiredKey
+          ? _mesh.errorMessage
+          : 'The network is turned off or still being set up. Check back soon.',
+      onSurface: onSurface,
+      actions: [
+        OutlinedButton.icon(
+          onPressed: busy ? null : onRetry,
+          icon: const Icon(Icons.refresh_rounded, size: 18),
+          label: const Text('Retry'),
+        ),
+      ],
+    );
+  }
+
+  Widget _meshConnectBody(
+    Color onSurface,
+    Color secondary,
+    bool busy,
+    VoidCallback onConnect,
+  ) {
+    final error = _mesh.errorKind;
+    final isFull = error == MeshErrorKind.capacity;
+    final accent = isFull ? const Color(0xFFF59E0B) : secondary;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 22, 8, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 76,
+            height: 76,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: accent.withValues(alpha: 0.12),
+              border: Border.all(color: accent.withValues(alpha: 0.28)),
+            ),
+            child: Icon(
+              isFull ? Icons.error_outline_rounded : Icons.hub_rounded,
+              size: 34,
+              color: accent,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            isFull ? 'Network is full' : 'Join the ATLAS Network',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+              color: onSurface.withValues(alpha: 0.95),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 330),
+            child: Text(
+              error != null
+                  ? _mesh.errorMessage
+                  : 'Connect to see who\'s online and host or join games '
+                        'directly by their Tailscale IP.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: onSurface.withValues(alpha: 0.66),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            onPressed: busy ? null : onConnect,
+            style: FilledButton.styleFrom(
+              backgroundColor: secondary.withValues(alpha: 0.9),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              shape: const StadiumBorder(),
+            ),
+            icon: busy
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  )
+                : const Icon(Icons.power_settings_new_rounded, size: 18),
+            label: Text(
+              busy
+                  ? 'Connecting…'
+                  : error != null
+                  ? 'Try Again'
+                  : 'Connect',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _meshConnectedBody(
+    BuildContext dialogContext,
+    Color onSurface,
+    Color secondary, {
+    required String search,
+    required bool busy,
+    required ValueChanged<String> onSearch,
+    required TextEditingController createRoomController,
+    required ValueChanged<String> onCreateRoom,
+    required ValueChanged<String> onJoinRoom,
+    required Future<void> Function(String) onCopyIp,
+    required VoidCallback onDisconnect,
+  }) {
+    final query = search.trim().toLowerCase();
+    final sections = <Widget>[];
+    for (final room in _mesh.rooms) {
+      final members = _mesh.membersOf(room);
+      final visible = query.isEmpty
+          ? members
+          : members
+                .where(
+                  (p) =>
+                      p.name.toLowerCase().contains(query) ||
+                      p.tailscaleIp.toLowerCase().contains(query) ||
+                      room.toLowerCase().contains(query),
+                )
+                .toList();
+      if (query.isNotEmpty && visible.isEmpty) continue;
+      if (sections.isNotEmpty) sections.add(const SizedBox(height: 14));
+      sections.add(
+        _meshRoomHeader(onSurface, secondary, room, busy, onJoinRoom),
+      );
+      sections.add(const SizedBox(height: 8));
+      for (var i = 0; i < visible.length; i++) {
+        if (i > 0) sections.add(const SizedBox(height: 8));
+        sections.add(_meshPeerRow(onSurface, visible[i], busy, onCopyIp));
+      }
+    }
+    if (sections.isEmpty) {
+      sections.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 26),
+          child: Center(
+            child: Text(
+              query.isEmpty
+                  ? 'No one else here yet — share a room name with friends.'
+                  : 'No players match "$search".',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: onSurface.withValues(alpha: 0.6)),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final selfName = _mesh.self?.name ?? slugify(_settings.username);
+    final selfIp = _mesh.selfIp ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Self summary + disconnect.
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            color: secondary.withValues(alpha: 0.10),
+            border: Border.all(color: secondary.withValues(alpha: 0.28)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'You · $selfName',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: onSurface.withValues(alpha: 0.95),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      selfIp.isEmpty
+                          ? 'room: ${_prettyRoom(_mesh.currentRoom)}'
+                          : '$selfIp · room: ${_prettyRoom(_mesh.currentRoom)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: onSurface.withValues(alpha: 0.62),
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (selfIp.isNotEmpty)
+                _versionCardAction(
+                  icon: Icons.copy_rounded,
+                  tooltip: 'Copy your IP',
+                  onTap: busy ? null : () => unawaited(onCopyIp(selfIp)),
+                ),
+              const SizedBox(width: 6),
+              TextButton.icon(
+                onPressed: busy ? null : onDisconnect,
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFDC3545),
+                ),
+                icon: const Icon(Icons.logout_rounded, size: 16),
+                label: const Text('Disconnect'),
+              ),
+            ],
+          ),
+        ),
+        if (_mesh.nearOnlineCap) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+              border: Border.all(
+                color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.warning_amber_rounded,
+                  size: 16,
+                  color: Color(0xFFF59E0B),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Network is nearly full (${_mesh.onlineCount}/${_mesh.onlineCap}).',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: onSurface.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
+        // Search.
+        TextField(
+          controller: _meshSearchController,
+          onChanged: onSearch,
+          decoration: _backendFieldDecoration(hintText: 'Search players')
+              .copyWith(
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  size: 18,
+                  color: onSurface.withValues(alpha: 0.7),
+                ),
+                suffixIcon: search.trim().isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                        onPressed: () {
+                          _meshSearchController.clear();
+                          onSearch('');
+                        },
+                      ),
+              ),
+        ),
+        const SizedBox(height: 10),
+        // Create / join a room.
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: createRoomController,
+                textInputAction: TextInputAction.go,
+                onSubmitted: busy ? null : onCreateRoom,
+                decoration:
+                    _backendFieldDecoration(
+                      hintText: 'Create or join a room…',
+                    ).copyWith(
+                      prefixIcon: Icon(
+                        Icons.add_circle_outline_rounded,
+                        size: 18,
+                        color: onSurface.withValues(alpha: 0.7),
+                      ),
+                    ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: busy
+                  ? null
+                  : () => onCreateRoom(createRoomController.text),
+              style: FilledButton.styleFrom(
+                backgroundColor: secondary.withValues(alpha: 0.85),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+              ),
+              child: const Text('Go'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Expanded(
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(
+              dialogContext,
+            ).copyWith(scrollbars: false),
+            child: ListView(primary: false, children: sections),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _meshRoomHeader(
+    Color onSurface,
+    Color secondary,
+    String room,
+    bool busy,
+    ValueChanged<String> onJoinRoom,
+  ) {
+    final isCurrent = room == _mesh.currentRoom;
+    final online = _mesh.onlineMembersOf(room);
+    final full = _mesh.roomIsFull(room);
+    Widget trailing;
+    if (isCurrent) {
+      trailing = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: secondary.withValues(alpha: 0.18),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: secondary.withValues(alpha: 0.5)),
+        ),
+        child: Text(
+          'Current',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            color: onSurface.withValues(alpha: 0.9),
+          ),
+        ),
+      );
+    } else if (full) {
+      trailing = Text(
+        'Full (${_mesh.onlineMembersOf(room)}/${_mesh.maxRoomSize})',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: const Color(0xFFDC3545).withValues(alpha: 0.85),
+        ),
+      );
+    } else {
+      trailing = TextButton(
+        onPressed: busy ? null : () => onJoinRoom(room),
+        style: TextButton.styleFrom(
+          foregroundColor: secondary,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          minimumSize: const Size(0, 32),
+        ),
+        child: const Text('Join'),
+      );
+    }
+    return Row(
+      children: [
+        Icon(
+          Icons.meeting_room_rounded,
+          size: 16,
+          color: onSurface.withValues(alpha: 0.7),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            _prettyRoom(room),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 13.5,
+              color: onSurface.withValues(alpha: 0.92),
+            ),
+          ),
+        ),
+        Text(
+          '$online online',
+          style: TextStyle(
+            fontSize: 11.5,
+            color: onSurface.withValues(alpha: 0.55),
+          ),
+        ),
+        const SizedBox(width: 8),
+        trailing,
+      ],
+    );
+  }
+
+  Widget _meshPeerRow(
+    Color onSurface,
+    MeshPeer peer,
+    bool busy,
+    Future<void> Function(String) onCopyIp,
+  ) {
+    final statusColor = peer.online
+        ? const Color(0xFF16C47F)
+        : const Color(0xFFDC3545);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: onSurface.withValues(alpha: 0.04),
+        border: Border.all(color: onSurface.withValues(alpha: 0.10)),
+      ),
+      child: Row(
+        children: [
+          Tooltip(
+            message: peer.online ? 'Online' : 'Offline',
+            child: Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: statusColor,
+                boxShadow: peer.online
+                    ? [
+                        BoxShadow(
+                          color: statusColor.withValues(alpha: 0.6),
+                          blurRadius: 7,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  peer.isSelf ? '${peer.name} (You)' : peer.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: onSurface.withValues(alpha: 0.92),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  peer.tailscaleIp.isEmpty ? '—' : peer.tailscaleIp,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: onSurface.withValues(alpha: 0.58),
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (peer.tailscaleIp.isNotEmpty)
+            _versionCardAction(
+              icon: Icons.copy_rounded,
+              tooltip: 'Copy IP',
+              onTap: busy ? null : () => unawaited(onCopyIp(peer.tailscaleIp)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _prettyRoom(String slug) {
+    if (slug.isEmpty) return 'lobby';
+    return slug
+        .split('-')
+        .where((w) => w.isNotEmpty)
+        .map((w) => w[0].toUpperCase() + w.substring(1))
+        .join(' ');
+  }
+
   Future<void> _showInjectorDialog() async {
     if (!mounted) return;
     await _loadInjectorDllLibrary();
@@ -21650,6 +22549,25 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   ),
                                   child: const Icon(
                                     Icons.science_rounded,
+                                    size: 18,
+                                  ),
+                                ),
+                              ),
+                              Tooltip(
+                                message: 'Network',
+                                child: OutlinedButton(
+                                  onPressed: () =>
+                                      unawaited(_showNetworkDialog()),
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(42, 42),
+                                    maximumSize: const Size(42, 42),
+                                    padding: EdgeInsets.zero,
+                                    shape: const CircleBorder(),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: const Icon(
+                                    Icons.groups_rounded,
                                     size: 18,
                                   ),
                                 ),
