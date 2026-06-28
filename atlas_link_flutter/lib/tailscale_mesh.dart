@@ -20,13 +20,22 @@ class MeshConfig {
     required this.enabled,
     required this.maxRoomSize,
     required this.onlineCap,
+    this.gateUrl = '',
   });
 
   /// Decoded `tskey-auth-...` value (empty when not configured yet).
+  ///
+  /// Legacy: a single shared reusable key. The Discord-gated build leaves this
+  /// empty and obtains a per-user single-use key from [gateUrl] instead.
   final String authKey;
 
   /// Empty for Tailscale cloud; a `https://...` URL when self-hosting Headscale.
   final String loginServer;
+
+  /// Base URL of the ATLAS Network Gate (the Cloudflare Worker). When set, the
+  /// launcher shows "Connect with Discord" and joins with a key minted there,
+  /// rather than the shared [authKey]. Empty disables the Discord flow.
+  final String gateUrl;
 
   /// Remote kill switch for the whole feature.
   final bool enabled;
@@ -43,9 +52,14 @@ class MeshConfig {
     enabled: false,
     maxRoomSize: 16,
     onlineCap: 100,
+    gateUrl: '',
   );
 
+  /// True when the legacy shared-key path can connect.
   bool get isUsable => enabled && authKey.isNotEmpty;
+
+  /// True when the Discord login gate is configured and should be offered.
+  bool get gateEnabled => enabled && gateUrl.isNotEmpty;
 
   factory MeshConfig.fromJson(Map<String, dynamic> json) {
     final encoded = (json['authKeyB64'] as String?)?.trim() ?? '';
@@ -63,9 +77,14 @@ class MeshConfig {
       enabled: json['enabled'] as bool? ?? false,
       maxRoomSize: _asPositiveInt(json['maxRoomSize'], 16),
       onlineCap: _asPositiveInt(json['onlineCap'], 100),
+      gateUrl: _trimTrailingSlash((json['gateUrl'] as String?)?.trim() ?? ''),
     );
   }
 }
+
+/// Drop a single trailing slash so `gateUrl` joins cleanly with `/login`.
+String _trimTrailingSlash(String value) =>
+    value.endsWith('/') ? value.substring(0, value.length - 1) : value;
 
 int _asPositiveInt(Object? value, int fallback) {
   if (value is num && value > 0) return value.toInt();

@@ -1,0 +1,14 @@
+{
+  "name": "atlas-network-gate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless Discord-login gate that mints one-time Tailscale keys for the ATLAS Network.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.105.0"
+  }
+}

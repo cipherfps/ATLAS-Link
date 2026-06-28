@@ -94,6 +94,35 @@ void main() {
       expect(config.authKey, '');
       expect(config.isUsable, isFalse);
     });
+
+    test('gateEnabled requires enabled + a gateUrl', () {
+      // The clean-cut shape: no shared key, gate drives connection.
+      final gated = MeshConfig.fromJson({
+        'enabled': true,
+        'authKeyB64': '',
+        'gateUrl': 'https://gate.example.workers.dev',
+      });
+      expect(gated.isUsable, isFalse); // no legacy shared key
+      expect(gated.gateEnabled, isTrue);
+
+      expect(
+        MeshConfig.fromJson({'enabled': false, 'gateUrl': 'https://x'})
+            .gateEnabled,
+        isFalse,
+      );
+      expect(
+        MeshConfig.fromJson({'enabled': true, 'gateUrl': ''}).gateEnabled,
+        isFalse,
+      );
+    });
+
+    test('gateUrl drops a single trailing slash', () {
+      final config = MeshConfig.fromJson({
+        'enabled': true,
+        'gateUrl': 'https://gate.example.workers.dev/',
+      });
+      expect(config.gateUrl, 'https://gate.example.workers.dev');
+    });
   });
 
   group('classifyTailscaleError', () {

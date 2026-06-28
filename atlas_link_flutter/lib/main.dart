@@ -23,6 +23,7 @@ import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
 import 'build_import.dart';
+import 'discord_gate.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 import 'mesh_controller.dart';
@@ -14033,14 +14034,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             _toast('Copied $ip');
                           }
 
+                          // When the Discord gate is configured the launcher
+                          // joins with a per-user minted key; otherwise it falls
+                          // back to the legacy shared key (`isUsable`).
+                          final canConnect =
+                              _mesh.isUsable || _mesh.gateEnabled;
                           Widget body;
                           if (!_mesh.tailscaleInstalled) {
                             body = _meshInstallBody(onSurface);
                           } else if (_mesh.loadingConfig &&
                               !_mesh.connected &&
-                              !_mesh.isUsable) {
+                              !canConnect) {
                             body = _meshLoadingBody(onSurface);
-                          } else if (!_mesh.connected && !_mesh.isUsable) {
+                          } else if (!_mesh.connected && !canConnect) {
                             body = _meshUnavailableBody(
                               onSurface,
                               busy,
@@ -14052,11 +14058,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               secondary,
                               busy || _mesh.connecting,
                               () => runAction(() async {
-                                final ok = await _mesh.connect(
-                                  username: _settings.username,
-                                );
+                                final ok = _mesh.gateEnabled
+                                    ? await _meshDiscordLogin()
+                                    : await _mesh.connect(
+                                        username: _settings.username,
+                                      );
                                 if (ok) _mesh.startPolling();
                               }),
+                              discord: _mesh.gateEnabled,
                             );
                           } else {
                             body = _meshConnectedBody(
@@ -14371,15 +14380,96 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  /// Run the "Connect with Discord" flow: open the browser at the ATLAS gate,
+  /// wait for the per-user key it mints, then join the mesh with it. Returns
+  /// true once connected. Failures surface as a toast.
+  Future<bool> _meshDiscordLogin() async {
+    final result = await DiscordGate(
+      logger: (m) => debugPrint('[discord-gate] $m'),
+    ).login(
+      gateUrl: _mesh.gateUrl,
+      openUrl: (uri) => _openUrl(uri.toString()),
+    );
+    if (!result.ok) {
+      _toast(_meshGateErrorMessage(result.error));
+      return false;
+    }
+    return _mesh.connectWithAuthKey(
+      result.authKey!,
+      username: _settings.username,
+    );
+  }
+
+  String _meshGateErrorMessage(String? reason) {
+    switch (reason) {
+      case 'not_member':
+        return 'Join the ATLAS Discord first, then try again.';
+      case 'missing_role':
+        return "You don't have the required Discord role yet.";
+      case 'account_too_new':
+        return 'Your Discord account is too new to join the network.';
+      case 'rate_limited':
+        return 'You connected recently — please try again later.';
+      case 'discord_denied':
+        return 'Discord login was cancelled.';
+      case 'timeout':
+        return 'Login timed out. Please try again.';
+      case 'browser':
+        return "Couldn't open your browser for Discord login.";
+      default:
+        return "Couldn't connect to the ATLAS Network. Please try again.";
+    }
+  }
+
+  /// Explains why Discord sign-in gates the network (anti-bot + privacy),
+  /// shown above the "Continue with Discord" button.
+  Widget _meshWhyDiscord(Color onSurface, Color discordColor) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: discordColor.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: discordColor.withValues(alpha: 0.22)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.verified_user_rounded, size: 18, color: discordColor),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'The network was getting flooded by fake accounts. Signing in '
+                "with Discord proves you're a real ATLAS member, so only actual "
+                'players get on — no bots. We only check that you’re in the '
+                'ATLAS Discord; we never see your password.',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.4,
+                  color: onSurface.withValues(alpha: 0.72),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _meshConnectBody(
     Color onSurface,
     Color secondary,
     bool busy,
-    VoidCallback onConnect,
-  ) {
+    VoidCallback onConnect, {
+    bool discord = false,
+  }) {
     final error = _mesh.errorKind;
     final isFull = error == MeshErrorKind.capacity;
-    final accent = isFull ? const Color(0xFFF59E0B) : secondary;
+    const discordColor = Color(0xFF5865F2);
+    final accent = isFull
+        ? const Color(0xFFF59E0B)
+        : (discord ? discordColor : secondary);
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 22, 8, 12),
       child: Column(
@@ -14395,8 +14485,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               border: Border.all(color: accent.withValues(alpha: 0.28)),
             ),
             child: Icon(
-              isFull ? Icons.error_outline_rounded : Icons.hub_rounded,
-              size: 34,
+              isFull
+                  ? Icons.error_outline_rounded
+                  : (discord ? FontAwesomeIcons.discord : Icons.hub_rounded),
+              size: discord && !isFull ? 30 : 34,
               color: accent,
             ),
           ),
@@ -14416,6 +14508,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             child: Text(
               error != null
                   ? _mesh.errorMessage
+                  : discord
+                  ? 'Sign in with Discord to join the ATLAS Network.'
                   : 'Connect to see who\'s online and host or join games ',
               textAlign: TextAlign.center,
               style: TextStyle(
@@ -14425,11 +14519,16 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
             ),
           ),
+          if (discord && error == null && !isFull) ...[
+            const SizedBox(height: 14),
+            _meshWhyDiscord(onSurface, discordColor),
+          ],
           const SizedBox(height: 20),
           FilledButton.icon(
             onPressed: busy ? null : onConnect,
             style: FilledButton.styleFrom(
-              backgroundColor: secondary.withValues(alpha: 0.9),
+              backgroundColor: (discord && !isFull ? discordColor : secondary)
+                  .withValues(alpha: 0.9),
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
               shape: const StadiumBorder(),
@@ -14443,15 +14542,38 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                     ),
                   )
-                : const Icon(Icons.power_settings_new_rounded, size: 18),
+                : Icon(
+                    discord && !isFull
+                        ? FontAwesomeIcons.discord
+                        : Icons.power_settings_new_rounded,
+                    size: 18,
+                  ),
             label: Text(
               busy
                   ? 'Connecting…'
                   : error != null
                   ? 'Try Again'
+                  : discord
+                  ? 'Continue with Discord'
                   : 'Connect',
             ),
           ),
+          if (discord && !isFull) ...[
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 300),
+              child: Text(
+                "You'll be sent to Discord to approve, then brought right back. "
+                'You only connect if you want to.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  height: 1.35,
+                  color: onSurface.withValues(alpha: 0.5),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

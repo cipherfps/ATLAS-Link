@@ -55,6 +55,10 @@ class MeshController extends ChangeNotifier {
   String get selfDisplayName => slugify(_username);
   bool get connected => _connected;
   bool get isUsable => _config.isUsable;
+
+  /// Whether the Discord login gate is configured (offer "Connect with Discord").
+  bool get gateEnabled => _config.gateEnabled;
+  String get gateUrl => _config.gateUrl;
   bool get tailscaleInstalled => _resolveExe() != null;
   MeshErrorKind? get errorKind => _errorKind;
   String get errorMessage => _errorMessage;
@@ -108,8 +112,29 @@ class MeshController extends ChangeNotifier {
     }
   }
 
-  /// Join the ATLAS lobby (`tailscale up`) under [username].
-  Future<bool> connect({required String username}) async {
+  /// Join the ATLAS lobby with the legacy shared key from `mesh.json`.
+  Future<bool> connect({required String username}) {
+    if (!_config.isUsable) {
+      _failConnect(MeshErrorKind.generic, 'ATLAS Network is unavailable right now.');
+      return Future.value(false);
+    }
+    return _connectWithKey(authKey: _config.authKey, username: username);
+  }
+
+  /// Join the ATLAS lobby with a per-user key minted by the Discord gate.
+  Future<bool> connectWithAuthKey(String authKey, {required String username}) {
+    if (authKey.trim().isEmpty) {
+      _failConnect(MeshErrorKind.generic, "Couldn't get a network key. Try again.");
+      return Future.value(false);
+    }
+    return _connectWithKey(authKey: authKey.trim(), username: username);
+  }
+
+  /// Shared `tailscale up` + verification path for both connect entry points.
+  Future<bool> _connectWithKey({
+    required String authKey,
+    required String username,
+  }) async {
     if (_connecting) return false;
     _username = username.trim().isEmpty ? kDefaultUser : username.trim();
     _connecting = true;
@@ -121,17 +146,11 @@ class MeshController extends ChangeNotifier {
     if (exe == null) {
       return _failConnect(MeshErrorKind.generic, 'Tailscale is not installed.');
     }
-    if (!_config.isUsable) {
-      return _failConnect(
-        MeshErrorKind.generic,
-        'ATLAS Network is unavailable right now.',
-      );
-    }
 
     final hostname = buildAtlasHostname(_username);
     final result = await _run(
       tailscaleUpArgs(
-        authKey: _config.authKey,
+        authKey: authKey,
         hostname: hostname,
         loginServer: _config.loginServer,
       ),

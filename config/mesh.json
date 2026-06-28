@@ -1,8 +1,9 @@
 {
   "enabled": true,
-  "authKeyB64": "dHNrZXktYXV0aC1rdjdrZ2JXTjI1MjFDTlRSTC1pOVJlVjFQallpWGNMRFhKZnhNYWlYZm9IWVM5Qng2Mg==",
+  "authKeyB64": "",
+  "gateUrl": "https://atlas-network-gate.atlas-ogfortnite.workers.dev",
   "loginServer": "",
   "maxRoomSize": 16,
   "onlineCap": 100,
-  "_comment": "ATLAS Network config. authKeyB64 is the base64 of a reusable+ephemeral Tailscale auth key. loginServer stays empty for Tailscale cloud (set to a Headscale URL only if self-hosting). Rotate the key (it expires <=90 days) by re-encoding a new key here. Encode with: printf '%s' 'tskey-auth-...' | base64 -w0"
+  "_comment": "ATLAS Network config. gateUrl = the ATLAS Network Gate Worker URL (see network-gate/README.md); when set, launchers that support it show 'Connect with Discord' and join with a per-user single-use key instead of the shared authKeyB64. THE CLEAN CUT: after the Discord-gated launcher ships, set gateUrl to your Worker URL and blank authKeyB64 (\"\") so old launchers can no longer join (they show 'unavailable'), killing the shared-key botting path. authKeyB64 is the base64 of a Tailscale auth key (legacy shared path). loginServer stays empty for Tailscale cloud."
 }

@@ -1,0 +1,35 @@
+# Cloudflare Worker config for the ATLAS Network Gate.
+# Deploy with:  npx wrangler deploy   (or paste src/worker.js into the dashboard)
+
+name = "atlas-network-gate"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# Only expose the one production workers.dev URL (no per-version preview URLs).
+preview_urls = false
+workers_dev = true
+
+# Per-user rate-limit storage. Create the namespace once with:
+#   npx wrangler kv namespace create RATE_LIMIT
+# then paste the printed id below.
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "5e0e316bc26944c19f73352da65b827c"
+
+# Non-secret config (safe to commit). Secrets are set separately — see README.
+[vars]
+WORKER_PUBLIC_URL = "https://atlas-network-gate.atlas-ogfortnite.workers.dev"
+DISCORD_GUILD_ID = "1469866169635962884"
+DISCORD_REQUIRED_ROLE_ID = "1470097278785290240"  # must have this role to join
+DISCORD_MIN_ACCOUNT_AGE_DAYS = "7"   # reject Discord accounts newer than 7 days
+TAILSCALE_TAILNET = "-"              # "-" = the OAuth client's own tailnet
+TAILSCALE_TAG = "tag:atlas-mesh"
+KEY_EXPIRY_SECONDS = "300"           # minted key is unusable after 5 minutes
+RATE_LIMIT_SECONDS = "21600"         # one key per Discord user per 6 hours
+
+# Secrets (DO NOT put these here — set them with `wrangler secret put NAME`):
+#   DISCORD_CLIENT_ID
+#   DISCORD_CLIENT_SECRET
+#   TAILSCALE_OAUTH_CLIENT_ID
+#   TAILSCALE_OAUTH_CLIENT_SECRET
+#   STATE_SECRET
