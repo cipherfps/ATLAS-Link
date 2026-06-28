@@ -76,11 +76,10 @@ int _asPositiveInt(Object? value, int fallback) {
   return fallback;
 }
 
-/// A single device on the ATLAS tailnet, after decoding its room/user tag.
+/// A single device on the ATLAS tailnet, parsed from its hostname.
 class MeshPeer {
   const MeshPeer({
     required this.name,
-    required this.room,
     required this.tailscaleIp,
     required this.online,
     required this.isSelf,
@@ -89,9 +88,6 @@ class MeshPeer {
 
   /// User slug parsed from the hostname (display name for the row).
   final String name;
-
-  /// Room slug parsed from the hostname.
-  final String room;
 
   /// The `100.x` address other peers connect to.
   final String tailscaleIp;
@@ -107,39 +103,19 @@ class MeshStatus {
   final MeshPeer? self;
   final List<MeshPeer> others;
 
-  /// Everyone (self first), used for room grouping and counts.
+  /// Everyone (self first).
   List<MeshPeer> get all => <MeshPeer>[?self, ...others];
 
-  /// Distinct room slugs present on the network, sorted, self's room first.
-  List<String> get rooms {
-    final seen = <String>{};
-    final ordered = <String>[];
-    void add(String r) {
-      if (r.isEmpty || !seen.add(r)) return;
-      ordered.add(r);
-    }
-
-    if (self != null) add(self!.room);
-    final rest = others.map((p) => p.room).where((r) => r.isNotEmpty).toSet().toList()
-      ..sort();
-    for (final r in rest) {
-      add(r);
-    }
-    return ordered;
-  }
-
   int onlineCount() => all.where((p) => p.online).length;
-
-  List<MeshPeer> membersOf(String room) =>
-      all.where((p) => p.room == room).toList();
 }
 
 /// Hostname prefix that marks a device as belonging to ATLAS.
 const String kAtlasHostPrefix = 'atlas-';
 
-/// Separator between the room slug and the user slug inside the hostname.
+/// Separator between the lobby marker and the user slug inside the hostname.
 const String kAtlasRoomUserSep = '--';
 
+/// Constant lobby segment in the hostname — everyone shares one lobby.
 const String kDefaultRoom = 'lobby';
 const String kDefaultUser = 'player';
 
@@ -169,21 +145,18 @@ String slugify(String input, {int maxLen = 24}) {
   return slug;
 }
 
-/// Build the Tailscale device hostname that encodes the room + user.
-String buildAtlasHostname(String room, String user) {
-  final roomSlug = slugify(room);
+/// Build the Tailscale device hostname `atlas-lobby--<userSlug>`. Everyone
+/// shares one lobby, so the middle segment is constant.
+String buildAtlasHostname(String user) {
   final userSlug = slugify(user);
-  return '$kAtlasHostPrefix'
-      '${roomSlug.isEmpty ? kDefaultRoom : roomSlug}'
-      '$kAtlasRoomUserSep'
+  return '$kAtlasHostPrefix$kDefaultRoom$kAtlasRoomUserSep'
       '${userSlug.isEmpty ? kDefaultUser : userSlug}';
 }
 
-/// Decode an ATLAS hostname back into `(room, user)`, or null if it is not an
-/// ATLAS device. If two online devices share a name, Tailscale appends `-N`; we
-/// keep that suffix as-is so colliding users stay distinguishable (rather than
-/// silently truncating real names that end in a number).
-({String room, String user})? parseAtlasHostname(String? hostname) {
+/// Decode an ATLAS hostname back into the user slug, or null if it is not an
+/// ATLAS device. Tailscale's `-N` dedup suffix on the user is kept as-is so
+/// colliding users stay distinguishable.
+String? parseAtlasHostname(String? hostname) {
   if (hostname == null) return null;
   var host = hostname.trim().toLowerCase();
   if (host.endsWith('.')) host = host.substring(0, host.length - 1);
@@ -194,10 +167,9 @@ String buildAtlasHostname(String room, String user) {
   final body = host.substring(kAtlasHostPrefix.length);
   final parts = body.split(kAtlasRoomUserSep);
   if (parts.length != 2) return null;
-  final room = parts[0];
   final user = parts[1];
-  if (room.isEmpty || user.isEmpty) return null;
-  return (room: room, user: user);
+  if (user.isEmpty) return null;
+  return user;
 }
 
 /// Classification of a failed `tailscale up` so the UI can show friendly copy.
@@ -227,8 +199,10 @@ MeshErrorKind classifyTailscaleError(String stderr) {
 }
 
 /// Arguments for `tailscale up`. Ephemerality comes from the key itself, so no
-/// `--ephemeral` flag here. `--reset` keeps flags consistent across reconnects;
-/// `--accept-dns=false` avoids hijacking the user's DNS.
+/// `--ephemeral` flag here. `--unattended` keeps Tailscale connected without the
+/// tray/GUI app running (Windows) — without it, a closed GUI leaves the node not
+/// "Running" and connect fails verification. `--reset` keeps flags consistent
+/// across reconnects; `--accept-dns=false` avoids hijacking the user's DNS.
 List<String> tailscaleUpArgs({
   required String authKey,
   required String hostname,
@@ -238,6 +212,7 @@ List<String> tailscaleUpArgs({
     'up',
     '--auth-key=$authKey',
     '--hostname=$hostname',
+    '--unattended',
     '--accept-dns=false',
     '--reset',
     if (loginServer.trim().isNotEmpty) '--login-server=${loginServer.trim()}',
@@ -277,8 +252,7 @@ MeshStatus parseTailscaleStatusJson(String jsonStr) {
     );
     final online = isSelf ? true : (map['Online'] as bool? ?? false);
     return MeshPeer(
-      name: parsed.user,
-      room: parsed.room,
+      name: parsed,
       tailscaleIp: ipv4,
       online: online,
       isSelf: isSelf,

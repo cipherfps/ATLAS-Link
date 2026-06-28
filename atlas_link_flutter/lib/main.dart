@@ -745,7 +745,18 @@ enum _LauncherContentRefreshOutcome {
 
 enum _LibrarySortMode { highestFirst, lowestFirst, favoritesFirst }
 
+enum _LibraryQuickTipTarget {
+  importDownload,
+  launch,
+  host,
+  network,
+  injector,
+  launchOptions,
+}
+
 enum _StatsSortMode { highestTimeFirst, lowestTimeFirst, favoritesFirst }
+
+const int _libraryQuickTipCount = 7;
 
 class _UiStatus {
   const _UiStatus(this.message, this.severity);
@@ -835,8 +846,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.5';
-  static const String _launcherBuildLabel = 'Stable 1.4.5';
+  static const String _launcherVersion = '1.4.6';
+  static const String _launcherBuildLabel = 'Stable 1.4.6';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1248,7 +1259,18 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       return AppExitResponse.cancel;
     }
+    // Leave the Tailscale network on close so nobody lingers in a room while
+    // ATLAS is shut.
+    await _mesh.shutdown();
     return AppExitResponse.exit;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      // Hard backstop for closes that bypass the exit-request hook.
+      _mesh.downNowSync();
+    }
   }
 
   @override
@@ -8540,18 +8562,18 @@ class _LauncherScreenState extends State<LauncherScreen>
     switch (value.trim().toLowerCase()) {
       case 'home':
       case 'home_outlined':
-        return Icons.home_outlined;
+        return Icons.home_rounded;
       case 'folder':
       case 'folder_open_outlined':
       case 'library':
-        return Icons.folder_open_outlined;
+        return Icons.folder_rounded;
       case 'cloud':
       case 'cloud_outlined':
       case 'backend':
-        return Icons.cloud_outlined;
+        return Icons.cloud_rounded;
       case 'campaign':
       case 'campaign_outlined':
-        return Icons.campaign_outlined;
+        return Icons.campaign_rounded;
       case 'public':
       case 'public_rounded':
         return Icons.public_rounded;
@@ -8560,10 +8582,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         return Icons.bolt_rounded;
       case 'forum':
       case 'forum_outlined':
-        return Icons.forum_outlined;
+        return Icons.forum_rounded;
       case 'image':
       case 'image_outlined':
-        return Icons.image_outlined;
+        return Icons.image_rounded;
       case 'sports_esports':
       case 'sports_esports_rounded':
         return Icons.sports_esports_rounded;
@@ -8577,7 +8599,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       case 'web_rounded':
         return Icons.web_rounded;
       default:
-        return Icons.layers_outlined;
+        return Icons.layers_rounded;
     }
   }
 
@@ -12109,21 +12131,35 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              'Launch Options',
-                              style: TextStyle(
-                                color: _onSurface(dialogContext, 0.96),
-                                fontSize: 36,
-                                fontWeight: FontWeight.w800,
-                                height: 1.02,
-                              ),
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.rocket_launch_rounded,
+                                  color: secondary,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Launch Options',
+                                    style: Theme.of(dialogContext)
+                                        .textTheme
+                                        .headlineSmall
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close',
+                                  onPressed: () => dismissDialogSafely(false),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 10),
                             Text(
                               'Customize launch arguments for Play and Host, plus host behavior settings.',
                               style: TextStyle(
-                                color: _onSurface(dialogContext, 0.78),
-                                fontSize: 15,
+                                color: _onSurface(dialogContext, 0.74),
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
                             const SizedBox(height: 14),
@@ -13926,9 +13962,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     // Refresh remote config (enabled flag, key, caps) each time the menu opens,
     // and poll live while it's visible if we're already connected.
     unawaited(_mesh.loadConfig());
-    if (_mesh.connected) _mesh.startPolling();
+    if (_mesh.connected) {
+      _mesh.startPolling();
+      // Pick up an ATLAS profile name change made since last time and re-publish
+      // it (with the Connecting indicator) so it propagates to everyone.
+      unawaited(_mesh.syncIdentity(_settings.username));
+    }
     _meshSearchController.clear();
-    final createRoomController = TextEditingController();
     var meshSearch = '';
     var busy = false;
 
@@ -14022,23 +14062,62 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             body = _meshConnectedBody(
                               dialogContext,
                               onSurface,
-                              secondary,
                               search: meshSearch,
                               busy: busy,
                               onSearch: (value) =>
                                   setDialogState(() => meshSearch = value),
-                              createRoomController: createRoomController,
-                              onCreateRoom: (name) => runAction(() async {
-                                if (name.trim().isEmpty) return;
-                                await _mesh.joinRoom(name);
-                                createRoomController.clear();
-                              }),
-                              onJoinRoom: (room) =>
-                                  runAction(() => _mesh.joinRoom(room)),
                               onCopyIp: copyIp,
                               onDisconnect: () => runAction(_mesh.disconnect),
                             );
                           }
+
+                          final header = Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.people_alt_rounded,
+                                    color: secondary,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      'Network',
+                                      style: Theme.of(dialogContext)
+                                          .textTheme
+                                          .headlineSmall
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                    ),
+                                  ),
+                                  if (_mesh.connected) ...[
+                                    _meshOnlineChip(onSurface),
+                                    const SizedBox(width: 8),
+                                  ],
+                                  IconButton(
+                                    onPressed: () =>
+                                        Navigator.of(dialogContext).pop(),
+                                    icon: const Icon(Icons.close_rounded),
+                                  ),
+                                ],
+                              ),
+                              if (_mesh.connected) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  'A tunnel that connects you directly '
+                                  'with other players. It never exposes your real '
+                                  'IP address, instead everyone recieves a randomly '
+                                  'generated Tailscale IP address to share with others!',
+                                  style: TextStyle(
+                                    color: onSurface.withValues(alpha: 0.74),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          );
 
                           return Container(
                             width: 480,
@@ -14059,55 +14138,27 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 ),
                               ],
                             ),
-                            child: Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: _mesh.connected
-                                      ? Padding(
-                                          padding: const EdgeInsets.only(
-                                            top: 52,
-                                          ),
-                                          child: body,
-                                        )
-                                      : body,
-                                ),
-                                Positioned(
-                                  top: 0,
-                                  left: 0,
-                                  right: 0,
-                                  child: Row(
+                            child: _mesh.connected
+                                ? Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      Icon(
-                                        Icons.groups_rounded,
-                                        color: secondary,
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Text(
-                                          'Network',
-                                          style: Theme.of(dialogContext)
-                                              .textTheme
-                                              .headlineSmall
-                                              ?.copyWith(
-                                                fontWeight: FontWeight.w800,
-                                              ),
-                                        ),
-                                      ),
-                                      if (_mesh.connected) ...[
-                                        _meshOnlineChip(onSurface),
-                                        const SizedBox(width: 8),
-                                      ],
-                                      IconButton(
-                                        tooltip: 'Close',
-                                        onPressed: () =>
-                                            Navigator.of(dialogContext).pop(),
-                                        icon: const Icon(Icons.close_rounded),
+                                      header,
+                                      const SizedBox(height: 14),
+                                      Expanded(child: body),
+                                    ],
+                                  )
+                                : Stack(
+                                    children: [
+                                      Positioned.fill(child: body),
+                                      Positioned(
+                                        top: 0,
+                                        left: 0,
+                                        right: 0,
+                                        child: header,
                                       ),
                                     ],
                                   ),
-                                ),
-                              ],
-                            ),
                           );
                         },
                       );
@@ -14121,52 +14172,37 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       );
     } finally {
       _mesh.stopPolling();
-      createRoomController.dispose();
     }
   }
 
   Widget _meshOnlineChip(Color onSurface) {
     final near = _mesh.nearOnlineCap;
     final dotColor = near ? const Color(0xFFF59E0B) : const Color(0xFF16C47F);
-    return Tooltip(
-      message: near
-          ? 'Network is nearly full (${_mesh.onlineCount}/${_mesh.onlineCap})'
-          : '${_mesh.onlineCount} online',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: onSurface.withValues(alpha: 0.05),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: dotColor.withValues(alpha: 0.45)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: dotColor,
-                boxShadow: [
-                  BoxShadow(
-                    color: dotColor.withValues(alpha: 0.6),
-                    blurRadius: 6,
-                  ),
-                ],
-              ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: onSurface.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: dotColor.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            'Total Online: ${_mesh.onlineCount}',
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              color: onSurface.withValues(alpha: 0.85),
             ),
-            const SizedBox(width: 6),
-            Text(
-              '${_mesh.onlineCount} online',
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w700,
-                color: onSurface.withValues(alpha: 0.85),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -14380,8 +14416,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             child: Text(
               error != null
                   ? _mesh.errorMessage
-                  : 'Connect to see who\'s online and host or join games '
-                        'directly by their Tailscale IP.',
+                  : 'Connect to see who\'s online and host or join games ',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 13,
@@ -14422,52 +14457,47 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  /// Join a room from the directory by its raw room id. Public rooms join
+  /// directly; private rooms prompt for the password and verify it against the
+  /// room's broadcast hash before switching.
   Widget _meshConnectedBody(
     BuildContext dialogContext,
-    Color onSurface,
-    Color secondary, {
+    Color onSurface, {
     required String search,
     required bool busy,
     required ValueChanged<String> onSearch,
-    required TextEditingController createRoomController,
-    required ValueChanged<String> onCreateRoom,
-    required ValueChanged<String> onJoinRoom,
     required Future<void> Function(String) onCopyIp,
     required VoidCallback onDisconnect,
   }) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
     final query = search.trim().toLowerCase();
-    final sections = <Widget>[];
-    for (final room in _mesh.rooms) {
-      final members = _mesh.membersOf(room);
-      final visible = query.isEmpty
-          ? members
-          : members
-                .where(
-                  (p) =>
-                      p.name.toLowerCase().contains(query) ||
-                      p.tailscaleIp.toLowerCase().contains(query) ||
-                      room.toLowerCase().contains(query),
-                )
-                .toList();
-      if (query.isNotEmpty && visible.isEmpty) continue;
-      if (sections.isNotEmpty) sections.add(const SizedBox(height: 14));
-      sections.add(
-        _meshRoomHeader(onSurface, secondary, room, busy, onJoinRoom),
-      );
-      sections.add(const SizedBox(height: 8));
-      for (var i = 0; i < visible.length; i++) {
-        if (i > 0) sections.add(const SizedBox(height: 8));
-        sections.add(_meshPeerRow(onSurface, visible[i], busy, onCopyIp));
-      }
-    }
-    if (sections.isEmpty) {
-      sections.add(
+
+    // Everyone online, you first, filtered by the search. People who leave the
+    // network drop off the list rather than lingering.
+    final players =
+        _mesh.status.all
+            .where((p) => p.online)
+            .where(
+              (p) =>
+                  query.isEmpty ||
+                  p.name.toLowerCase().contains(query) ||
+                  p.tailscaleIp.toLowerCase().contains(query),
+            )
+            .toList()
+          ..sort((a, b) {
+            if (a.isSelf != b.isSelf) return a.isSelf ? -1 : 1;
+            return a.name.compareTo(b.name);
+          });
+
+    final rows = <Widget>[];
+    if (players.isEmpty) {
+      rows.add(
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 26),
           child: Center(
             child: Text(
               query.isEmpty
-                  ? 'No one else here yet — share a room name with friends.'
+                  ? 'No one else online yet — invite your friends.'
                   : 'No players match "$search".',
               textAlign: TextAlign.center,
               style: TextStyle(color: onSurface.withValues(alpha: 0.6)),
@@ -14475,256 +14505,180 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           ),
         ),
       );
+    } else {
+      for (var i = 0; i < players.length; i++) {
+        if (i > 0) rows.add(const SizedBox(height: 8));
+        rows.add(_meshPeerRow(onSurface, players[i], busy, onCopyIp));
+      }
     }
 
-    final selfName = _mesh.self?.name ?? slugify(_settings.username);
+    final selfName = _mesh.selfDisplayName;
     final selfIp = _mesh.selfIp ?? '';
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Self summary + disconnect.
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            color: secondary.withValues(alpha: 0.10),
-            border: Border.all(color: secondary.withValues(alpha: 0.28)),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'You · $selfName',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        color: onSurface.withValues(alpha: 0.95),
-                      ),
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(
+        dialogContext,
+      ).copyWith(scrollbars: false),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Self summary + disconnect.
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondary.withValues(alpha: 0.10),
+                border: Border.all(color: secondary.withValues(alpha: 0.28)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          selfName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            color: onSurface.withValues(alpha: 0.95),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        if (_mesh.joiningRoom)
+                          Row(
+                            children: [
+                              SizedBox(
+                                width: 12,
+                                height: 12,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    onSurface.withValues(alpha: 0.75),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  'Connecting…',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: onSurface.withValues(alpha: 0.75),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                        else
+                          Text(
+                            selfIp.isEmpty ? 'Connected' : selfIp,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: onSurface.withValues(alpha: 0.62),
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                      ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      selfIp.isEmpty
-                          ? 'room: ${_prettyRoom(_mesh.currentRoom)}'
-                          : '$selfIp · room: ${_prettyRoom(_mesh.currentRoom)}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: onSurface.withValues(alpha: 0.62),
-                        fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    onPressed: busy ? null : onDisconnect,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(
+                        0xFFDC3545,
+                      ).withValues(alpha: 0.16),
+                      foregroundColor: const Color(0xFFFF6B6B),
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      side: BorderSide(
+                        color: const Color(0xFFDC3545).withValues(alpha: 0.55),
+                      ),
+                      shape: const StadiumBorder(),
+                    ),
+                    icon: const Icon(Icons.logout_rounded, size: 16),
+                    label: const Text('Disconnect'),
+                  ),
+                ],
+              ),
+            ),
+            if (_mesh.nearOnlineCap) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                  border: Border.all(
+                    color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      size: 16,
+                      color: Color(0xFFF59E0B),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Network is nearly full (${_mesh.onlineCount}/${_mesh.onlineCap}).',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: onSurface.withValues(alpha: 0.8),
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              if (selfIp.isNotEmpty)
-                _versionCardAction(
-                  icon: Icons.copy_rounded,
-                  tooltip: 'Copy your IP',
-                  onTap: busy ? null : () => unawaited(onCopyIp(selfIp)),
-                ),
-              const SizedBox(width: 6),
-              TextButton.icon(
-                onPressed: busy ? null : onDisconnect,
-                style: TextButton.styleFrom(
-                  foregroundColor: const Color(0xFFDC3545),
-                ),
-                icon: const Icon(Icons.logout_rounded, size: 16),
-                label: const Text('Disconnect'),
-              ),
             ],
-          ),
-        ),
-        if (_mesh.nearOnlineCap) ...[
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
-              border: Border.all(
-                color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
-              ),
-            ),
-            child: Row(
-              children: [
-                const Icon(
-                  Icons.warning_amber_rounded,
-                  size: 16,
-                  color: Color(0xFFF59E0B),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Network is nearly full (${_mesh.onlineCount}/${_mesh.onlineCap}).',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: onSurface.withValues(alpha: 0.8),
+            const SizedBox(height: 12),
+            // Search players.
+            TextField(
+              controller: _meshSearchController,
+              onChanged: onSearch,
+              decoration: _backendFieldDecoration(hintText: 'Search players')
+                  .copyWith(
+                    prefixIcon: Icon(
+                      Icons.search_rounded,
+                      size: 18,
+                      color: onSurface.withValues(alpha: 0.7),
                     ),
+                    suffixIcon: search.trim().isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            icon: const Icon(Icons.close_rounded, size: 18),
+                            onPressed: () {
+                              _meshSearchController.clear();
+                              onSearch('');
+                            },
+                          ),
                   ),
-                ),
-              ],
             ),
-          ),
-        ],
-        const SizedBox(height: 12),
-        // Search.
-        TextField(
-          controller: _meshSearchController,
-          onChanged: onSearch,
-          decoration: _backendFieldDecoration(hintText: 'Search players')
-              .copyWith(
-                prefixIcon: Icon(
-                  Icons.search_rounded,
-                  size: 18,
-                  color: onSurface.withValues(alpha: 0.7),
-                ),
-                suffixIcon: search.trim().isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: 'Clear search',
-                        icon: const Icon(Icons.close_rounded, size: 18),
-                        onPressed: () {
-                          _meshSearchController.clear();
-                          onSearch('');
-                        },
-                      ),
-              ),
-        ),
-        const SizedBox(height: 10),
-        // Create / join a room.
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: createRoomController,
-                textInputAction: TextInputAction.go,
-                onSubmitted: busy ? null : onCreateRoom,
-                decoration:
-                    _backendFieldDecoration(
-                      hintText: 'Create or join a room…',
-                    ).copyWith(
-                      prefixIcon: Icon(
-                        Icons.add_circle_outline_rounded,
-                        size: 18,
-                        color: onSurface.withValues(alpha: 0.7),
-                      ),
-                    ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: busy
-                  ? null
-                  : () => onCreateRoom(createRoomController.text),
-              style: FilledButton.styleFrom(
-                backgroundColor: secondary.withValues(alpha: 0.85),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-              ),
-              child: const Text('Go'),
-            ),
+            const SizedBox(height: 14),
+            ...rows,
           ],
         ),
-        const SizedBox(height: 14),
-        Expanded(
-          child: ScrollConfiguration(
-            behavior: ScrollConfiguration.of(
-              dialogContext,
-            ).copyWith(scrollbars: false),
-            child: ListView(primary: false, children: sections),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _meshRoomHeader(
-    Color onSurface,
-    Color secondary,
-    String room,
-    bool busy,
-    ValueChanged<String> onJoinRoom,
-  ) {
-    final isCurrent = room == _mesh.currentRoom;
-    final online = _mesh.onlineMembersOf(room);
-    final full = _mesh.roomIsFull(room);
-    Widget trailing;
-    if (isCurrent) {
-      trailing = Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: secondary.withValues(alpha: 0.18),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: secondary.withValues(alpha: 0.5)),
-        ),
-        child: Text(
-          'Current',
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w800,
-            color: onSurface.withValues(alpha: 0.9),
-          ),
-        ),
-      );
-    } else if (full) {
-      trailing = Text(
-        'Full (${_mesh.onlineMembersOf(room)}/${_mesh.maxRoomSize})',
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          color: const Color(0xFFDC3545).withValues(alpha: 0.85),
-        ),
-      );
-    } else {
-      trailing = TextButton(
-        onPressed: busy ? null : () => onJoinRoom(room),
-        style: TextButton.styleFrom(
-          foregroundColor: secondary,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          minimumSize: const Size(0, 32),
-        ),
-        child: const Text('Join'),
-      );
-    }
-    return Row(
-      children: [
-        Icon(
-          Icons.meeting_room_rounded,
-          size: 16,
-          color: onSurface.withValues(alpha: 0.7),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            _prettyRoom(room),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontWeight: FontWeight.w800,
-              fontSize: 13.5,
-              color: onSurface.withValues(alpha: 0.92),
-            ),
-          ),
-        ),
-        Text(
-          '$online online',
-          style: TextStyle(
-            fontSize: 11.5,
-            color: onSurface.withValues(alpha: 0.55),
-          ),
-        ),
-        const SizedBox(width: 8),
-        trailing,
-      ],
+      ),
     );
   }
 
@@ -14754,14 +14708,6 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: statusColor,
-                boxShadow: peer.online
-                    ? [
-                        BoxShadow(
-                          color: statusColor.withValues(alpha: 0.6),
-                          blurRadius: 7,
-                        ),
-                      ]
-                    : null,
               ),
             ),
           ),
@@ -14793,24 +14739,52 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ],
             ),
           ),
-          if (peer.tailscaleIp.isNotEmpty)
+          if (peer.tailscaleIp.isNotEmpty) ...[
+            if (!peer.isSelf) ...[
+              _versionCardAction(
+                icon: Icons.cloud_rounded,
+                tooltip: 'Use as remote backend',
+                onTap: busy
+                    ? null
+                    : () => unawaited(_useMeshPeerAsRemoteBackend(peer)),
+              ),
+              const SizedBox(width: 6),
+            ],
             _versionCardAction(
               icon: Icons.copy_rounded,
               tooltip: 'Copy IP',
               onTap: busy ? null : () => unawaited(onCopyIp(peer.tailscaleIp)),
             ),
+          ],
         ],
       ),
     );
   }
 
-  String _prettyRoom(String slug) {
-    if (slug.isEmpty) return 'lobby';
-    return slug
-        .split('-')
-        .where((w) => w.isNotEmpty)
-        .map((w) => w[0].toUpperCase() + w.substring(1))
-        .join(' ');
+  /// Point the launcher's backend at a peer's Tailscale IP (Remote mode) so you
+  /// can play on their hosted backend over the tunnel.
+  Future<void> _useMeshPeerAsRemoteBackend(MeshPeer peer) async {
+    final ip = peer.tailscaleIp.trim();
+    if (ip.isEmpty) return;
+    final port = _settings.remoteBackendPort;
+    setState(() {
+      _settings = _settings.copyWith(
+        backendConnectionType: BackendConnectionType.remote,
+        remoteBackendHost: ip,
+        backendHost: ip,
+        backendPort: port,
+      );
+      _backendHostController.text = ip;
+      _backendPortController.text = port.toString();
+    });
+    await _saveSettings(toast: false, applyControllers: false);
+    // Toast immediately (bottom-right) — the backend is already pointed at the
+    // peer here, so the confirmation shows even if the refresh below is slow or
+    // the peer's backend is unreachable.
+    if (mounted) {
+      _toast("Connected to ${peer.name}'s backend ($ip:$port)");
+    }
+    await _refreshRuntime(force: true);
   }
 
   Future<void> _showInjectorDialog() async {
@@ -19969,7 +19943,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                '${_libraryQuickTipStep + 1}/2',
+                                '${_libraryQuickTipStep + 1}/$_libraryQuickTipCount',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
@@ -19978,12 +19952,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               ),
                               const Spacer(),
                               IconButton(
-                                tooltip: _libraryQuickTipStep == 0
+                                tooltip:
+                                    _libraryQuickTipStep <
+                                        _libraryQuickTipCount - 1
                                     ? 'Next tip'
                                     : 'Got it',
                                 onPressed: _advanceLibraryQuickTip,
                                 icon: Icon(
-                                  _libraryQuickTipStep == 0
+                                  _libraryQuickTipStep <
+                                          _libraryQuickTipCount - 1
                                       ? Icons.arrow_forward_rounded
                                       : Icons.check_rounded,
                                   size: 16,
@@ -20008,95 +19985,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 ),
                             child: KeyedSubtree(
                               key: ValueKey<int>(_libraryQuickTipStep),
-                              child: _libraryQuickTipStep == 0
-                                  ? Column(
-                                      key: const ValueKey('library-tip-step-0'),
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          'Import a build using the + button in the top-right.',
-                                          style: TextStyle(
-                                            fontSize: 12.5,
-                                            height: 1.28,
-                                            color: _onSurface(context, 0.86),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          'You can also use the download button to browse builds.',
-                                          style: TextStyle(
-                                            fontSize: 12.5,
-                                            height: 1.28,
-                                            color: _onSurface(context, 0.86),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
-                                    )
-                                  : Column(
-                                      key: const ValueKey('library-tip-step-1'),
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          'ATLAS Link only supports the following versions natively:',
-                                          style: TextStyle(
-                                            fontSize: 12.5,
-                                            height: 1.28,
-                                            color: _onSurface(context, 0.86),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Wrap(
-                                          crossAxisAlignment:
-                                              WrapCrossAlignment.center,
-                                          spacing: 6,
-                                          runSpacing: 6,
-                                          children: [
-                                            _buildVersionTag(
-                                              context,
-                                              label: 'v1.7.2',
-                                              accent: Theme.of(
-                                                context,
-                                              ).colorScheme.secondary,
-                                            ),
-                                            Text(
-                                              '-',
-                                              style: TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w700,
-                                                color: _onSurface(
-                                                  context,
-                                                  0.78,
-                                                ),
-                                              ),
-                                            ),
-                                            _buildVersionTag(
-                                              context,
-                                              label: 'v30.00',
-                                              accent: Theme.of(
-                                                context,
-                                              ).colorScheme.secondary,
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          'Note: This is subject to change in the future',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            height: 1.25,
-                                            color: _onSurface(context, 0.74),
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                              child: _libraryQuickTipBody(context),
                             ),
                           ),
                         ],
@@ -20201,7 +20090,143 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  Widget _libraryQuickTipBody(BuildContext context) {
+    final step = _libraryQuickTipStep
+        .clamp(0, _libraryQuickTipCount - 1)
+        .toInt();
+    final bodyStyle = TextStyle(
+      fontSize: 12.5,
+      height: 1.28,
+      color: _onSurface(context, 0.86),
+      fontWeight: FontWeight.w600,
+    );
+
+    switch (step) {
+      case 0:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Import a build using the + button in the top-right.',
+            'You can also use the download button to browse builds.',
+          ],
+        );
+      case 1:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ATLAS Link only supports the following versions natively:',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                _buildVersionTag(
+                  context,
+                  label: 'v1.7.2',
+                  accent: Theme.of(context).colorScheme.secondary,
+                ),
+                Text(
+                  '-',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: _onSurface(context, 0.78),
+                  ),
+                ),
+                _buildVersionTag(
+                  context,
+                  label: 'v30.00',
+                  accent: Theme.of(context).colorScheme.secondary,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Note: This is subject to change in the future',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.25,
+                color: _onSurface(context, 0.74),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        );
+      case 2:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Launch starts the selected build.',
+            'If a game is already running, it can close it or open another client depending on your launch options.',
+          ],
+        );
+      case 3:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Host starts the selected build as a game server.',
+            'Use it to start or restart your game server, automatic restart can bring it back if it exits.',
+          ],
+        );
+      case 4:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Network opens the ATLAS Network panel.',
+            'Use it to join rooms, share Tailscale IPs, and connect with friends without port forwarding.',
+          ],
+        );
+      case 5:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Injector opens your DLL injection tools.',
+            'Use it to pick a running game process and load bundled, installed, or custom DLL mods.',
+          ],
+        );
+      default:
+        return _libraryQuickTipParagraphs(
+          context,
+          paragraphs: const [
+            'Launch Options opens Play and Host launch settings.',
+            'Use it to adjust launch arguments, ports, multi-client launching, backend startup, and host behavior.',
+          ],
+        );
+    }
+  }
+
+  Widget _libraryQuickTipParagraphs(
+    BuildContext context, {
+    required List<String> paragraphs,
+  }) {
+    final bodyStyle = TextStyle(
+      fontSize: 12.5,
+      height: 1.28,
+      color: _onSurface(context, 0.86),
+      fontWeight: FontWeight.w600,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < paragraphs.length; i++) ...[
+          if (i > 0) const SizedBox(height: 4),
+          Text(paragraphs[i], style: bodyStyle),
+        ],
+      ],
+    );
+  }
+
   Widget _libraryQuickTipActionButtons() {
+    final importDownloadActive =
+        _libraryQuickTipTargetActive(_LibraryQuickTipTarget.importDownload) ||
+        (!_showLibraryQuickTip && _settings.versions.isEmpty);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -20211,6 +20236,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               _dismissLibraryImportTip(onDismissedAction: _importVersion),
             );
           }, tooltip: 'Import'),
+          enabled: importDownloadActive,
         ),
         const SizedBox(width: 8),
         _libraryPulseGlow(
@@ -20221,6 +20247,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
             );
           }, tooltip: 'Download'),
+          enabled: importDownloadActive,
         ),
       ],
     );
@@ -20439,8 +20466,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  bool _libraryQuickTipTargetActive(_LibraryQuickTipTarget target) {
+    if (!_showLibraryQuickTip || _libraryImportTipFadingOut) return false;
+    return switch (target) {
+      _LibraryQuickTipTarget.importDownload => _libraryQuickTipStep == 0,
+      _LibraryQuickTipTarget.launch => _libraryQuickTipStep == 2,
+      _LibraryQuickTipTarget.host => _libraryQuickTipStep == 3,
+      _LibraryQuickTipTarget.network => _libraryQuickTipStep == 4,
+      _LibraryQuickTipTarget.injector => _libraryQuickTipStep == 5,
+      _LibraryQuickTipTarget.launchOptions => _libraryQuickTipStep == 6,
+    };
+  }
+
   bool get _shouldPulseLibraryActions =>
-      (_tab == LauncherTab.library && _settings.versions.isEmpty) ||
+      (_tab == LauncherTab.library &&
+          (_settings.versions.isEmpty || _showLibraryQuickTip) &&
+          !_libraryImportTipFadingOut) ||
       (_tab == LauncherTab.backend && _showBackendConnectionTip) ||
       _showProfileAuthQuickTip;
 
@@ -20472,11 +20513,19 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   }
 
   void _advanceLibraryQuickTip() {
-    if (_libraryQuickTipStep == 0) {
-      setState(() => _libraryQuickTipStep = 1);
+    if (_libraryQuickTipStep < _libraryQuickTipCount - 1) {
+      setState(() => _libraryQuickTipStep += 1);
       return;
     }
     unawaited(_dismissLibraryImportTip());
+  }
+
+  void _runLibraryQuickTipAction(Future<void> Function() action) {
+    if (_showLibraryQuickTip) {
+      unawaited(_dismissLibraryImportTip(onDismissedAction: action));
+      return;
+    }
+    unawaited(action());
   }
 
   Future<void> _dismissLibraryImportTip({
@@ -20528,8 +20577,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     }
   }
 
-  Widget _libraryPulseGlow(Widget child) {
-    if (!_shouldPulseLibraryActions) return child;
+  Widget _libraryPulseGlow(Widget child, {bool enabled = true}) {
+    if (!enabled || !_shouldPulseLibraryActions) return child;
     return AnimatedBuilder(
       animation: _libraryActionsNudgePulse,
       child: child,
@@ -20609,6 +20658,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   bool get _showLibraryQuickTipBackdrop =>
       _tab == LauncherTab.library &&
       !_libraryQuickTipManualVisible &&
+      _libraryQuickTipStep <= 1 &&
       (!_settings.libraryActionsNudgeComplete || _libraryImportTipFadingOut);
 
   bool get _showBackendConnectionTip =>
@@ -21444,14 +21494,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           (
             key: 'library',
             label: 'Library',
-            icon: Icons.folder_open_outlined,
+            icon: Icons.folder_rounded,
             selected: _tab == LauncherTab.library,
             onTap: () => unawaited(_switchMenu(LauncherTab.library)),
           ),
           (
             key: 'backend',
             label: 'Backend',
-            icon: Icons.cloud_outlined,
+            icon: Icons.cloud_rounded,
             selected: _tab == LauncherTab.backend,
             onTap: () => unawaited(_switchMenu(LauncherTab.backend)),
           ),
@@ -22389,63 +22439,76 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              if (selected == null)
-                                OutlinedButton.icon(
-                                  onPressed: null,
-                                  icon: const Icon(Icons.play_arrow_rounded),
-                                  label: const Text('Launch'),
-                                )
-                              else
-                                FilledButton.icon(
-                                  onPressed:
-                                      _gameAction != _GameActionState.idle ||
-                                          launchDisabledByModDownload
-                                      ? null
-                                      : _onLaunchButtonPressed,
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: launchActsAsClose
-                                        ? const Color(0xFFDC3545)
-                                        : Theme.of(context)
-                                              .colorScheme
-                                              .secondary
-                                              .withValues(alpha: 0.92),
-                                    disabledBackgroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.22),
-                                    foregroundColor: Colors.white,
-                                    disabledForegroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.58),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                      vertical: 13,
-                                    ),
-                                    shape: const StadiumBorder(),
-                                  ),
-                                  icon: Icon(
-                                    launchActsAsClose
-                                        ? Icons.stop_rounded
-                                        : _gameAction ==
-                                              _GameActionState.closing
-                                        ? Icons.stop_rounded
-                                        : Icons.play_arrow_rounded,
-                                  ),
-                                  label: Text(
-                                    _gameAction == _GameActionState.closing
-                                        ? 'Closing...'
-                                        : launchActsAsClose
-                                        ? 'Close Game'
-                                        : _gameAction ==
-                                              _GameActionState.launching
-                                        ? 'Launching...'
-                                        : hasRunningGameClient &&
-                                              _settings.allowMultipleGameClients
-                                        ? 'Launch Client'
-                                        : 'Launch',
-                                  ),
+                              _libraryPulseGlow(
+                                selected == null
+                                    ? OutlinedButton.icon(
+                                        onPressed: null,
+                                        icon: const Icon(
+                                          Icons.play_arrow_rounded,
+                                        ),
+                                        label: const Text('Launch'),
+                                      )
+                                    : FilledButton.icon(
+                                        onPressed:
+                                            _gameAction !=
+                                                    _GameActionState.idle ||
+                                                launchDisabledByModDownload
+                                            ? null
+                                            : () => _runLibraryQuickTipAction(
+                                                _onLaunchButtonPressed,
+                                              ),
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: launchActsAsClose
+                                              ? const Color(0xFFDC3545)
+                                              : Theme.of(context)
+                                                    .colorScheme
+                                                    .secondary
+                                                    .withValues(alpha: 0.92),
+                                          disabledBackgroundColor:
+                                              Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface
+                                                  .withValues(alpha: 0.22),
+                                          foregroundColor: Colors.white,
+                                          disabledForegroundColor:
+                                              Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface
+                                                  .withValues(alpha: 0.58),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 20,
+                                            vertical: 13,
+                                          ),
+                                          shape: const StadiumBorder(),
+                                        ),
+                                        icon: Icon(
+                                          launchActsAsClose
+                                              ? Icons.stop_rounded
+                                              : _gameAction ==
+                                                    _GameActionState.closing
+                                              ? Icons.stop_rounded
+                                              : Icons.play_arrow_rounded,
+                                        ),
+                                        label: Text(
+                                          _gameAction ==
+                                                  _GameActionState.closing
+                                              ? 'Closing...'
+                                              : launchActsAsClose
+                                              ? 'Close Game'
+                                              : _gameAction ==
+                                                    _GameActionState.launching
+                                              ? 'Launching...'
+                                              : hasRunningGameClient &&
+                                                    _settings
+                                                        .allowMultipleGameClients
+                                              ? 'Launch Client'
+                                              : 'Launch',
+                                        ),
+                                      ),
+                                enabled: _libraryQuickTipTargetActive(
+                                  _LibraryQuickTipTarget.launch,
                                 ),
+                              ),
                               if (showCloseAllGamesButton)
                                 FilledButton.icon(
                                   onPressed:
@@ -22476,57 +22539,72 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                         : 'Close Games',
                                   ),
                                 ),
-                              if (selected == null)
-                                OutlinedButton.icon(
-                                  onPressed: null,
-                                  icon: const Icon(Icons.cloud_upload_rounded),
-                                  label: const Text('Host'),
-                                )
-                              else
-                                FilledButton.icon(
-                                  onPressed:
-                                      _gameAction != _GameActionState.idle ||
-                                          _gameServerLaunching ||
-                                          hostDisabledByModDownload
-                                      ? null
-                                      : hostActsAsClose
-                                      ? _closeHosting
-                                      : _startHosting,
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: hostActsAsClose
-                                        ? const Color(0xFFDC3545)
-                                        : Theme.of(context)
-                                              .colorScheme
-                                              .secondary
-                                              .withValues(alpha: 0.82),
-                                    disabledBackgroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.22),
-                                    foregroundColor: Colors.white,
-                                    disabledForegroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.58),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                      vertical: 13,
-                                    ),
-                                    shape: const StadiumBorder(),
-                                  ),
-                                  icon: Icon(
-                                    hostActsAsClose
-                                        ? Icons.stop_rounded
-                                        : Icons.cloud_upload_rounded,
-                                  ),
-                                  label: Text(
-                                    hostActsAsClose
-                                        ? 'Close Host'
-                                        : _gameServerLaunching
-                                        ? 'Starting...'
-                                        : 'Host',
-                                  ),
+                              _libraryPulseGlow(
+                                selected == null
+                                    ? OutlinedButton.icon(
+                                        onPressed: null,
+                                        icon: const Icon(
+                                          Icons.cloud_upload_rounded,
+                                        ),
+                                        label: const Text('Host'),
+                                      )
+                                    : FilledButton.icon(
+                                        onPressed:
+                                            _gameAction !=
+                                                    _GameActionState.idle ||
+                                                _gameServerLaunching ||
+                                                hostDisabledByModDownload
+                                            ? null
+                                            : () => _runLibraryQuickTipAction(
+                                                () async {
+                                                  if (hostActsAsClose) {
+                                                    await _closeHosting();
+                                                  } else {
+                                                    await _startHosting();
+                                                  }
+                                                },
+                                              ),
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: hostActsAsClose
+                                              ? const Color(0xFFDC3545)
+                                              : Theme.of(context)
+                                                    .colorScheme
+                                                    .secondary
+                                                    .withValues(alpha: 0.82),
+                                          disabledBackgroundColor:
+                                              Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface
+                                                  .withValues(alpha: 0.22),
+                                          foregroundColor: Colors.white,
+                                          disabledForegroundColor:
+                                              Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface
+                                                  .withValues(alpha: 0.58),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 20,
+                                            vertical: 13,
+                                          ),
+                                          shape: const StadiumBorder(),
+                                        ),
+                                        icon: Icon(
+                                          hostActsAsClose
+                                              ? Icons.stop_rounded
+                                              : Icons.cloud_upload_rounded,
+                                        ),
+                                        label: Text(
+                                          hostActsAsClose
+                                              ? 'Close Host'
+                                              : _gameServerLaunching
+                                              ? 'Starting...'
+                                              : 'Host',
+                                        ),
+                                      ),
+                                enabled: _libraryQuickTipTargetActive(
+                                  _LibraryQuickTipTarget.host,
                                 ),
+                              ),
                               OutlinedButton.icon(
                                 onPressed: selected == null
                                     ? null
@@ -22534,60 +22612,79 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                 icon: const Icon(Icons.folder_open_rounded),
                                 label: const Text('Open Folder'),
                               ),
-                              Tooltip(
-                                message: 'Injector',
-                                child: OutlinedButton(
-                                  onPressed: () =>
-                                      unawaited(_showInjectorDialog()),
-                                  style: OutlinedButton.styleFrom(
-                                    minimumSize: const Size(42, 42),
-                                    maximumSize: const Size(42, 42),
-                                    padding: EdgeInsets.zero,
-                                    shape: const CircleBorder(),
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  child: const Icon(
-                                    Icons.science_rounded,
-                                    size: 18,
-                                  ),
-                                ),
-                              ),
-                              Tooltip(
-                                message: 'Network',
-                                child: OutlinedButton(
-                                  onPressed: () =>
-                                      unawaited(_showNetworkDialog()),
-                                  style: OutlinedButton.styleFrom(
-                                    minimumSize: const Size(42, 42),
-                                    maximumSize: const Size(42, 42),
-                                    padding: EdgeInsets.zero,
-                                    shape: const CircleBorder(),
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  child: const Icon(
-                                    Icons.groups_rounded,
-                                    size: 18,
+                              _libraryPulseGlow(
+                                Tooltip(
+                                  message: 'Network',
+                                  child: OutlinedButton(
+                                    onPressed: () => _runLibraryQuickTipAction(
+                                      _showNetworkDialog,
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      minimumSize: const Size(42, 42),
+                                      maximumSize: const Size(42, 42),
+                                      padding: EdgeInsets.zero,
+                                      shape: const CircleBorder(),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    child: const Icon(
+                                      Icons.people_alt_rounded,
+                                      size: 18,
+                                    ),
                                   ),
                                 ),
+                                enabled: _libraryQuickTipTargetActive(
+                                  _LibraryQuickTipTarget.network,
+                                ),
                               ),
-                              Tooltip(
-                                message: 'Launch Options',
-                                child: OutlinedButton(
-                                  onPressed: _openHostOptionsDialog,
-                                  style: OutlinedButton.styleFrom(
-                                    minimumSize: const Size(42, 42),
-                                    maximumSize: const Size(42, 42),
-                                    padding: EdgeInsets.zero,
-                                    shape: const CircleBorder(),
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
+                              _libraryPulseGlow(
+                                Tooltip(
+                                  message: 'Injector',
+                                  child: OutlinedButton(
+                                    onPressed: () => _runLibraryQuickTipAction(
+                                      _showInjectorDialog,
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      minimumSize: const Size(42, 42),
+                                      maximumSize: const Size(42, 42),
+                                      padding: EdgeInsets.zero,
+                                      shape: const CircleBorder(),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    child: const Icon(
+                                      Icons.science_rounded,
+                                      size: 18,
+                                    ),
                                   ),
-                                  child: const Icon(
-                                    Icons.more_horiz_rounded,
-                                    size: 18,
+                                ),
+                                enabled: _libraryQuickTipTargetActive(
+                                  _LibraryQuickTipTarget.injector,
+                                ),
+                              ),
+                              _libraryPulseGlow(
+                                Tooltip(
+                                  message: 'Launch Options',
+                                  child: OutlinedButton(
+                                    onPressed: () => _runLibraryQuickTipAction(
+                                      _openHostOptionsDialog,
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      minimumSize: const Size(42, 42),
+                                      maximumSize: const Size(42, 42),
+                                      padding: EdgeInsets.zero,
+                                      shape: const CircleBorder(),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    child: const Icon(
+                                      Icons.rocket_launch_rounded,
+                                      size: 18,
+                                    ),
                                   ),
+                                ),
+                                enabled: _libraryQuickTipTargetActive(
+                                  _LibraryQuickTipTarget.launchOptions,
                                 ),
                               ),
                             ],

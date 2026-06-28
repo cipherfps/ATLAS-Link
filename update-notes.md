@@ -1,4 +1,4 @@
-<!-- version: 1.4.5 -->
+<!-- version: 1.4.6 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,6 +15,8 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fixed mods showing incompatible builds as install targets (e.g. a 7.40 mod no longer offered 17.40)
+- Implemented ATLAS Network, allowing you to browse a list of players to directly connect to and play with
+- The ATLAS Network button is on the Library page
+- Changed some visuals
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

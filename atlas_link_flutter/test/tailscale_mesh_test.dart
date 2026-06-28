@@ -24,46 +24,38 @@ void main() {
   });
 
   group('hostname round-trip', () {
-    test('builds the atlas-<room>--<user> shape', () {
-      expect(buildAtlasHostname('lobby', 'cipher'), 'atlas-lobby--cipher');
-      expect(
-        buildAtlasHostname('OG Zone Wars', 'Cipher FPS'),
-        'atlas-og-zone-wars--cipher-fps',
-      );
+    test('builds the atlas-lobby--<user> shape', () {
+      expect(buildAtlasHostname('cipher'), 'atlas-lobby--cipher');
+      expect(buildAtlasHostname('Nata 123'), 'atlas-lobby--nata-123');
     });
 
-    test('falls back to defaults for empty parts', () {
-      expect(buildAtlasHostname('', ''), 'atlas-lobby--player');
+    test('falls back to the default user for empty input', () {
+      expect(buildAtlasHostname(''), 'atlas-lobby--player');
     });
 
-    test('parses room and user back out', () {
-      final parsed = parseAtlasHostname('atlas-zone-wars--cipher');
-      expect(parsed, isNotNull);
-      expect(parsed!.room, 'zone-wars');
-      expect(parsed.user, 'cipher');
+    test('parses the user back out', () {
+      expect(parseAtlasHostname('atlas-lobby--cipher'), 'cipher');
     });
 
     test('keeps tailscale dedup suffix and strips MagicDNS tails', () {
-      // Colliding names keep their -N suffix so they stay distinguishable.
-      expect(parseAtlasHostname('atlas-lobby--cipher-2')?.user, 'cipher-2');
+      expect(parseAtlasHostname('atlas-lobby--cipher-2'), 'cipher-2');
       expect(
-        parseAtlasHostname('atlas-lobby--cipher.tailabc.ts.net.')?.room,
-        'lobby',
+        parseAtlasHostname('atlas-lobby--cipher.tailabc.ts.net.'),
+        'cipher',
       );
     });
 
     test('rejects non-atlas hostnames', () {
       expect(parseAtlasHostname('cipher-pc'), isNull);
-      expect(parseAtlasHostname('atlas-onlyroom'), isNull);
+      expect(parseAtlasHostname('atlas-onlyuser'), isNull);
       expect(parseAtlasHostname(null), isNull);
     });
 
     test('round-trips through build then parse', () {
-      const room = 'Sweaty Lobby';
-      const user = 'Nata 123';
-      final parsed = parseAtlasHostname(buildAtlasHostname(room, user));
-      expect(parsed!.room, slugify(room));
-      expect(parsed.user, slugify(user));
+      expect(
+        parseAtlasHostname(buildAtlasHostname('Nata 123')),
+        slugify('Nata 123'),
+      );
     });
   });
 
@@ -144,6 +136,7 @@ void main() {
       expect(args.first, 'up');
       expect(args, contains('--auth-key=tskey-auth-x'));
       expect(args, contains('--hostname=atlas-lobby--cipher'));
+      expect(args, contains('--unattended')); // stays up without the tray app
       expect(args.any((a) => a.startsWith('--login-server')), isFalse);
     });
 
@@ -180,7 +173,7 @@ void main() {
           'OS': 'windows',
         },
         'nodekeyB': {
-          'HostName': 'atlas-zone-wars--ghost',
+          'HostName': 'atlas-lobby--ghost',
           'TailscaleIPs': ['100.84.0.9'],
           'Online': false,
           'OS': 'linux',
@@ -199,22 +192,15 @@ void main() {
       final status = parseTailscaleStatusJson(sample);
       expect(status.self, isNotNull);
       expect(status.self!.name, 'cipher');
-      expect(status.self!.room, 'lobby');
       expect(status.self!.tailscaleIp, '100.81.186.59');
       expect(status.others.length, 2); // laptop filtered out
-    });
-
-    test('groups rooms with self room first', () {
-      final status = parseTailscaleStatusJson(sample);
-      expect(status.rooms.first, 'lobby');
-      expect(status.rooms, containsAll(['lobby', 'zone-wars']));
     });
 
     test('counts online members across the network', () {
       final status = parseTailscaleStatusJson(sample);
       // self + nata online; ghost offline.
       expect(status.onlineCount(), 2);
-      expect(status.membersOf('lobby').length, 2);
+      expect(status.all.length, 3);
     });
 
     test('returns empty status on malformed json', () {

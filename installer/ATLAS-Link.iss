@@ -100,6 +100,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#ExecutableName}"; Tasks: 
 #if VcRedistPath != ""
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Check: NeedsVCRedist; Flags: runhidden waituntilterminated
 #endif
+Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup.msi"" /quiet /norestart TS_UNATTENDEDMODE=always"; StatusMsg: "Installing Tailscale..."; Check: ShouldInstallTailscale; Flags: runhidden waituntilterminated
 Filename: "{app}\{#ExecutableName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -108,6 +109,8 @@ const
     'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/backends/neonitev2-backend.zip';
   LawinBackendUrl =
     'https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/backends/lawinserver-backend.zip';
+  TailscaleMsiUrl =
+    'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi';
 
 var
   DefenderOptionsPage: TWizardPage;
@@ -119,6 +122,11 @@ var
   BackendDetailsLabel: TNewStaticText;
   NeoniteCheckBox: TNewCheckBox;
   LawinCheckBox: TNewCheckBox;
+  TailscaleOptionsPage: TWizardPage;
+  TailscaleIntroLabel: TNewStaticText;
+  TailscaleDetailsLabel: TNewStaticText;
+  TailscaleCheckBox: TNewCheckBox;
+  TailscaleInstallQueued: Boolean;
   BackendDownloadPage: TDownloadWizardPage;
 
 function WantNeonite: Boolean;
@@ -134,6 +142,31 @@ end;
 function WantEitherBackend: Boolean;
 begin
   Result := WantNeonite or WantLawin;
+end;
+
+function TailscaleAlreadyInstalled: Boolean;
+begin
+  Result :=
+    FileExists(ExpandConstant('{autopf}\Tailscale\tailscale.exe')) or
+    FileExists(ExpandConstant('{pf32}\Tailscale\tailscale.exe'));
+end;
+
+function WantTailscale: Boolean;
+begin
+  Result := Assigned(TailscaleCheckBox) and TailscaleCheckBox.Checked;
+end;
+
+function WantTailscaleDownload: Boolean;
+begin
+  Result := WantTailscale and (not TailscaleAlreadyInstalled);
+end;
+
+function ShouldInstallTailscale: Boolean;
+begin
+  Result :=
+    WantTailscale and
+    (not TailscaleAlreadyInstalled) and
+    FileExists(ExpandConstant('{tmp}\tailscale-setup.msi'));
 end;
 
 function IsVCRedistInstalled: Boolean;
@@ -269,8 +302,49 @@ begin
   LawinCheckBox.Checked := False;
   LawinCheckBox.Caption := 'Install LawinServer backend';
 
+  TailscaleOptionsPage := CreateCustomPage(
+    BackendOptionsPage.ID,
+    'Network (Tailscale)',
+    'Install Tailscale so you can use the ATLAS Link Network feature.'
+  );
+
+  TailscaleIntroLabel := TNewStaticText.Create(TailscaleOptionsPage);
+  TailscaleIntroLabel.Parent := TailscaleOptionsPage.Surface;
+  TailscaleIntroLabel.Left := 0;
+  TailscaleIntroLabel.Top := 0;
+  TailscaleIntroLabel.Width := TailscaleOptionsPage.SurfaceWidth;
+  TailscaleIntroLabel.AutoSize := False;
+  TailscaleIntroLabel.WordWrap := True;
+  TailscaleIntroLabel.Font.Style := [fsBold];
+  TailscaleIntroLabel.Caption :=
+    'ATLAS Link''s Network feature uses Tailscale to connect you directly with friends.';
+  WizardForm.AdjustLabelHeight(TailscaleIntroLabel);
+
+  TailscaleDetailsLabel := TNewStaticText.Create(TailscaleOptionsPage);
+  TailscaleDetailsLabel.Parent := TailscaleOptionsPage.Surface;
+  TailscaleDetailsLabel.Left := 0;
+  TailscaleDetailsLabel.Top :=
+    TailscaleIntroLabel.Top + TailscaleIntroLabel.Height + ScaleY(12);
+  TailscaleDetailsLabel.Width := TailscaleOptionsPage.SurfaceWidth;
+  TailscaleDetailsLabel.AutoSize := False;
+  TailscaleDetailsLabel.WordWrap := True;
+  TailscaleDetailsLabel.Caption :=
+    'The Network tab lets you join a shared private network and host or join games directly by IP with no port forwarding and no separate account or login required. Tailscale is a free, secure (WireGuard-based) tool that makes this possible. The official Tailscale installer is downloaded from tailscale.com and installed silently during setup (an internet connection is required). If Tailscale is already installed, this step is skipped automatically. You can also install it later from the Network tab inside ATLAS Link.';
+  WizardForm.AdjustLabelHeight(TailscaleDetailsLabel);
+
+  TailscaleCheckBox := TNewCheckBox.Create(TailscaleOptionsPage);
+  TailscaleCheckBox.Parent := TailscaleOptionsPage.Surface;
+  TailscaleCheckBox.Left := 0;
+  TailscaleCheckBox.Top :=
+    TailscaleDetailsLabel.Top + TailscaleDetailsLabel.Height + ScaleY(16);
+  TailscaleCheckBox.Width := TailscaleOptionsPage.SurfaceWidth;
+  TailscaleCheckBox.Height := ScaleY(24);
+  TailscaleCheckBox.Checked := True;
+  TailscaleCheckBox.Caption :=
+    'Install Tailscale (recommended)';
+
   BackendDownloadPage :=
-    CreateDownloadPage('Downloading backends', 'Fetching the selected ATLAS Link backends...', nil);
+    CreateDownloadPage('Downloading components', 'Fetching the selected ATLAS Link components...', nil);
   BackendDownloadPage.ShowBaseNameInsteadOfUrl := True;
 end;
 
@@ -284,7 +358,7 @@ begin
   // still installs; the missing backend can be downloaded later in-app.
   if CurPageID <> wpReady then
     Exit;
-  if not WantEitherBackend then
+  if not (WantEitherBackend or WantTailscaleDownload) then
     Exit;
 
   BackendDownloadPage.Clear;
@@ -292,6 +366,8 @@ begin
     BackendDownloadPage.Add(NeoniteBackendUrl, 'neonitev2-backend.zip', '');
   if WantLawin then
     BackendDownloadPage.Add(LawinBackendUrl, 'lawinserver-backend.zip', '');
+  if WantTailscaleDownload then
+    BackendDownloadPage.Add(TailscaleMsiUrl, 'tailscale-setup.msi', '');
 
   BackendDownloadPage.Show;
   try
@@ -430,11 +506,31 @@ begin
   );
 end;
 
+procedure SuppressTailscaleAutostart;
+begin
+  // ATLAS Link drives Tailscale through its CLI and the background tailscaled
+  // service, so the Tailscale tray/login GUI is unnecessary. Remove its
+  // auto-start entry and close it so a fresh install never shows the Tailscale
+  // setup/login window. (Only runs when ATLAS installed Tailscale itself.)
+  DeleteFile(ExpandConstant('{commonstartup}\Tailscale.lnk'));
+  DeleteFile(ExpandConstant('{userstartup}\Tailscale.lnk'));
+  _TaskKillImage('tailscale-ipn.exe');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  // Apply before extracting files so Defender doesn't quarantine DLLs during install.
-  if (CurStep = ssInstall) and ShouldApplyDefenderExclusions then
-    ApplyDefenderExclusions;
+  if (CurStep = ssInstall) then begin
+    TailscaleInstallQueued :=
+      WantTailscale and
+      (not TailscaleAlreadyInstalled) and
+      FileExists(ExpandConstant('{tmp}\tailscale-setup.msi'));
+    // Apply before extracting files so Defender doesn't quarantine DLLs during install.
+    if ShouldApplyDefenderExclusions then
+      ApplyDefenderExclusions;
+  end;
+  // Runs after the silent Tailscale MSI has completed.
+  if (CurStep = ssPostInstall) and TailscaleInstallQueued then
+    SuppressTailscaleAutostart;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
