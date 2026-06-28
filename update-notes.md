@@ -1,4 +1,4 @@
-<!-- version: 1.4.6 -->
+<!-- version: 1.4.7 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,8 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Implemented ATLAS Network, allowing you to browse a list of players to directly connect to and play with
-- The ATLAS Network button is on the Library page
-- Changed some visuals
+- ATLAS Network now requires Discord OAuth to allow real users to connect
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

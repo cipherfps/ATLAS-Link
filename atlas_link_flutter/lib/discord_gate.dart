@@ -19,13 +19,19 @@ class DiscordGate {
 
   final void Function(String message)? logger;
 
+  /// Data URI of the ATLAS logo, embedded into the served pages so it renders
+  /// with no external request (ad blockers / offline can't strip it).
+  String? _logoDataUri;
+
   /// Run the login. [openUrl] is injected so this stays Flutter-free/testable;
   /// the launcher passes its own URL opener.
   Future<DiscordGateResult> login({
     required String gateUrl,
     required Future<void> Function(Uri uri) openUrl,
     Duration timeout = const Duration(minutes: 3),
+    String? logoDataUri,
   }) async {
+    _logoDataUri = logoDataUri;
     final base = gateUrl.trim();
     if (base.isEmpty || !base.startsWith('http')) {
       return const DiscordGateResult.error('config');
@@ -111,7 +117,7 @@ class DiscordGate {
   Future<void> _respond(HttpRequest request, int status, String message) async {
     request.response.statusCode = status;
     request.response.headers.contentType = ContentType.html;
-    request.response.write(_pageHtml(message));
+    request.response.write(_pageHtml(message, _logoDataUri));
     await request.response.close();
   }
 
@@ -160,14 +166,21 @@ String _friendly(String reason) {
   }
 }
 
-String _pageHtml(String message) =>
-    '<!doctype html><html><head><meta charset="utf-8">'
-    '<meta name="viewport" content="width=device-width, initial-scale=1">'
-    '<title>ATLAS Network</title><style>'
-    'body{margin:0;background:#0b1220;color:#e6edf6;'
-    'font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;'
-    'display:flex;min-height:100vh;align-items:center;justify-content:center}'
-    '.card{max-width:420px;padding:32px;text-align:center}'
-    'h1{font-size:20px;margin:0 0 10px}p{opacity:.75;margin:0}'
-    '</style></head><body><div class="card"><h1>ATLAS Network</h1>'
-    '<p>$message</p></div></body></html>';
+String _pageHtml(String message, [String? logoDataUri]) {
+  final logo = (logoDataUri != null && logoDataUri.isNotEmpty)
+      ? '<img class="logo" alt="ATLAS" src="$logoDataUri">'
+      : '';
+  return '<!doctype html><html><head><meta charset="utf-8">'
+      '<meta name="viewport" content="width=device-width, initial-scale=1">'
+      '<title>ATLAS</title><style>'
+      'body{margin:0;background:#0b1220;color:#e6edf6;'
+      'font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;'
+      'display:flex;min-height:100vh;align-items:center;justify-content:center}'
+      '.card{max-width:420px;padding:32px;text-align:center}'
+      '.logo{width:88px;height:88px;object-fit:contain;margin:0 auto 16px;display:block}'
+      'h1{font-size:20px;margin:0 0 10px}p{opacity:.75;margin:0}'
+      '</style></head><body><div class="card">'
+      '$logo'
+      '<h1>ATLAS</h1>'
+      '<p>$message</p></div></body></html>';
+}

@@ -847,8 +847,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '1.4.6';
-  static const String _launcherBuildLabel = 'Stable 1.4.6';
+  static const String _launcherVersion = '1.4.7';
+  static const String _launcherBuildLabel = 'Stable 1.4.7';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -14384,11 +14384,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   /// wait for the per-user key it mints, then join the mesh with it. Returns
   /// true once connected. Failures surface as a toast.
   Future<bool> _meshDiscordLogin() async {
+    // Embed the bundled logo into the gate's success page so it renders with no
+    // external request (ad blockers would strip a remote image).
+    String? logoDataUri;
+    try {
+      final data = await rootBundle.load('assets/images/atlas_logo.png');
+      logoDataUri =
+          'data:image/png;base64,${base64Encode(data.buffer.asUint8List())}';
+    } catch (_) {
+      // Non-fatal — the page just shows without the logo.
+    }
     final result = await DiscordGate(
       logger: (m) => debugPrint('[discord-gate] $m'),
     ).login(
       gateUrl: _mesh.gateUrl,
       openUrl: (uri) => _openUrl(uri.toString()),
+      logoDataUri: logoDataUri,
     );
     if (!result.ok) {
       _toast(_meshGateErrorMessage(result.error));
@@ -14423,27 +14434,28 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   /// Explains why Discord sign-in gates the network (anti-bot + privacy),
   /// shown above the "Continue with Discord" button.
-  Widget _meshWhyDiscord(Color onSurface, Color discordColor) {
+  Widget _meshWhyDiscord(Color onSurface, Color accent) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 360),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: discordColor.withValues(alpha: 0.08),
+          color: accent.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: discordColor.withValues(alpha: 0.22)),
+          border: Border.all(color: accent.withValues(alpha: 0.22)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.verified_user_rounded, size: 18, color: discordColor),
+            Icon(Icons.verified_user_rounded, size: 18, color: accent),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'The network was getting flooded by fake accounts. Signing in '
-                "with Discord proves you're a real ATLAS member, so only actual "
-                'players get on — no bots. We only check that you’re in the '
-                'ATLAS Discord; we never see your password.',
+                'Sign in with Discord to join the ATLAS Network. Signing in '
+                'with Discord can prove you’re a real ATLAS member, and not a '
+                'bot trying to flood the network. We only check that you are a '
+                'valid member in the ATLAS Discord. We never see your password '
+                'or details.',
                 style: TextStyle(
                   fontSize: 12,
                   height: 1.4,
@@ -14467,9 +14479,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final error = _mesh.errorKind;
     final isFull = error == MeshErrorKind.capacity;
     const discordColor = Color(0xFF5865F2);
-    final accent = isFull
-        ? const Color(0xFFF59E0B)
-        : (discord ? discordColor : secondary);
+    // Circle + info box use the app's normal accent; only the button below
+    // stays Discord blurple.
+    final accent = isFull ? const Color(0xFFF59E0B) : secondary;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 22, 8, 12),
       child: Column(
@@ -14485,10 +14497,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               border: Border.all(color: accent.withValues(alpha: 0.28)),
             ),
             child: Icon(
-              isFull
-                  ? Icons.error_outline_rounded
-                  : (discord ? FontAwesomeIcons.discord : Icons.hub_rounded),
-              size: discord && !isFull ? 30 : 34,
+              isFull ? Icons.error_outline_rounded : Icons.hub_rounded,
+              size: 34,
               color: accent,
             ),
           ),
@@ -14502,26 +14512,28 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               color: onSurface.withValues(alpha: 0.95),
             ),
           ),
-          const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 330),
-            child: Text(
-              error != null
-                  ? _mesh.errorMessage
-                  : discord
-                  ? 'Sign in with Discord to join the ATLAS Network.'
-                  : 'Connect to see who\'s online and host or join games ',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 13,
-                height: 1.45,
-                color: onSurface.withValues(alpha: 0.66),
+          // For the Discord connect screen the message lives entirely in the
+          // blue box below, so skip the subtitle (except to show an error).
+          if (!discord || error != null) ...[
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 330),
+              child: Text(
+                error != null
+                    ? _mesh.errorMessage
+                    : 'Connect to see who\'s online and host or join games ',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.45,
+                  color: onSurface.withValues(alpha: 0.66),
+                ),
               ),
             ),
-          ),
+          ],
           if (discord && error == null && !isFull) ...[
             const SizedBox(height: 14),
-            _meshWhyDiscord(onSurface, discordColor),
+            _meshWhyDiscord(onSurface, secondary),
           ],
           const SizedBox(height: 20),
           FilledButton.icon(
@@ -14563,8 +14575,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 300),
               child: Text(
-                "You'll be sent to Discord to approve, then brought right back. "
-                'You only connect if you want to.',
+                "You'll be sent to approve, then brought right back.",
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 11.5,
@@ -19608,7 +19619,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   Future<void> _openUrl(String url) async {
     if (!Platform.isWindows) return;
-    await Process.start('cmd', ['/c', 'start', '', url], runInShell: true);
+    // Open via FileProtocolHandler instead of `cmd /c start`: the shell treats
+    // `&` as a command separator, which silently truncates URLs that carry
+    // query params (e.g. the Discord gate's `?port=…&state=…`). rundll32 takes
+    // the URL as a single argument with no shell parsing, so `&` is preserved.
+    await Process.start(
+      'rundll32',
+      ['url.dll,FileProtocolHandler', url],
+      runInShell: false,
+    );
   }
 
   void _toast(String message) {

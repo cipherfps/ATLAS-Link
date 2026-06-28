@@ -25,7 +25,7 @@ DISCORD_MIN_ACCOUNT_AGE_DAYS = "7"   # reject Discord accounts newer than 7 days
 TAILSCALE_TAILNET = "-"              # "-" = the OAuth client's own tailnet
 TAILSCALE_TAG = "tag:atlas-mesh"
 KEY_EXPIRY_SECONDS = "300"           # minted key is unusable after 5 minutes
-RATE_LIMIT_SECONDS = "21600"         # one key per Discord user per 6 hours
+RATE_LIMIT_SECONDS = "60"            # min seconds between keys per user (anti-spam; Discord+role is the real gate)
 
 # Secrets (DO NOT put these here — set them with `wrangler secret put NAME`):
 #   DISCORD_CLIENT_ID
