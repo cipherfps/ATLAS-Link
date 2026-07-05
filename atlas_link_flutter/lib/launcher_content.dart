@@ -89,8 +89,8 @@ class LauncherContentConfig {
             title: 'ATLAS',
             description:
                 'ATLAS is the new era of OGFN. Built with a clean UI and user experience. Enjoy your stay.',
-            buttonLabel: '',
-            buttonUrl: '',
+            buttonLabel: 'Open ATLAS Link GitHub',
+            buttonUrl: repositoryUrl,
             imageFit: BoxFit.cover,
           ),
           LauncherContentSlide(
@@ -102,6 +102,16 @@ class LauncherContentConfig {
             buttonLabel: 'Join ATLAS Discord',
             buttonUrl: discordInviteUrl,
             imageFit: BoxFit.cover,
+          ),
+          LauncherContentSlide(
+            image: 'assets/images/atlas_apps.png',
+            category: 'SPOTLIGHT SUBMISSION',
+            title: 'ATLAS Tutorial',
+            description:
+                'Watch this YouTube tutorial to learn how to use ATLAS, made by Mineluke (@mineluke)!',
+            buttonLabel: 'Watch Video',
+            buttonUrl: 'https://www.youtube.com/watch?v=C3pRAjzELzI',
+            imageFit: BoxFit.contain,
           ),
         ],
       ),

@@ -22981,6 +22981,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       hero.image,
       fallbackAsset: 'assets/images/missingasset.webp',
     );
+    final contentBottomInset = hero.hasButton ? 28.0 : 52.0;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
@@ -23000,33 +23001,26 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               ),
             ),
           ),
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.centerLeft,
-                  end: Alignment.centerRight,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.56),
-                    Colors.black.withValues(alpha: 0.18),
-                  ],
-                ),
-              ),
-            ),
-          ),
           Positioned(
             left: 30,
             right: 30,
-            bottom: 28,
+            bottom: contentBottomInset,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   hero.title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 49,
                     fontWeight: FontWeight.w800,
                     color: Colors.white,
+                    shadows: [
+                      Shadow(
+                        color: Colors.black.withValues(alpha: 0.42),
+                        blurRadius: 18,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
                   ),
                 ),
                 if (hero.category.isNotEmpty) ...[
@@ -23037,6 +23031,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       color: Colors.white.withValues(alpha: 0.86),
                       fontWeight: FontWeight.w700,
                       letterSpacing: 0.6,
+                      shadows: [
+                        Shadow(
+                          color: Colors.black.withValues(alpha: 0.40),
+                          blurRadius: 12,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -23048,6 +23049,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       color: Colors.white.withValues(alpha: 0.88),
                       fontSize: 15,
                       height: 1.35,
+                      shadows: [
+                        Shadow(
+                          color: Colors.black.withValues(alpha: 0.42),
+                          blurRadius: 12,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                   ),
                 ],

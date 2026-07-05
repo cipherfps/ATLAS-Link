@@ -12,8 +12,8 @@
         "category": "LAUNCHER",
         "title": "ATLAS",
         "description": "ATLAS is the new era of OGFN. Built with a clean UI and user experience. Enjoy your stay.",
-        "buttonLabel": "",
-        "buttonUrl": ""
+        "buttonLabel": "Open ATLAS Link GitHub",
+        "buttonUrl": "https://github.com/cipherfps/ATLAS-Link"
       },
       {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",
@@ -23,6 +23,15 @@
         "description": "Join the ATLAS discord for more resources, news and updates!",
         "buttonLabel": "Join ATLAS Discord",
         "buttonUrl": "https://discord.gg/GqgakxU6bm"
+      },
+      {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/atlas_apps.png",
+        "imageFit": "contain",
+        "category": "SPOTLIGHT SUBMISSION",
+        "title": "ATLAS Tutorial",
+        "description": "Watch this YouTube tutorial to learn how to use ATLAS, made by Mineluke (@mineluke)!",
+        "buttonLabel": "Watch Video",
+        "buttonUrl": "https://www.youtube.com/watch?v=C3pRAjzELzI"
       }
     ],
     "cards": []
