@@ -19,6 +19,7 @@ import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:media_kit/media_kit.dart' as media_kit;
 import 'package:media_kit_video/media_kit_video.dart' as media_kit_video;
+import 'package:video_player/video_player.dart';
 import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
@@ -349,7 +350,12 @@ class AtlasLauncherApp extends StatelessWidget {
         style: TextButton.styleFrom(foregroundColor: accentBlue),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(foregroundColor: accentBlue),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: accentBlue,
+          side: BorderSide(
+            color: const Color(0xFFE9F1FF).withValues(alpha: 0.14),
+          ),
+        ),
       ),
       textTheme: const TextTheme(
         headlineLarge: TextStyle(
@@ -508,6 +514,10 @@ enum SettingsSection {
   support,
 }
 
+enum NavigationBarLocation { top, left, right }
+
+enum PanelGlassStyle { frosted, soft, solid }
+
 enum GameServerInjectType { custom }
 
 enum _GameActionState { idle, launching, closing }
@@ -525,6 +535,133 @@ const List<BackendConnectionType> _backendConnectionTypeDropdownOrder = [
   BackendConnectionType.remote,
   BackendConnectionType.embedded,
 ];
+
+const List<NavigationBarLocation> _navigationBarLocationDropdownOrder = [
+  NavigationBarLocation.top,
+  NavigationBarLocation.left,
+  NavigationBarLocation.right,
+];
+
+const List<PanelGlassStyle> _panelGlassStyleDropdownOrder = [
+  PanelGlassStyle.frosted,
+  PanelGlassStyle.soft,
+  PanelGlassStyle.solid,
+];
+
+const String _defaultBackgroundImageAsset =
+    'assets/images/atlas_default_background.webp';
+const String _defaultBackgroundVideoAsset =
+    'assets/images/atlas_default_video_background.mp4';
+const String _defaultBackgroundVideoSource =
+    'asset:///$_defaultBackgroundVideoAsset';
+
+const int _defaultPanelGlassColorValue = 0xFF081225;
+
+const Set<String> _backgroundImageExtensions = <String>{
+  '.bmp',
+  '.gif',
+  '.jpeg',
+  '.jpg',
+  '.png',
+  '.webp',
+};
+
+const Set<String> _backgroundVideoExtensions = <String>{
+  '.avi',
+  '.m4v',
+  '.mkv',
+  '.mov',
+  '.mp4',
+  '.webm',
+};
+
+const List<String> _backgroundMediaPickerExtensions = <String>[
+  'bmp',
+  'gif',
+  'jpeg',
+  'jpg',
+  'png',
+  'webp',
+  'avi',
+  'm4v',
+  'mkv',
+  'mov',
+  'mp4',
+  'webm',
+];
+
+String _lowerFileExtension(String path) {
+  final normalized = path.trim().replaceAll('\\', '/');
+  final slash = normalized.lastIndexOf('/');
+  final dot = normalized.lastIndexOf('.');
+  if (dot <= slash || dot == -1) return '';
+  return normalized.substring(dot).toLowerCase();
+}
+
+bool _isSupportedBackgroundImagePath(String path) =>
+    _backgroundImageExtensions.contains(_lowerFileExtension(path));
+
+bool _isSupportedBackgroundVideoPath(String path) =>
+    _backgroundVideoExtensions.contains(_lowerFileExtension(path));
+
+String _colorValueToHex(int value) {
+  final rgb = value & 0xFFFFFF;
+  return '#${rgb.toRadixString(16).padLeft(6, '0').toUpperCase()}';
+}
+
+int? _tryParseHexColorValue(String value) {
+  var raw = value.trim();
+  if (raw.isEmpty) return null;
+  raw = raw
+      .replaceFirst(RegExp(r'^#'), '')
+      .replaceFirst(RegExp(r'^0x', caseSensitive: false), '');
+  if (raw.length == 3) {
+    raw = raw.split('').map((char) => '$char$char').join();
+  }
+  if (raw.length == 6) raw = 'FF$raw';
+  if (raw.length != 8) return null;
+  final parsed = int.tryParse(raw, radix: 16);
+  if (parsed == null) return null;
+  return 0xFF000000 | (parsed & 0xFFFFFF);
+}
+
+int _colorValueRed(int value) => (value >> 16) & 0xFF;
+int _colorValueGreen(int value) => (value >> 8) & 0xFF;
+int _colorValueBlue(int value) => value & 0xFF;
+
+int _rgbColorValue({required int red, required int green, required int blue}) {
+  return 0xFF000000 |
+      (red.clamp(0, 255).toInt() << 16) |
+      (green.clamp(0, 255).toInt() << 8) |
+      blue.clamp(0, 255).toInt();
+}
+
+double _atlasSliderMarkerCenterX({
+  required double width,
+  required double value,
+  required double minValue,
+  required double maxValue,
+}) {
+  if (maxValue <= minValue || width <= 0) return 0;
+  final normalized = ((value - minValue) / (maxValue - minValue))
+      .clamp(0.0, 1.0)
+      .toDouble();
+  const horizontalInset = 24.0;
+  const roundedTrackHeight = 4.0;
+  final trackWidth = width - (horizontalInset * 2);
+  if (trackWidth <= 0) return width * normalized;
+  return horizontalInset +
+      (roundedTrackHeight / 2) +
+      ((trackWidth - roundedTrackHeight).clamp(0.0, double.infinity) *
+          normalized);
+}
+
+Color _foregroundForColorValue(int value) {
+  final color = Color(0xFF000000 | (value & 0xFFFFFF));
+  return ThemeData.estimateBrightnessForColor(color) == Brightness.dark
+      ? Colors.white
+      : const Color(0xFF081225);
+}
 
 class BackendProxyRouting {
   static const String defaultBackendHost = '127.0.0.1';
@@ -573,6 +710,32 @@ extension _BackendConnectionTypeLabel on BackendConnectionType {
         return 'Embedded';
       case BackendConnectionType.remote:
         return 'Remote';
+    }
+  }
+}
+
+extension _NavigationBarLocationLabel on NavigationBarLocation {
+  String get label {
+    switch (this) {
+      case NavigationBarLocation.top:
+        return 'Top';
+      case NavigationBarLocation.left:
+        return 'Left';
+      case NavigationBarLocation.right:
+        return 'Right';
+    }
+  }
+}
+
+extension _PanelGlassStyleLabel on PanelGlassStyle {
+  String get label {
+    switch (this) {
+      case PanelGlassStyle.frosted:
+        return 'Frosted';
+      case PanelGlassStyle.soft:
+        return 'Soft';
+      case PanelGlassStyle.solid:
+        return 'Solid';
     }
   }
 }
@@ -1076,8 +1239,6 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _backgroundMotionPaused = false;
   bool _backgroundMotionPauseQueued = false;
   bool _windowResizeBlurPaused = false;
-  final ValueNotifier<bool> _windowResizeBlurPausedNotifier =
-      ValueNotifier<bool>(false);
   _GameActionState _gameAction = _GameActionState.idle;
   bool _gameServerLaunching = false;
   // When the game server is started from the "start game server?" prompt during
@@ -1218,6 +1379,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _mesh = MeshController(logger: (message) => _log('tailscale', message));
+    _mesh.addListener(_handleMeshChanged);
     _appExitListener = AppLifecycleListener(
       onExitRequested: _handleAppExitRequest,
     );
@@ -1247,6 +1409,11 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     unawaited(_bootstrap());
     _startHomeHeroAutoRotate();
+  }
+
+  void _handleMeshChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   /// Blocks the window close button while a mod download is running so it isn't
@@ -1293,7 +1460,6 @@ class _LauncherScreenState extends State<LauncherScreen>
     _flushLogBuffer();
     _shellEntranceController.dispose();
     _libraryActionsNudgeController.dispose();
-    _windowResizeBlurPausedNotifier.dispose();
     _usernameController.dispose();
     _profileAuthEmailController.dispose();
     _profileAuthPasswordController.dispose();
@@ -1306,6 +1472,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _savedBackendSearchController.dispose();
     _modsSearchController.dispose();
     _meshSearchController.dispose();
+    _mesh.removeListener(_handleMeshChanged);
     _mesh.dispose();
     _libraryScrollController.dispose();
     _modsScrollController.dispose();
@@ -1547,10 +1714,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         _checkForBundledDllDefaultUpdates(silent: true, forceRefresh: true),
       );
     } catch (error) {
-      _log(
-        'settings',
-        'Failed to auto-update bundled default DLLs after launch: $error',
-      );
+      _log('settings', 'Failed to auto-update DLLs after launch: $error');
     }
     // "Update Files on Launch" also keeps installed Paks and library DLLs in
     // sync with the catalog.
@@ -1617,7 +1781,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _bundledDllLaunchToastQueued = false;
     if (updatedCount <= 0) return;
     _toast(
-      'Updated $updatedCount Default DLL${updatedCount == 1 ? '' : 's'} on Launch',
+      'Updated $updatedCount DLL${updatedCount == 1 ? '' : 's'} on launch',
     );
   }
 
@@ -1736,14 +1900,12 @@ class _LauncherScreenState extends State<LauncherScreen>
     );
     if (!_windowResizeBlurPaused) {
       _windowResizeBlurPaused = true;
-      _windowResizeBlurPausedNotifier.value = true;
     }
 
     _windowResizeBlurResumeTimer = Timer(_windowResizeBlurResumeDelay, () {
       _windowResizeBlurResumeTimer = null;
       if (!_windowResizeBlurPaused) return;
       _windowResizeBlurPaused = false;
-      _windowResizeBlurPausedNotifier.value = false;
     });
   }
 
@@ -3041,7 +3203,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
       if (remoteAssets.isEmpty) {
         if (!silent && mounted) {
-          _toast('Unable to check default DLL updates right now');
+          _toast('Unable to check for DLL updates right now');
         }
         return;
       }
@@ -3082,15 +3244,15 @@ class _LauncherScreenState extends State<LauncherScreen>
 
       if (!silent && mounted) {
         if (updatedFiles.isEmpty) {
-          _toast('Default DLLs are up to date');
+          _toast('DLLs are up to date');
         } else {
-          _toast('New Default DLL updates are available');
+          _toast('New DLL updates are available');
         }
       }
     } catch (error) {
-      _log('settings', 'Failed to check for bundled DLL updates: $error');
+      _log('settings', 'Failed to check for DLL updates: $error');
       if (!silent && mounted) {
-        _toast('Unable to check default DLL updates right now');
+        _toast('Unable to check DLL updates right now');
       }
     } finally {
       _checkingBundledDllDefaultsUpdate = false;
@@ -6585,10 +6747,7 @@ class _LauncherScreenState extends State<LauncherScreen>
         await _ensureBundledDllPresetSeeds();
       }
     } catch (error) {
-      _log(
-        'settings',
-        'Failed to auto-refresh bundled default DLL assets on launch: $error',
-      );
+      _log('settings', 'Failed to auto-refresh DLL assets on launch: $error');
     }
     return updatedCount;
   }
@@ -12704,7 +12863,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                               style: OutlinedButton.styleFrom(
                                 shape: const StadiumBorder(),
                                 side: BorderSide(
-                                  color: _onSurface(dialogContext, 0.26),
+                                  color: _onSurface(dialogContext, 0.14),
                                 ),
                                 foregroundColor: _onSurface(
                                   dialogContext,
@@ -14394,13 +14553,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     } catch (_) {
       // Non-fatal — the page just shows without the logo.
     }
-    final result = await DiscordGate(
-      logger: (m) => debugPrint('[discord-gate] $m'),
-    ).login(
-      gateUrl: _mesh.gateUrl,
-      openUrl: (uri) => _openUrl(uri.toString()),
-      logoDataUri: logoDataUri,
-    );
+    final result =
+        await DiscordGate(logger: (m) => debugPrint('[discord-gate] $m')).login(
+          gateUrl: _mesh.gateUrl,
+          openUrl: (uri) => _openUrl(uri.toString()),
+          logoDataUri: logoDataUri,
+        );
     if (!result.ok) {
       _toast(_meshGateErrorMessage(result.error));
       return false;
@@ -17709,12 +17867,398 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   Future<void> _pickBackground() async {
     final picked = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      dialogTitle: 'Select background image',
+      type: FileType.custom,
+      allowedExtensions: _backgroundMediaPickerExtensions,
+      dialogTitle: 'Select background image or video',
     );
     final path = picked?.files.single.path;
     if (path == null || path.isEmpty) return;
     setState(() => _settings = _settings.copyWith(backgroundImagePath: path));
+    await _saveSettings(toast: false);
+  }
+
+  ButtonStyle _hoverOutlineIconButtonStyle() {
+    return ButtonStyle(
+      foregroundColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return _onSurface(context, 0.34);
+        }
+        return _onSurface(context, 0.90);
+      }),
+      backgroundColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.focused) ||
+            states.contains(WidgetState.pressed)) {
+          return _onSurface(context, 0.06);
+        }
+        return Colors.transparent;
+      }),
+      overlayColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.pressed)) {
+          return _onSurface(context, 0.10);
+        }
+        if (states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.focused)) {
+          return _onSurface(context, 0.06);
+        }
+        return Colors.transparent;
+      }),
+      side: WidgetStateProperty.resolveWith((states) {
+        final active =
+            states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.focused) ||
+            states.contains(WidgetState.pressed);
+        return BorderSide(
+          color: active ? _onSurface(context, 0.18) : Colors.transparent,
+        );
+      }),
+      shape: const WidgetStatePropertyAll(CircleBorder()),
+    );
+  }
+
+  double _softButtonOutlineAlpha({bool enabled = true}) {
+    if (_settings.panelGlassStyle == PanelGlassStyle.frosted) {
+      return enabled ? 0.22 : 0.14;
+    }
+    return enabled ? 0.14 : 0.10;
+  }
+
+  ButtonStyle _frostedAwareOutlinedButtonStyle({
+    OutlinedBorder shape = const StadiumBorder(),
+    EdgeInsetsGeometry? padding,
+    Size? minimumSize,
+    Size? maximumSize,
+    MaterialTapTargetSize? tapTargetSize,
+    Color? outlineColor,
+    double outlineWidth = 1,
+  }) {
+    final frosted = _settings.panelGlassStyle == PanelGlassStyle.frosted;
+    return OutlinedButton.styleFrom(
+      foregroundColor: Theme.of(context).colorScheme.secondary,
+      backgroundColor: frosted
+          ? _onSurface(context, 0.035)
+          : Colors.transparent,
+      disabledBackgroundColor: frosted
+          ? _onSurface(context, 0.025)
+          : Colors.transparent,
+      side: BorderSide(
+        color: outlineColor ?? _onSurface(context, _softButtonOutlineAlpha()),
+        width: outlineWidth,
+      ),
+      shape: shape,
+      padding: padding,
+      minimumSize: minimumSize,
+      maximumSize: maximumSize,
+      tapTargetSize: tapTargetSize,
+    );
+  }
+
+  Widget _panelGlassColorButton() {
+    final enabled = _settings.panelGlassStyle != PanelGlassStyle.frosted;
+    return Tooltip(
+      message: enabled
+          ? 'Choose glass color'
+          : 'Glass color applies to Soft and Solid',
+      child: SizedBox(
+        width: 42,
+        height: 42,
+        child: IconButton(
+          onPressed: enabled
+              ? () => unawaited(_showPanelGlassColorPicker())
+              : null,
+          icon: const Icon(Icons.brush_rounded, size: 20),
+          style: _hoverOutlineIconButtonStyle(),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showPanelGlassColorPicker() async {
+    if (!mounted) return;
+    final controller = TextEditingController(
+      text: _colorValueToHex(_settings.panelGlassColorValue),
+    );
+    var currentValue = _settings.panelGlassColorValue;
+    String? hexError;
+
+    final selectedValue = await showDialog<int>(
+      context: context,
+      barrierColor: _dialogBarrierColor(context, 1.0),
+      builder: (dialogContext) {
+        final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+        const swatches = <int>[
+          _defaultPanelGlassColorValue,
+          0xFF101722,
+          0xFF152238,
+          0xFF1A2440,
+          0xFF132C2F,
+          0xFF24153A,
+          0xFF2A1E38,
+          0xFF20242F,
+          0xFF0B1020,
+          0xFF243A54,
+        ];
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void setColorValue(int value) {
+              final normalized = 0xFF000000 | (value & 0xFFFFFF);
+              final hex = _colorValueToHex(normalized);
+              setDialogState(() {
+                currentValue = normalized;
+                hexError = null;
+                controller.value = TextEditingValue(
+                  text: hex,
+                  selection: TextSelection.collapsed(offset: hex.length),
+                );
+              });
+            }
+
+            Widget rgbSlider({
+              required String label,
+              required int value,
+              required ValueChanged<int> onChanged,
+            }) {
+              return Row(
+                children: [
+                  SizedBox(
+                    width: 18,
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: onSurface.withValues(alpha: 0.78),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: value.toDouble(),
+                      min: 0,
+                      max: 255,
+                      divisions: 255,
+                      label: value.toString(),
+                      onChanged: (next) => onChanged(next.round()),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 34,
+                    child: Text(
+                      value.toString().padLeft(3, '0'),
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        color: onSurface.withValues(alpha: 0.72),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            }
+
+            final red = _colorValueRed(currentValue);
+            final green = _colorValueGreen(currentValue);
+            final blue = _colorValueBlue(currentValue);
+            final previewColor = Color(currentValue);
+
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: 24,
+              ),
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 460),
+                padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(dialogContext),
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: _onSurface(dialogContext, 0.12)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _dialogShadowColor(dialogContext),
+                      blurRadius: 36,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        _dialogHeaderIconBadge(
+                          dialogContext,
+                          Icons.format_paint_rounded,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Glass Color',
+                            style: Theme.of(dialogContext)
+                                .textTheme
+                                .headlineMedium
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Close',
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Container(
+                          width: 58,
+                          height: 58,
+                          decoration: BoxDecoration(
+                            color: previewColor,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: _onSurface(dialogContext, 0.18),
+                            ),
+                          ),
+                          child: Icon(
+                            Icons.check_rounded,
+                            color: _foregroundForColorValue(currentValue),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: TextField(
+                            controller: controller,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.allow(
+                                RegExp(r'[0-9a-fA-F#xX]'),
+                              ),
+                            ],
+                            decoration:
+                                _backendFieldDecoration(
+                                  hintText: '#081225',
+                                ).copyWith(
+                                  labelText: 'Hex Color',
+                                  errorText: hexError,
+                                ),
+                            onChanged: (value) {
+                              final parsed = _tryParseHexColorValue(value);
+                              setDialogState(() {
+                                hexError = parsed == null
+                                    ? 'Use #RRGGBB'
+                                    : null;
+                                if (parsed != null) currentValue = parsed;
+                              });
+                            },
+                            onSubmitted: (value) {
+                              final parsed = _tryParseHexColorValue(value);
+                              if (parsed != null) setColorValue(parsed);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final swatch in swatches)
+                          Tooltip(
+                            message: _colorValueToHex(swatch),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () => setColorValue(swatch),
+                              child: Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: Color(swatch),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: currentValue == swatch
+                                        ? Theme.of(
+                                            dialogContext,
+                                          ).colorScheme.secondary
+                                        : _onSurface(dialogContext, 0.18),
+                                    width: currentValue == swatch ? 2 : 1,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    rgbSlider(
+                      label: 'R',
+                      value: red,
+                      onChanged: (value) => setColorValue(
+                        _rgbColorValue(red: value, green: green, blue: blue),
+                      ),
+                    ),
+                    rgbSlider(
+                      label: 'G',
+                      value: green,
+                      onChanged: (value) => setColorValue(
+                        _rgbColorValue(red: red, green: value, blue: blue),
+                      ),
+                    ),
+                    rgbSlider(
+                      label: 'B',
+                      value: blue,
+                      onChanged: (value) => setColorValue(
+                        _rgbColorValue(red: red, green: green, blue: value),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        _dialogCancelButton(
+                          dialogContext,
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                        ),
+                        const Spacer(),
+                        _dialogOutlinedButton(
+                          dialogContext,
+                          onPressed: () =>
+                              setColorValue(_defaultPanelGlassColorValue),
+                          child: const Text('Reset'),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          onPressed: hexError == null
+                              ? () => Navigator.of(
+                                  dialogContext,
+                                ).pop(currentValue)
+                              : null,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Theme.of(
+                              dialogContext,
+                            ).colorScheme.secondary.withValues(alpha: 0.92),
+                            foregroundColor: Colors.white,
+                            shape: const StadiumBorder(),
+                          ),
+                          child: const Text('Apply'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    controller.dispose();
+    if (selectedValue == null || !mounted) return;
+    setState(() {
+      _settings = _settings.copyWith(panelGlassColorValue: selectedValue);
+    });
     await _saveSettings(toast: false);
   }
 
@@ -18181,12 +18725,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       await _ensureBundledDllPresetSeeds();
       await _checkForBundledDllDefaultUpdates(silent: true);
       if (mounted) {
-        _toast('Default DLL update completed');
+        _toast('DLL update completed');
       }
     } catch (error) {
-      _log('settings', 'Failed to update all default DLLs: $error');
+      _log('settings', 'Failed to update all DLLs: $error');
       if (mounted) {
-        _toast('Failed to update all default DLLs');
+        _toast('Failed to update all DLLs');
       }
     } finally {
       if (mounted) {
@@ -18446,7 +18990,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                   lightAlpha: 0.18,
                                 ),
                                 side: BorderSide(
-                                  color: onSurface.withValues(alpha: 0.18),
+                                  color: onSurface.withValues(alpha: 0.14),
                                 ),
                               ),
                             ),
@@ -19623,11 +20167,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     // `&` as a command separator, which silently truncates URLs that carry
     // query params (e.g. the Discord gate's `?port=…&state=…`). rundll32 takes
     // the URL as a single argument with no shell parsing, so `&` is preserved.
-    await Process.start(
-      'rundll32',
-      ['url.dll,FileProtocolHandler', url],
-      runInShell: false,
-    );
+    await Process.start('rundll32', [
+      'url.dll,FileProtocolHandler',
+      url,
+    ], runInShell: false);
   }
 
   void _toast(String message) {
@@ -19710,11 +20253,22 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   }
 
   ImageProvider<Object> _backgroundImage() {
-    final selected = _settings.backgroundImagePath;
-    if (selected.isNotEmpty && File(selected).existsSync()) {
+    final selected = _settings.backgroundImagePath.trim();
+    if (selected.isNotEmpty &&
+        _isSupportedBackgroundImagePath(selected) &&
+        File(selected).existsSync()) {
       return FileImage(File(selected));
     }
-    return const AssetImage('assets/images/atlas_default_background.webp');
+    return const AssetImage(_defaultBackgroundImageAsset);
+  }
+
+  String? _backgroundVideoSource() {
+    final selected = _settings.backgroundImagePath.trim();
+    if (selected.isEmpty) return _defaultBackgroundVideoSource;
+    if (!_isSupportedBackgroundVideoPath(selected)) return null;
+    final file = File(selected);
+    if (!file.existsSync()) return null;
+    return file.uri.toString();
   }
 
   ImageProvider<Object> _profileImage() {
@@ -19876,20 +20430,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           Positioned.fill(
             child: Builder(
               builder: (context) {
-                // Until settings are loaded (and the resolved background image
-                // is precached in _bootstrap), paint only the opaque base color.
-                // This avoids flashing the bundled default background and then a
-                // black gap while the user's custom image decodes from disk.
-                final background = DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0A0E14),
-                    image: _startupConfigResolved
-                        ? DecorationImage(
-                            image: _backgroundImage(),
-                            fit: BoxFit.cover,
-                          )
-                        : null,
-                  ),
+                // Until settings are loaded, paint only the opaque base color.
+                // Once ready, the fallback image is always present; a selected
+                // or default video fades in above it only after it initializes.
+                final background = _AtlasBackgroundMedia(
+                  enabled: _startupConfigResolved,
+                  fallbackImage: _backgroundImage(),
+                  videoSource: _backgroundVideoSource(),
+                  onStatus: (message) => _log('background', message),
                 );
                 if (blurSigma <= 0.01) return background;
                 return ImageFiltered(
@@ -19954,39 +20502,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   scale: _shellEntranceScale,
                   child: SafeArea(
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(22, 8, 22, 18),
+                      padding: _shellPadding(),
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           final compact = constraints.maxWidth < 1080;
-                          return Column(
-                            children: [
-                              _shellHeader(
-                                compact,
-                                suppressLibraryQuickTipOverlayTargets:
-                                    _showLibraryQuickTipBackdrop &&
-                                    !_libraryImportTipFadingOut,
-                              ),
-                              const SizedBox(height: 18),
-                              Expanded(
-                                child: NotificationListener<ScrollNotification>(
-                                  onNotification: (notification) {
-                                    final userScrollStart =
-                                        notification
-                                            is ScrollStartNotification &&
-                                        notification.dragDetails != null;
-                                    final userScrollUpdate =
-                                        notification
-                                            is ScrollUpdateNotification &&
-                                        notification.dragDetails != null;
-                                    if (userScrollStart || userScrollUpdate) {
-                                      _pauseBackgroundMotionBriefly();
-                                    }
-                                    return false;
-                                  },
-                                  child: RepaintBoundary(child: _tabContent()),
-                                ),
-                              ),
-                            ],
+                          return _shellLayout(
+                            compact: compact,
+                            suppressLibraryQuickTipOverlayTargets:
+                                _showLibraryQuickTipBackdrop &&
+                                !_libraryImportTipFadingOut,
                           );
                         },
                       ),
@@ -20185,24 +20709,182 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  EdgeInsets _shellPadding() {
+    return switch (_settings.navigationBarLocation) {
+      NavigationBarLocation.top => const EdgeInsets.fromLTRB(22, 8, 22, 18),
+      NavigationBarLocation.left => const EdgeInsets.fromLTRB(22, 8, 22, 18),
+      NavigationBarLocation.right => const EdgeInsets.fromLTRB(22, 8, 22, 18),
+    };
+  }
+
+  Widget _shellLayout({
+    required bool compact,
+    bool suppressLibraryQuickTipOverlayTargets = false,
+  }) {
+    final navLocation = _settings.navigationBarLocation;
+    if (navLocation == NavigationBarLocation.top) {
+      return Column(
+        children: [
+          _shellHeader(
+            compact,
+            suppressLibraryQuickTipOverlayTargets:
+                suppressLibraryQuickTipOverlayTargets,
+          ),
+          const SizedBox(height: 18),
+          Expanded(child: _shellContent()),
+        ],
+      );
+    }
+
+    final content = Expanded(
+      child: Column(
+        children: [
+          _shellHeader(
+            compact,
+            includeNavigation: false,
+            showBuildLabel: false,
+            suppressLibraryQuickTipOverlayTargets:
+                suppressLibraryQuickTipOverlayTargets,
+          ),
+          const SizedBox(height: 18),
+          Expanded(child: _shellContent()),
+        ],
+      ),
+    );
+    final sideNav = _sideNavigationBar();
+    const sideNavGap = 18.0;
+    final children = navLocation == NavigationBarLocation.left
+        ? <Widget>[sideNav, const SizedBox(width: sideNavGap), content]
+        : <Widget>[content, const SizedBox(width: sideNavGap), sideNav];
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
+  }
+
+  Widget _shellSideBuildLabel() {
+    final cleanedLabel = _launcherBuildLabel.trim();
+    final firstSpace = cleanedLabel.indexOf(' ');
+    final channel = firstSpace < 0
+        ? cleanedLabel
+        : cleanedLabel.substring(0, firstSpace);
+    final version = firstSpace < 0
+        ? ''
+        : cleanedLabel.substring(firstSpace + 1).trim();
+    final shadow = Shadow(
+      color: _adaptiveScrimColor(context, darkAlpha: 0.42, lightAlpha: 0.18),
+      blurRadius: 8,
+    );
+
+    TextStyle labelStyle(double opacity) {
+      return TextStyle(
+        fontSize: 11,
+        height: 1.05,
+        fontWeight: FontWeight.w800,
+        color: _onSurface(context, opacity),
+        shadows: [shadow],
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          channel,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: labelStyle(0.72),
+        ),
+        if (version.isNotEmpty)
+          Text(
+            version,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: labelStyle(0.68),
+          ),
+      ],
+    );
+  }
+
+  Widget _shellContent() {
+    return NotificationListener<ScrollNotification>(
+      onNotification: (notification) {
+        final userScrollStart =
+            notification is ScrollStartNotification &&
+            notification.dragDetails != null;
+        final userScrollUpdate =
+            notification is ScrollUpdateNotification &&
+            notification.dragDetails != null;
+        if (userScrollStart || userScrollUpdate) {
+          _pauseBackgroundMotionBriefly();
+        }
+        return false;
+      },
+      child: RepaintBoundary(child: _tabContent()),
+    );
+  }
+
+  Widget _sideNavigationBar() {
+    const sideNavWidth = 88.0;
+    const sideNavTopGutter = 10.0;
+    return SizedBox(
+      width: sideNavWidth,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final availableHeight = max(
+            0.0,
+            constraints.maxHeight - sideNavTopGutter,
+          );
+          return Align(
+            alignment: Alignment.bottomCenter,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: constraints.maxHeight),
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(
+                  context,
+                ).copyWith(scrollbars: false),
+                child: SingleChildScrollView(
+                  primary: false,
+                  child: SizedBox(
+                    height: availableHeight,
+                    child: _tabCapsule(axis: Axis.vertical, fillMainAxis: true),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _shellHeader(
     bool compact, {
+    bool includeNavigation = true,
+    bool showBuildLabel = true,
     bool suppressLibraryQuickTipOverlayTargets = false,
   }) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          _launcherBuildLabel,
-          style: TextStyle(
-            fontSize: 15,
-            color: _onSurface(context, 0.86),
-            fontWeight: FontWeight.w500,
+        Opacity(
+          opacity: showBuildLabel ? 1 : 0,
+          child: Text(
+            _launcherBuildLabel,
+            style: TextStyle(
+              fontSize: 15,
+              color: _onSurface(context, 0.86),
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
         const SizedBox(height: 10),
         _topBar(
           compact,
+          includeNavigation: includeNavigation,
           suppressLibraryQuickTipOverlayTargets:
               suppressLibraryQuickTipOverlayTargets,
         ),
@@ -20420,6 +21102,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
 
   Widget _topBar(
     bool compact, {
+    bool includeNavigation = true,
     bool suppressLibraryQuickTipOverlayTargets = false,
     bool libraryQuickTipOverlayOnly = false,
   }) {
@@ -20513,7 +21196,8 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final showOtherRightControls = !libraryQuickTipOverlayOnly;
     final showLeft = !libraryQuickTipOverlayOnly;
     final showNav =
-        !suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly;
+        includeNavigation &&
+        (!suppressLibraryQuickTipOverlayTargets || libraryQuickTipOverlayOnly);
     final right = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -20556,52 +21240,61 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
 
     final nav = _tabCapsule();
+    final leftSlot = showLeft
+        ? Align(
+            alignment: Alignment.centerLeft,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: leftTitle,
+            ),
+          )
+        : const SizedBox.shrink();
+    final rightSlot = right.children.isNotEmpty
+        ? Align(
+            alignment: Alignment.centerRight,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: right,
+            ),
+          )
+        : const SizedBox.shrink();
+
+    if (!showNav) {
+      return SizedBox(
+        height: compact ? 64 : 72,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: leftSlot),
+            const SizedBox(width: 12),
+            Flexible(child: rightSlot),
+          ],
+        ),
+      );
+    }
+
     return SizedBox(
       height: compact ? 64 : 72,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Expanded(
-            flex: 3,
-            child: showLeft
-                ? Align(
-                    alignment: Alignment.centerLeft,
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerLeft,
-                      child: leftTitle,
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
+          Expanded(flex: 3, child: leftSlot),
           const SizedBox(width: 12),
           Expanded(
             flex: 4,
-            child: showNav
-                ? Align(
-                    alignment: Alignment.center,
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.center,
-                      child: nav,
-                    ),
-                  )
-                : const SizedBox.shrink(),
+            child: Align(
+              alignment: Alignment.center,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.center,
+                child: nav,
+              ),
+            ),
           ),
           const SizedBox(width: 12),
-          Expanded(
-            flex: 3,
-            child: right.children.isNotEmpty
-                ? Align(
-                    alignment: Alignment.centerRight,
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerRight,
-                      child: right,
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
+          Expanded(flex: 3, child: rightSlot),
         ],
       ),
     );
@@ -21290,15 +21983,29 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: onTap,
-        child: Container(
-          width: 58,
-          height: 58,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: _onSurface(context, 0.18)),
-            color: _onSurface(context, 0.11),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(
+              sigmaX: _glassBlurSigma(_settings.panelGlassStyle),
+              sigmaY: _glassBlurSigma(_settings.panelGlassStyle),
+            ),
+            child: Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: _onSurface(context, 0.18)),
+                color: _glassSurfaceColor(
+                  context,
+                  _settings.panelGlassStyle,
+                  Color(_settings.panelGlassColorValue),
+                  _settings.panelGlassOpacity,
+                ),
+              ),
+              child: Icon(icon, color: _onSurface(context, 0.92)),
+            ),
           ),
-          child: Icon(icon, color: _onSurface(context, 0.92)),
         ),
       ),
     );
@@ -21320,9 +22027,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
-  Widget _dialogCancelButton(
+  Widget _dialogOutlinedButton(
     BuildContext dialogContext, {
     required VoidCallback? onPressed,
+    required Widget child,
   }) {
     return OutlinedButton(
       onPressed: onPressed,
@@ -21331,6 +22039,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
         side: BorderSide(color: _onSurface(dialogContext, 0.14)),
       ),
+      child: child,
+    );
+  }
+
+  Widget _dialogCancelButton(
+    BuildContext dialogContext, {
+    required VoidCallback? onPressed,
+  }) {
+    return _dialogOutlinedButton(
+      dialogContext,
+      onPressed: onPressed,
       child: const Text('Cancel'),
     );
   }
@@ -21576,7 +22295,12 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
-  Widget _tabCapsule() {
+  Widget _tabCapsule({
+    Axis axis = Axis.horizontal,
+    bool fillMainAxis = false,
+    NavigationBarLocation? connectedEdge,
+  }) {
+    final vertical = axis == Axis.vertical;
     final secondary = Theme.of(context).colorScheme.secondary;
     final dark = _isDarkTheme(context);
     final selectedBackground = dark
@@ -21664,7 +22388,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final selectedTabIndex = navItems.indexWhere((item) => item.selected);
     final computedTabWidth =
         (620.0 - ((navItems.length - 1) * navTabGap)) / max(navItems.length, 1);
-    final navTabWidth = computedTabWidth.clamp(58.0, 74.0).toDouble();
+    final navTabWidth = vertical
+        ? 72.0
+        : computedTabWidth.clamp(58.0, 74.0).toDouble();
+    final navTabHeight = vertical ? 58.0 : null;
 
     Widget navTabButton(
       ({
@@ -21690,8 +22417,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             curve: Curves.easeOutCubic,
-            constraints: BoxConstraints.tightFor(width: navTabWidth),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            constraints: BoxConstraints.tightFor(
+              width: navTabWidth,
+              height: navTabHeight,
+            ),
+            padding: vertical
+                ? const EdgeInsets.symmetric(horizontal: 7, vertical: 7)
+                : const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(navTabRadius),
               color: item.selected ? selectedBackground : Colors.transparent,
@@ -21734,7 +22466,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: vertical ? 11 : 12,
                     fontWeight: item.selected
                         ? FontWeight.w700
                         : FontWeight.w500,
@@ -21749,47 +22481,222 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     }
 
     final tabStrip = Stack(
-      alignment: Alignment.centerLeft,
+      alignment: vertical ? Alignment.topCenter : Alignment.centerLeft,
       children: [
         if (selectedTabIndex >= 0)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-            left: selectedTabIndex * (navTabWidth + navTabGap),
-            top: 0,
-            bottom: 0,
-            child: IgnorePointer(
-              child: Container(
-                width: navTabWidth,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(navTabRadius),
-                  border: Border.all(color: selectedOutlineColor, width: 1.4),
-                  boxShadow: [
-                    BoxShadow(
-                      color: selectedOutlineShadowColor,
-                      blurRadius: 18,
-                      spreadRadius: 0.4,
+          if (vertical)
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              left: 0,
+              right: 0,
+              top: selectedTabIndex * (navTabHeight! + navTabGap),
+              child: IgnorePointer(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: Container(
+                    width: navTabWidth,
+                    height: navTabHeight,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(navTabRadius),
+                      border: Border.all(
+                        color: selectedOutlineColor,
+                        width: 1.4,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: selectedOutlineShadowColor,
+                          blurRadius: 18,
+                          spreadRadius: 0.4,
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
+                ),
+              ),
+            )
+          else
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              left: selectedTabIndex * (navTabWidth + navTabGap),
+              top: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                child: Container(
+                  width: navTabWidth,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(navTabRadius),
+                    border: Border.all(color: selectedOutlineColor, width: 1.4),
+                    boxShadow: [
+                      BoxShadow(
+                        color: selectedOutlineShadowColor,
+                        blurRadius: 18,
+                        spreadRadius: 0.4,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (var i = 0; i < navItems.length; i++) ...[
-              if (i > 0) const SizedBox(width: navTabGap),
-              navTabButton(navItems[i]),
+        if (vertical)
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < navItems.length; i++) ...[
+                if (i > 0) const SizedBox(height: navTabGap),
+                navTabButton(navItems[i]),
+              ],
             ],
-          ],
-        ),
+          )
+        else
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < navItems.length; i++) ...[
+                if (i > 0) const SizedBox(width: navTabGap),
+                navTabButton(navItems[i]),
+              ],
+            ],
+          ),
       ],
     );
+
+    final aboutButton = Tooltip(
+      message: 'About ATLAS Link',
+      child: _HoverScale(
+        scale: 1.04,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          overlayColor: transparentOverlay,
+          splashFactory: NoSplash.splashFactory,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          onTap: () => unawaited(_showAboutDialog()),
+          child: SizedBox(
+            width: 40,
+            height: 40,
+            child: Image.asset('assets/images/atlas_logo.png'),
+          ),
+        ),
+      ),
+    );
+    final profileButton = Tooltip(
+      message: 'Profile',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        overlayColor: transparentOverlay,
+        splashFactory: NoSplash.splashFactory,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        hoverColor: Colors.transparent,
+        focusColor: Colors.transparent,
+        onTap: () => unawaited(
+          _switchMenu(
+            LauncherTab.general,
+            settingsSection: SettingsSection.profile,
+          ),
+        ),
+        child: _barProfileAvatar(radius: 17),
+      ),
+    );
+    final leadingDivider = vertical
+        ? Container(width: 28, height: 1, color: _onSurface(context, 0.18))
+        : Container(width: 1, height: 28, color: _onSurface(context, 0.18));
+    final trailingDivider = vertical
+        ? Container(width: 28, height: 1, color: _onSurface(context, 0.18))
+        : Container(width: 1, height: 28, color: _onSurface(context, 0.18));
+    final capsuleContent = vertical
+        ? LayoutBuilder(
+            builder: (context, constraints) {
+              final compactHeight =
+                  fillMainAxis && constraints.maxHeight.isFinite
+                  ? constraints.maxHeight < 550
+                  : false;
+              final topCluster = Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [aboutButton],
+              );
+              final sideBuildLabel = _shellSideBuildLabel();
+              final middleTabs = fillMainAxis && !compactHeight
+                  ? Center(child: tabStrip)
+                  : tabStrip;
+              final children = <Widget>[
+                topCluster,
+                const SizedBox(height: 8),
+                leadingDivider,
+                const SizedBox(height: 8),
+                sideBuildLabel,
+                const SizedBox(height: 10),
+                if (fillMainAxis && !compactHeight)
+                  Expanded(child: middleTabs)
+                else
+                  middleTabs,
+                const SizedBox(height: 8),
+                trailingDivider,
+                const SizedBox(height: 8),
+                profileButton,
+              ];
+
+              if (fillMainAxis && compactHeight) {
+                return ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(
+                    context,
+                  ).copyWith(scrollbars: false),
+                  child: SingleChildScrollView(
+                    primary: false,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: children,
+                    ),
+                  ),
+                );
+              }
+
+              return Column(
+                mainAxisSize: fillMainAxis
+                    ? MainAxisSize.max
+                    : MainAxisSize.min,
+                children: children,
+              );
+            },
+          )
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              aboutButton,
+              const SizedBox(width: 4),
+              leadingDivider,
+              const SizedBox(width: 4),
+              tabStrip,
+              const SizedBox(width: 4),
+              trailingDivider,
+              const SizedBox(width: 5),
+              profileButton,
+            ],
+          );
+
+    final capsuleRadius = switch (connectedEdge) {
+      NavigationBarLocation.left => const BorderRadius.only(
+        topRight: Radius.circular(30),
+        bottomRight: Radius.circular(30),
+      ),
+      NavigationBarLocation.right => const BorderRadius.only(
+        topLeft: Radius.circular(30),
+        bottomLeft: Radius.circular(30),
+      ),
+      _ => BorderRadius.circular(30),
+    };
+
     return ClipRRect(
-      borderRadius: BorderRadius.circular(30),
+      borderRadius: capsuleRadius,
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        filter: ImageFilter.blur(
+          sigmaX: _glassBlurSigma(_settings.panelGlassStyle),
+          sigmaY: _glassBlurSigma(_settings.panelGlassStyle),
+        ),
         child: Theme(
           data: Theme.of(context).copyWith(
             splashFactory: NoSplash.splashFactory,
@@ -21800,80 +22707,34 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           child: Material(
             type: MaterialType.transparency,
             child: Container(
-              constraints: const BoxConstraints(maxWidth: 760),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              height: vertical && fillMainAxis ? double.infinity : null,
+              constraints: vertical
+                  ? const BoxConstraints(maxWidth: 88)
+                  : const BoxConstraints(maxWidth: 760),
+              padding: vertical
+                  ? const EdgeInsets.symmetric(horizontal: 8, vertical: 12)
+                  : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(30),
-                color: _glassSurfaceColor(context),
+                borderRadius: capsuleRadius,
+                color: _glassSurfaceColor(
+                  context,
+                  _settings.panelGlassStyle,
+                  Color(_settings.panelGlassColorValue),
+                  _settings.panelGlassOpacity,
+                ),
                 border: Border.all(color: _onSurface(context, 0.12)),
                 boxShadow: [
                   BoxShadow(
-                    color: _glassShadowColor(context),
+                    color: _glassShadowColor(
+                      context,
+                      _settings.panelGlassStyle,
+                    ),
                     blurRadius: 26,
                     offset: const Offset(0, 10),
                   ),
                 ],
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Tooltip(
-                    message: 'About ATLAS Link',
-                    child: _HoverScale(
-                      scale: 1.04,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        overlayColor: transparentOverlay,
-                        splashFactory: NoSplash.splashFactory,
-                        splashColor: Colors.transparent,
-                        highlightColor: Colors.transparent,
-                        hoverColor: Colors.transparent,
-                        focusColor: Colors.transparent,
-                        onTap: () => unawaited(_showAboutDialog()),
-                        child: SizedBox(
-                          width: 40,
-                          height: 40,
-                          child: Image.asset('assets/images/atlas_logo.png'),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Container(
-                    width: 1,
-                    height: 28,
-                    color: _onSurface(context, 0.18),
-                  ),
-                  const SizedBox(width: 4),
-                  tabStrip,
-                  const SizedBox(width: 4),
-                  Container(
-                    width: 1,
-                    height: 28,
-                    color: _onSurface(context, 0.18),
-                  ),
-                  const SizedBox(width: 5),
-                  Tooltip(
-                    message: 'Profile',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(999),
-                      overlayColor: transparentOverlay,
-                      splashFactory: NoSplash.splashFactory,
-                      splashColor: Colors.transparent,
-                      highlightColor: Colors.transparent,
-                      hoverColor: Colors.transparent,
-                      focusColor: Colors.transparent,
-                      onTap: () => unawaited(
-                        _switchMenu(
-                          LauncherTab.general,
-                          settingsSection: SettingsSection.profile,
-                        ),
-                      ),
-                      child: _barProfileAvatar(radius: 17),
-                    ),
-                  ),
-                ],
-              ),
+              child: capsuleContent,
             ),
           ),
         ),
@@ -22036,74 +22897,76 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final hero = hasHero ? featured[heroIndex] : null;
     final menuKey = 'content-${page.id}';
 
-    return ListView(
-      children: [
-        _menuItemEntrance(
-          menuKey: menuKey,
-          index: 0,
-          child: hasHero && hero != null
-              ? _homeHeroBanner(
-                  page: page,
-                  hero: hero,
-                  heroIndex: heroIndex,
-                  heroCount: featured.length,
-                )
-              : _glass(
-                  child: Padding(
-                    padding: const EdgeInsets.all(28),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _launcherContentIcon(page.icon),
-                          size: 28,
-                          color: _onSurface(context, 0.86),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(
-                            'No content is configured for this tab yet.',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: _onSurface(context, 0.88),
-                            ),
-                          ),
-                        ),
-                      ],
+    final heroPanel = hasHero && hero != null
+        ? _homeHeroBanner(
+            page: page,
+            hero: hero,
+            heroIndex: heroIndex,
+            heroCount: featured.length,
+          )
+        : _glass(
+            child: Padding(
+              padding: const EdgeInsets.all(28),
+              child: Row(
+                children: [
+                  Icon(
+                    _launcherContentIcon(page.icon),
+                    size: 28,
+                    color: _onSurface(context, 0.86),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      'No content is configured for this tab yet.',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.88),
+                      ),
                     ),
                   ),
-                ),
-        ),
-        if (page.cards.isNotEmpty) ...[
-          const SizedBox(height: 24),
-          _menuItemEntrance(
-            menuKey: menuKey,
-            index: 1,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                const spacing = 18.0;
-                final compact = constraints.maxWidth < 920;
-                final cardWidth = compact
-                    ? constraints.maxWidth
-                    : ((constraints.maxWidth - spacing) / 2).clamp(
-                        280.0,
-                        constraints.maxWidth,
-                      );
-                return Wrap(
-                  spacing: spacing,
-                  runSpacing: spacing,
-                  children: [
-                    for (final card in page.cards)
-                      SizedBox(
-                        width: cardWidth,
-                        child: _launcherContentCard(card),
-                      ),
-                  ],
-                );
-              },
+                ],
+              ),
             ),
+          );
+
+    if (page.cards.isEmpty) {
+      return SizedBox.expand(
+        child: _menuItemEntrance(menuKey: menuKey, index: 0, child: heroPanel),
+      );
+    }
+
+    return ListView(
+      children: [
+        _menuItemEntrance(menuKey: menuKey, index: 0, child: heroPanel),
+        const SizedBox(height: 24),
+        _menuItemEntrance(
+          menuKey: menuKey,
+          index: 1,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              const spacing = 18.0;
+              final compact = constraints.maxWidth < 920;
+              final cardWidth = compact
+                  ? constraints.maxWidth
+                  : ((constraints.maxWidth - spacing) / 2).clamp(
+                      280.0,
+                      constraints.maxWidth,
+                    );
+              return Wrap(
+                spacing: spacing,
+                runSpacing: spacing,
+                children: [
+                  for (final card in page.cards)
+                    SizedBox(
+                      width: cardWidth,
+                      child: _launcherContentCard(card),
+                    ),
+                ],
+              );
+            },
           ),
-        ],
+        ),
       ],
     );
   }
@@ -22122,20 +22985,18 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: Stack(
+        fit: StackFit.expand,
         children: [
-          AspectRatio(
-            aspectRatio: 2.35,
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 360),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              child: Container(
-                key: ValueKey<String>('${page.id}:${hero.image}'),
-                color: Colors.black,
-                child: _launcherContentHeroImage(
-                  imageProvider: heroImage,
-                  fallbackAsset: 'assets/images/missingasset.webp',
-                ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 360),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            child: Container(
+              key: ValueKey<String>('${page.id}:${hero.image}'),
+              color: Colors.black,
+              child: _launcherContentHeroImage(
+                imageProvider: heroImage,
+                fallbackAsset: 'assets/images/missingasset.webp',
               ),
             ),
           ),
@@ -22247,21 +23108,24 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _launcherContentHeroImage({
     required ImageProvider<Object> imageProvider,
     required String fallbackAsset,
+    BoxFit fit = BoxFit.cover,
   }) {
     return _launcherContentImage(
       imageProvider: imageProvider,
       fallbackAsset: fallbackAsset,
+      fit: fit,
     );
   }
 
   Widget _launcherContentImage({
     required ImageProvider<Object> imageProvider,
     required String fallbackAsset,
+    BoxFit fit = BoxFit.cover,
   }) {
     Widget fallback() {
       return Image.asset(
         fallbackAsset,
-        fit: BoxFit.cover,
+        fit: fit,
         width: double.infinity,
         height: double.infinity,
       );
@@ -22290,7 +23154,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         placeholder(),
         Image(
           image: imageProvider,
-          fit: BoxFit.cover,
+          fit: fit,
           width: double.infinity,
           height: double.infinity,
           gaplessPlayback: true,
@@ -22331,6 +23195,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       width: 1200,
                     ),
                     fallbackAsset: 'assets/images/missingasset.webp',
+                    fit: card.imageFit,
                   ),
                 ),
               ),
@@ -22517,10 +23382,26 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             children: [
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final compact = constraints.maxWidth < 920;
+                  final sideNavigation =
+                      _settings.navigationBarLocation !=
+                      NavigationBarLocation.top;
+                  final compact =
+                      constraints.maxWidth < (sideNavigation ? 700.0 : 920.0);
+                  final constrainedHeight =
+                      sideNavigation && MediaQuery.sizeOf(context).height < 760;
                   final dpr = MediaQuery.of(context).devicePixelRatio;
-                  final coverWidth = compact ? constraints.maxWidth : 250.0;
-                  final coverHeight = compact ? 300.0 : 300.0;
+                  final coverWidth = compact
+                      ? constraints.maxWidth
+                      : constrainedHeight
+                      ? 190.0
+                      : 250.0;
+                  final coverHeight = compact
+                      ? constrainedHeight
+                            ? 170.0
+                            : 260.0
+                      : constrainedHeight
+                      ? 220.0
+                      : 300.0;
                   final coverCacheWidth = _imageCacheExtent(
                     max(coverWidth, coverHeight),
                     dpr,
@@ -22533,14 +23414,14 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     borderRadius: BorderRadius.circular(22),
                     child: Image(
                       image: heroCoverProvider,
-                      width: compact ? double.infinity : 250,
+                      width: compact ? double.infinity : coverWidth,
                       height: coverHeight,
                       fit: BoxFit.cover,
                       filterQuality: FilterQuality.medium,
                       errorBuilder: (context, error, stackTrace) {
                         return Image.asset(
                           'assets/images/missingasset.webp',
-                          width: compact ? double.infinity : 250,
+                          width: compact ? double.infinity : coverWidth,
                           height: coverHeight,
                           fit: BoxFit.cover,
                           filterQuality: FilterQuality.medium,
@@ -22549,298 +23430,310 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     ),
                   );
 
-                  final details = Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        left: compact ? 0 : 20,
-                        top: compact ? 14 : 0,
+                  final detailsContent = Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        selectedVersionEyebrow,
+                        style: TextStyle(
+                          color: _onSurface(context, 0.72),
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      const SizedBox(height: 7),
+                      Text(
+                        selectedName,
+                        style: TextStyle(
+                          fontSize: constrainedHeight ? 38 : 47,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      SizedBox(height: constrainedHeight ? 14 : 18),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
                         children: [
-                          Text(
-                            selectedVersionEyebrow,
-                            style: TextStyle(
-                              color: _onSurface(context, 0.72),
-                              fontWeight: FontWeight.w700,
+                          _libraryPulseGlow(
+                            selected == null
+                                ? OutlinedButton.icon(
+                                    onPressed: null,
+                                    icon: const Icon(Icons.play_arrow_rounded),
+                                    label: const Text('Launch'),
+                                    style: _frostedAwareOutlinedButtonStyle(),
+                                  )
+                                : FilledButton.icon(
+                                    onPressed:
+                                        _gameAction != _GameActionState.idle ||
+                                            launchDisabledByModDownload
+                                        ? null
+                                        : () => _runLibraryQuickTipAction(
+                                            _onLaunchButtonPressed,
+                                          ),
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: launchActsAsClose
+                                          ? const Color(0xFFDC3545)
+                                          : Theme.of(context)
+                                                .colorScheme
+                                                .secondary
+                                                .withValues(alpha: 0.92),
+                                      disabledBackgroundColor: Theme.of(context)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.22),
+                                      foregroundColor: Colors.white,
+                                      disabledForegroundColor: Theme.of(context)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.58),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                        vertical: 13,
+                                      ),
+                                      shape: const StadiumBorder(),
+                                    ),
+                                    icon: Icon(
+                                      launchActsAsClose
+                                          ? Icons.stop_rounded
+                                          : _gameAction ==
+                                                _GameActionState.closing
+                                          ? Icons.stop_rounded
+                                          : Icons.play_arrow_rounded,
+                                    ),
+                                    label: Text(
+                                      _gameAction == _GameActionState.closing
+                                          ? 'Closing...'
+                                          : launchActsAsClose
+                                          ? 'Close Game'
+                                          : _gameAction ==
+                                                _GameActionState.launching
+                                          ? 'Launching...'
+                                          : hasRunningGameClient &&
+                                                _settings
+                                                    .allowMultipleGameClients
+                                          ? 'Launch Client'
+                                          : 'Launch',
+                                    ),
+                                  ),
+                            enabled: _libraryQuickTipTargetActive(
+                              _LibraryQuickTipTarget.launch,
                             ),
                           ),
-                          const SizedBox(height: 7),
-                          Text(
-                            selectedName,
-                            style: const TextStyle(
-                              fontSize: 47,
-                              fontWeight: FontWeight.w700,
+                          if (showCloseAllGamesButton)
+                            FilledButton.icon(
+                              onPressed: _gameAction != _GameActionState.idle
+                                  ? null
+                                  : _closeFortnite,
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFDC3545),
+                                disabledBackgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withValues(alpha: 0.22),
+                                foregroundColor: Colors.white,
+                                disabledForegroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withValues(alpha: 0.58),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 13,
+                                ),
+                                shape: const StadiumBorder(),
+                              ),
+                              icon: const Icon(Icons.stop_rounded),
+                              label: Text(
+                                _gameAction == _GameActionState.closing
+                                    ? 'Closing...'
+                                    : 'Close Games',
+                              ),
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 18),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              _libraryPulseGlow(
-                                selected == null
-                                    ? OutlinedButton.icon(
-                                        onPressed: null,
-                                        icon: const Icon(
-                                          Icons.play_arrow_rounded,
-                                        ),
-                                        label: const Text('Launch'),
-                                      )
-                                    : FilledButton.icon(
-                                        onPressed:
-                                            _gameAction !=
-                                                    _GameActionState.idle ||
-                                                launchDisabledByModDownload
-                                            ? null
-                                            : () => _runLibraryQuickTipAction(
-                                                _onLaunchButtonPressed,
-                                              ),
-                                        style: FilledButton.styleFrom(
-                                          backgroundColor: launchActsAsClose
-                                              ? const Color(0xFFDC3545)
-                                              : Theme.of(context)
-                                                    .colorScheme
-                                                    .secondary
-                                                    .withValues(alpha: 0.92),
-                                          disabledBackgroundColor:
-                                              Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurface
-                                                  .withValues(alpha: 0.22),
-                                          foregroundColor: Colors.white,
-                                          disabledForegroundColor:
-                                              Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurface
-                                                  .withValues(alpha: 0.58),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 20,
-                                            vertical: 13,
+                          _libraryPulseGlow(
+                            selected == null
+                                ? OutlinedButton.icon(
+                                    onPressed: null,
+                                    icon: const Icon(
+                                      Icons.cloud_upload_rounded,
+                                    ),
+                                    label: const Text('Host'),
+                                    style: _frostedAwareOutlinedButtonStyle(),
+                                  )
+                                : FilledButton.icon(
+                                    onPressed:
+                                        _gameAction != _GameActionState.idle ||
+                                            _gameServerLaunching ||
+                                            hostDisabledByModDownload
+                                        ? null
+                                        : () => _runLibraryQuickTipAction(
+                                            () async {
+                                              if (hostActsAsClose) {
+                                                await _closeHosting();
+                                              } else {
+                                                await _startHosting();
+                                              }
+                                            },
                                           ),
-                                          shape: const StadiumBorder(),
-                                        ),
-                                        icon: Icon(
-                                          launchActsAsClose
-                                              ? Icons.stop_rounded
-                                              : _gameAction ==
-                                                    _GameActionState.closing
-                                              ? Icons.stop_rounded
-                                              : Icons.play_arrow_rounded,
-                                        ),
-                                        label: Text(
-                                          _gameAction ==
-                                                  _GameActionState.closing
-                                              ? 'Closing...'
-                                              : launchActsAsClose
-                                              ? 'Close Game'
-                                              : _gameAction ==
-                                                    _GameActionState.launching
-                                              ? 'Launching...'
-                                              : hasRunningGameClient &&
-                                                    _settings
-                                                        .allowMultipleGameClients
-                                              ? 'Launch Client'
-                                              : 'Launch',
-                                        ),
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: hostActsAsClose
+                                          ? const Color(0xFFDC3545)
+                                          : Theme.of(context)
+                                                .colorScheme
+                                                .secondary
+                                                .withValues(alpha: 0.82),
+                                      disabledBackgroundColor: Theme.of(context)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.22),
+                                      foregroundColor: Colors.white,
+                                      disabledForegroundColor: Theme.of(context)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.58),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                        vertical: 13,
                                       ),
-                                enabled: _libraryQuickTipTargetActive(
-                                  _LibraryQuickTipTarget.launch,
-                                ),
-                              ),
-                              if (showCloseAllGamesButton)
-                                FilledButton.icon(
-                                  onPressed:
-                                      _gameAction != _GameActionState.idle
-                                      ? null
-                                      : _closeFortnite,
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: const Color(0xFFDC3545),
-                                    disabledBackgroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.22),
-                                    foregroundColor: Colors.white,
-                                    disabledForegroundColor: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.58),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                      vertical: 13,
+                                      shape: const StadiumBorder(),
                                     ),
-                                    shape: const StadiumBorder(),
-                                  ),
-                                  icon: const Icon(Icons.stop_rounded),
-                                  label: Text(
-                                    _gameAction == _GameActionState.closing
-                                        ? 'Closing...'
-                                        : 'Close Games',
-                                  ),
-                                ),
-                              _libraryPulseGlow(
-                                selected == null
-                                    ? OutlinedButton.icon(
-                                        onPressed: null,
-                                        icon: const Icon(
-                                          Icons.cloud_upload_rounded,
-                                        ),
-                                        label: const Text('Host'),
-                                      )
-                                    : FilledButton.icon(
-                                        onPressed:
-                                            _gameAction !=
-                                                    _GameActionState.idle ||
-                                                _gameServerLaunching ||
-                                                hostDisabledByModDownload
-                                            ? null
-                                            : () => _runLibraryQuickTipAction(
-                                                () async {
-                                                  if (hostActsAsClose) {
-                                                    await _closeHosting();
-                                                  } else {
-                                                    await _startHosting();
-                                                  }
-                                                },
-                                              ),
-                                        style: FilledButton.styleFrom(
-                                          backgroundColor: hostActsAsClose
-                                              ? const Color(0xFFDC3545)
-                                              : Theme.of(context)
-                                                    .colorScheme
-                                                    .secondary
-                                                    .withValues(alpha: 0.82),
-                                          disabledBackgroundColor:
-                                              Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurface
-                                                  .withValues(alpha: 0.22),
-                                          foregroundColor: Colors.white,
-                                          disabledForegroundColor:
-                                              Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurface
-                                                  .withValues(alpha: 0.58),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 20,
-                                            vertical: 13,
-                                          ),
-                                          shape: const StadiumBorder(),
-                                        ),
-                                        icon: Icon(
-                                          hostActsAsClose
-                                              ? Icons.stop_rounded
-                                              : Icons.cloud_upload_rounded,
-                                        ),
-                                        label: Text(
-                                          hostActsAsClose
-                                              ? 'Close Host'
-                                              : _gameServerLaunching
-                                              ? 'Starting...'
-                                              : 'Host',
-                                        ),
-                                      ),
-                                enabled: _libraryQuickTipTargetActive(
-                                  _LibraryQuickTipTarget.host,
-                                ),
-                              ),
-                              OutlinedButton.icon(
-                                onPressed: selected == null
-                                    ? null
-                                    : () => _openPath(selected.location),
-                                icon: const Icon(Icons.folder_open_rounded),
-                                label: const Text('Open Folder'),
-                              ),
-                              _libraryPulseGlow(
-                                Tooltip(
-                                  message: 'Network',
-                                  child: OutlinedButton(
-                                    onPressed: () => _runLibraryQuickTipAction(
-                                      _showNetworkDialog,
+                                    icon: Icon(
+                                      hostActsAsClose
+                                          ? Icons.stop_rounded
+                                          : Icons.cloud_upload_rounded,
                                     ),
-                                    style: OutlinedButton.styleFrom(
-                                      minimumSize: const Size(42, 42),
-                                      maximumSize: const Size(42, 42),
-                                      padding: EdgeInsets.zero,
-                                      shape: const CircleBorder(),
-                                      tapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                    ),
-                                    child: const Icon(
-                                      Icons.people_alt_rounded,
-                                      size: 18,
+                                    label: Text(
+                                      hostActsAsClose
+                                          ? 'Close Host'
+                                          : _gameServerLaunching
+                                          ? 'Starting...'
+                                          : 'Host',
                                     ),
                                   ),
-                                ),
-                                enabled: _libraryQuickTipTargetActive(
-                                  _LibraryQuickTipTarget.network,
-                                ),
-                              ),
-                              _libraryPulseGlow(
-                                Tooltip(
-                                  message: 'Injector',
-                                  child: OutlinedButton(
-                                    onPressed: () => _runLibraryQuickTipAction(
-                                      _showInjectorDialog,
-                                    ),
-                                    style: OutlinedButton.styleFrom(
-                                      minimumSize: const Size(42, 42),
-                                      maximumSize: const Size(42, 42),
-                                      padding: EdgeInsets.zero,
-                                      shape: const CircleBorder(),
-                                      tapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                    ),
-                                    child: const Icon(
-                                      Icons.science_rounded,
-                                      size: 18,
-                                    ),
-                                  ),
-                                ),
-                                enabled: _libraryQuickTipTargetActive(
-                                  _LibraryQuickTipTarget.injector,
-                                ),
-                              ),
-                              _libraryPulseGlow(
-                                Tooltip(
-                                  message: 'Launch Options',
-                                  child: OutlinedButton(
-                                    onPressed: () => _runLibraryQuickTipAction(
-                                      _openHostOptionsDialog,
-                                    ),
-                                    style: OutlinedButton.styleFrom(
-                                      minimumSize: const Size(42, 42),
-                                      maximumSize: const Size(42, 42),
-                                      padding: EdgeInsets.zero,
-                                      shape: const CircleBorder(),
-                                      tapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                    ),
-                                    child: const Icon(
-                                      Icons.rocket_launch_rounded,
-                                      size: 18,
-                                    ),
-                                  ),
-                                ),
-                                enabled: _libraryQuickTipTargetActive(
-                                  _LibraryQuickTipTarget.launchOptions,
-                                ),
-                              ),
-                            ],
+                            enabled: _libraryQuickTipTargetActive(
+                              _LibraryQuickTipTarget.host,
+                            ),
                           ),
-                          const SizedBox(height: 12),
-                          _buildLibraryGameStatusLine(),
+                          Tooltip(
+                            message: 'Open Folder',
+                            child: OutlinedButton(
+                              onPressed: selected == null
+                                  ? null
+                                  : () => _openPath(selected.location),
+                              style: _frostedAwareOutlinedButtonStyle(
+                                shape: const CircleBorder(),
+                                padding: EdgeInsets.zero,
+                                minimumSize: const Size(42, 42),
+                                maximumSize: const Size(42, 42),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              child: const Icon(Icons.folder_rounded, size: 18),
+                            ),
+                          ),
+                          _libraryPulseGlow(
+                            Tooltip(
+                              message: 'Launch Options',
+                              child: OutlinedButton(
+                                onPressed: () => _runLibraryQuickTipAction(
+                                  _openHostOptionsDialog,
+                                ),
+                                style: _frostedAwareOutlinedButtonStyle(
+                                  shape: const CircleBorder(),
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(42, 42),
+                                  maximumSize: const Size(42, 42),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: const Icon(
+                                  Icons.rocket_launch_rounded,
+                                  size: 18,
+                                ),
+                              ),
+                            ),
+                            enabled: _libraryQuickTipTargetActive(
+                              _LibraryQuickTipTarget.launchOptions,
+                            ),
+                          ),
+                          _libraryPulseGlow(
+                            Tooltip(
+                              message: 'Injector',
+                              child: OutlinedButton(
+                                onPressed: () => _runLibraryQuickTipAction(
+                                  _showInjectorDialog,
+                                ),
+                                style: _frostedAwareOutlinedButtonStyle(
+                                  shape: const CircleBorder(),
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(42, 42),
+                                  maximumSize: const Size(42, 42),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: const Icon(
+                                  Icons.science_rounded,
+                                  size: 18,
+                                ),
+                              ),
+                            ),
+                            enabled: _libraryQuickTipTargetActive(
+                              _LibraryQuickTipTarget.injector,
+                            ),
+                          ),
+                          _libraryPulseGlow(
+                            Tooltip(
+                              message: _mesh.connected
+                                  ? 'Network (Connected)'
+                                  : 'Network',
+                              child: OutlinedButton(
+                                onPressed: () => _runLibraryQuickTipAction(
+                                  _showNetworkDialog,
+                                ),
+                                style: _frostedAwareOutlinedButtonStyle(
+                                  shape: const CircleBorder(),
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(42, 42),
+                                  maximumSize: const Size(42, 42),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                  outlineColor: _mesh.connected
+                                      ? const Color(0xFF16C47F)
+                                      : null,
+                                ),
+                                child: Icon(
+                                  Icons.people_alt_rounded,
+                                  size: 18,
+                                  color: _mesh.connected
+                                      ? const Color(0xFF16C47F)
+                                      : null,
+                                ),
+                              ),
+                            ),
+                            enabled: _libraryQuickTipTargetActive(
+                              _LibraryQuickTipTarget.network,
+                            ),
+                          ),
                         ],
                       ),
+                      const SizedBox(height: 12),
+                      _buildLibraryGameStatusLine(),
+                    ],
+                  );
+
+                  final details = Padding(
+                    padding: EdgeInsets.only(
+                      left: compact ? 0 : 20,
+                      top: compact ? 14 : 0,
                     ),
+                    child: detailsContent,
                   );
 
                   if (compact) {
                     return Column(children: [image, details]);
                   }
-                  return Row(children: [image, details]);
+                  return Row(
+                    children: [
+                      image,
+                      Expanded(child: details),
+                    ],
+                  );
                 },
               ),
             ],
@@ -23018,8 +23911,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         },
         child: _SliverGlass(
           radius: 22,
-          blurSigma: 16,
-          backgroundColor: _glassSurfaceColor(context),
+          blurSigma: _glassBlurSigma(_settings.panelGlassStyle),
+          backgroundColor: _glassSurfaceColor(
+            context,
+            _settings.panelGlassStyle,
+            Color(_settings.panelGlassColorValue),
+            _settings.panelGlassOpacity,
+          ),
           borderColor: _onSurface(context, 0.08),
           borderWidth: 1.0,
           child: SliverPadding(
@@ -23396,7 +24294,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     border: Border.all(color: _onSurface(context, 0.1)),
                     boxShadow: [
                       BoxShadow(
-                        color: _glassShadowColor(context),
+                        color: _glassShadowColor(
+                          context,
+                          _settings.panelGlassStyle,
+                        ),
                         blurRadius: 18,
                         offset: const Offset(0, 8),
                       ),
@@ -26913,7 +27814,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             lightAlpha: enabled ? 0.24 : 0.10,
           ),
           side: BorderSide(
-            color: onSurface.withValues(alpha: enabled ? 0.24 : 0.12),
+            color: onSurface.withValues(alpha: enabled ? 0.14 : 0.10),
           ),
         ),
       ),
@@ -27118,6 +28019,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                             ? null
                             : () => unawaited(_openEmbeddedBackendFolder()),
                         icon: const Icon(Icons.folder_open_rounded, size: 20),
+                        style: _hoverOutlineIconButtonStyle(),
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -27384,7 +28286,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                     style: OutlinedButton.styleFrom(
                       foregroundColor: onSurface.withValues(alpha: 0.9),
                       side: BorderSide(
-                        color: onSurface.withValues(alpha: 0.22),
+                        color: onSurface.withValues(alpha: 0.14),
                       ),
                       backgroundColor: onSurface.withValues(alpha: 0.03),
                       minimumSize: const Size.fromHeight(48),
@@ -31126,7 +32028,7 @@ foreach ($app in $appPaths) {
             minimumSize: const Size(42, 42),
             backgroundColor: onSurface.withValues(alpha: 0.06),
             foregroundColor: onSurface.withValues(alpha: 0.9),
-            side: BorderSide(color: onSurface.withValues(alpha: 0.18)),
+            side: BorderSide(color: onSurface.withValues(alpha: 0.14)),
           ),
         ),
         const SizedBox(width: 6),
@@ -31138,7 +32040,7 @@ foreach ($app in $appPaths) {
             minimumSize: const Size(42, 42),
             backgroundColor: onSurface.withValues(alpha: 0.06),
             foregroundColor: onSurface.withValues(alpha: 0.9),
-            side: BorderSide(color: onSurface.withValues(alpha: 0.18)),
+            side: BorderSide(color: onSurface.withValues(alpha: 0.14)),
           ),
         ),
         const SizedBox(width: 6),
@@ -31150,7 +32052,7 @@ foreach ($app in $appPaths) {
             minimumSize: const Size(42, 42),
             backgroundColor: onSurface.withValues(alpha: 0.06),
             foregroundColor: onSurface.withValues(alpha: 0.9),
-            side: BorderSide(color: onSurface.withValues(alpha: 0.18)),
+            side: BorderSide(color: onSurface.withValues(alpha: 0.14)),
           ),
         ),
       ],
@@ -31171,853 +32073,979 @@ foreach ($app in $appPaths) {
     Widget body;
     switch (_settingsSection) {
       case SettingsSection.profile:
-        body = _glass(
-          radius: 24,
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Profile', style: sectionTitleStyle),
-                const SizedBox(height: 14),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final compactProfile = constraints.maxWidth < 760;
-                    final avatarSize = compactProfile
-                        ? min(96.0, max(76.0, constraints.maxWidth * 0.20))
-                        : 112.0;
-                    final nameFontSize =
-                        (compactProfile
-                                ? constraints.maxWidth * 0.12
-                                : constraints.maxWidth * 0.075)
-                            .clamp(34.0, 48.0)
-                            .toDouble();
-                    final nameStyle = TextStyle(
-                      fontSize: nameFontSize,
-                      fontWeight: FontWeight.w700,
-                      height: 1.0,
-                    );
+        body = Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Profile', style: sectionTitleStyle),
+              const SizedBox(height: 14),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final compactProfile = constraints.maxWidth < 760;
+                  final avatarSize = compactProfile
+                      ? min(96.0, max(76.0, constraints.maxWidth * 0.20))
+                      : 112.0;
+                  final nameFontSize =
+                      (compactProfile
+                              ? constraints.maxWidth * 0.12
+                              : constraints.maxWidth * 0.075)
+                          .clamp(34.0, 48.0)
+                          .toDouble();
+                  final nameStyle = TextStyle(
+                    fontSize: nameFontSize,
+                    fontWeight: FontWeight.w700,
+                    height: 1.0,
+                  );
 
-                    final avatar = MouseRegion(
-                      onEnter: (_) => setState(() => _profilePfpHovered = true),
-                      onExit: (_) => setState(() => _profilePfpHovered = false),
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        onTap: _pickAvatar,
-                        child: SizedBox(
-                          width: avatarSize,
-                          height: avatarSize,
-                          child: Stack(
-                            clipBehavior: Clip.none,
-                            children: [
-                              AnimatedOpacity(
-                                opacity: _profilePfpHovered ? 0.5 : 1.0,
-                                duration: const Duration(milliseconds: 180),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(18),
-                                  child: Image(
-                                    image: _profileImage(),
-                                    width: avatarSize,
-                                    height: avatarSize,
-                                    fit: BoxFit.cover,
-                                  ),
+                  final avatar = MouseRegion(
+                    onEnter: (_) => setState(() => _profilePfpHovered = true),
+                    onExit: (_) => setState(() => _profilePfpHovered = false),
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      onTap: _pickAvatar,
+                      child: SizedBox(
+                        width: avatarSize,
+                        height: avatarSize,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            AnimatedOpacity(
+                              opacity: _profilePfpHovered ? 0.5 : 1.0,
+                              duration: const Duration(milliseconds: 180),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(18),
+                                child: Image(
+                                  image: _profileImage(),
+                                  width: avatarSize,
+                                  height: avatarSize,
+                                  fit: BoxFit.cover,
                                 ),
                               ),
-                              Positioned.fill(
-                                child: AnimatedOpacity(
-                                  opacity: _profilePfpHovered ? 1.0 : 0.0,
-                                  duration: const Duration(milliseconds: 180),
-                                  child: Center(
-                                    child: Container(
-                                      width: 38,
-                                      height: 38,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: _adaptiveScrimColor(
-                                          context,
-                                          darkAlpha: 0.55,
-                                          lightAlpha: 0.45,
-                                        ),
-                                        border: Border.all(
-                                          color: _onSurface(context, 0.16),
-                                        ),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: _dialogShadowColor(
-                                              context,
-                                            ).withValues(alpha: 0.45),
-                                            blurRadius: 14,
-                                            offset: const Offset(0, 8),
-                                          ),
-                                        ],
+                            ),
+                            Positioned.fill(
+                              child: AnimatedOpacity(
+                                opacity: _profilePfpHovered ? 1.0 : 0.0,
+                                duration: const Duration(milliseconds: 180),
+                                child: Center(
+                                  child: Container(
+                                    width: 38,
+                                    height: 38,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: _adaptiveScrimColor(
+                                        context,
+                                        darkAlpha: 0.55,
+                                        lightAlpha: 0.45,
                                       ),
-                                      child: Icon(
-                                        Icons.edit_rounded,
-                                        size: 18,
-                                        color: _onSurface(context, 0.9),
+                                      border: Border.all(
+                                        color: _onSurface(context, 0.16),
                                       ),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: _dialogShadowColor(
+                                            context,
+                                          ).withValues(alpha: 0.45),
+                                          blurRadius: 14,
+                                          offset: const Offset(0, 8),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Icon(
+                                      Icons.edit_rounded,
+                                      size: 18,
+                                      color: _onSurface(context, 0.9),
                                     ),
                                   ),
                                 ),
                               ),
-                            ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+
+                  Widget buildAuthSwitchButton() {
+                    return _tipPulseGlowIf(
+                      Tooltip(
+                        message: 'Switch Login Authentication',
+                        child: SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 40,
+                              height: 40,
+                            ),
+                            onPressed: () {
+                              final shouldCompleteQuickTip =
+                                  _showProfileAuthQuickTip;
+                              setState(() {
+                                final nextAuthMode =
+                                    !_settings.profileUseEmailPasswordAuth;
+                                _settings = _settings.copyWith(
+                                  profileUseEmailPasswordAuth: nextAuthMode,
+                                );
+                                if (!nextAuthMode) {
+                                  _showProfileAuthPassword = false;
+                                }
+                                _profileAuthValidationAttempted = false;
+                              });
+                              if (shouldCompleteQuickTip) {
+                                _completeProfileAuthQuickTip();
+                              }
+                            },
+                            icon: Icon(
+                              _settings.profileUseEmailPasswordAuth
+                                  ? Icons.alternate_email_rounded
+                                  : Icons.person_rounded,
+                              size: 18,
+                            ),
                           ),
                         ),
                       ),
+                      enabled: _showProfileAuthQuickTip,
                     );
+                  }
 
-                    Widget buildAuthSwitchButton() {
-                      return _tipPulseGlowIf(
-                        Tooltip(
-                          message: 'Switch Login Authentication',
-                          child: SizedBox(
-                            width: 40,
-                            height: 40,
-                            child: IconButton(
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints.tightFor(
-                                width: 40,
-                                height: 40,
-                              ),
-                              onPressed: () {
-                                final shouldCompleteQuickTip =
-                                    _showProfileAuthQuickTip;
-                                setState(() {
-                                  final nextAuthMode =
-                                      !_settings.profileUseEmailPasswordAuth;
-                                  _settings = _settings.copyWith(
-                                    profileUseEmailPasswordAuth: nextAuthMode,
-                                  );
-                                  if (!nextAuthMode) {
-                                    _showProfileAuthPassword = false;
-                                  }
-                                  _profileAuthValidationAttempted = false;
-                                });
-                                if (shouldCompleteQuickTip) {
-                                  _completeProfileAuthQuickTip();
-                                }
-                              },
-                              icon: Icon(
-                                _settings.profileUseEmailPasswordAuth
-                                    ? Icons.alternate_email_rounded
-                                    : Icons.person_rounded,
-                                size: 18,
-                              ),
+                  final details = Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Flexible(
+                            fit: FlexFit.loose,
+                            child: Text(
+                              _settings.username.trim().isEmpty
+                                  ? 'Player'
+                                  : _settings.username.trim(),
+                              style: nameStyle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                        ),
-                        enabled: _showProfileAuthQuickTip,
-                      );
-                    }
-
-                    final details = Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Flexible(
-                              fit: FlexFit.loose,
-                              child: Text(
-                                _settings.username.trim().isEmpty
-                                    ? 'Player'
-                                    : _settings.username.trim(),
-                                style: nameStyle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        if (_showProfileAuthQuickTip) ...[
-                          _profileAuthQuickTipCard(),
-                          const SizedBox(height: 10),
                         ],
-                        if (_settings.profileUseEmailPasswordAuth) ...[
-                          _input(
-                            label: 'Email',
-                            controller: _profileAuthEmailController,
-                            hint: 'name@example.com',
-                            keyboardType: TextInputType.emailAddress,
-                            onChanged: (_) => setState(() {}),
-                            suffix: buildAuthSwitchButton(),
-                          ),
-                          const SizedBox(height: 8),
-                          _input(
-                            label: 'Password',
-                            controller: _profileAuthPasswordController,
-                            hint: 'Set password',
-                            obscureText: !_showProfileAuthPassword,
-                            onChanged: (_) => setState(() {}),
-                            suffix: IconButton(
-                              tooltip: _showProfileAuthPassword
-                                  ? 'Hide password'
-                                  : 'Show password',
-                              onPressed:
-                                  _profileAuthPasswordController.text.isEmpty
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        _showProfileAuthPassword =
-                                            !_showProfileAuthPassword;
-                                      });
-                                    },
-                              icon: Icon(
-                                _showProfileAuthPassword
-                                    ? Icons.visibility_off_rounded
-                                    : Icons.visibility_rounded,
-                              ),
+                      ),
+                      const SizedBox(height: 12),
+                      if (_showProfileAuthQuickTip) ...[
+                        _profileAuthQuickTipCard(),
+                        const SizedBox(height: 10),
+                      ],
+                      if (_settings.profileUseEmailPasswordAuth) ...[
+                        _input(
+                          label: 'Email',
+                          controller: _profileAuthEmailController,
+                          hint: 'name@example.com',
+                          keyboardType: TextInputType.emailAddress,
+                          onChanged: (_) => setState(() {}),
+                          suffix: buildAuthSwitchButton(),
+                        ),
+                        const SizedBox(height: 8),
+                        _input(
+                          label: 'Password',
+                          controller: _profileAuthPasswordController,
+                          hint: 'Set password',
+                          obscureText: !_showProfileAuthPassword,
+                          onChanged: (_) => setState(() {}),
+                          suffix: IconButton(
+                            tooltip: _showProfileAuthPassword
+                                ? 'Hide password'
+                                : 'Show password',
+                            onPressed:
+                                _profileAuthPasswordController.text.isEmpty
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _showProfileAuthPassword =
+                                          !_showProfileAuthPassword;
+                                    });
+                                  },
+                            icon: Icon(
+                              _showProfileAuthPassword
+                                  ? Icons.visibility_off_rounded
+                                  : Icons.visibility_rounded,
                             ),
                           ),
-                          if (profileAuthValidationError != null) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              profileAuthValidationError,
-                              style: TextStyle(
-                                color: Theme.of(context).colorScheme.error,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ] else ...[
-                          _input(
-                            label: 'Username',
-                            controller: _usernameController,
-                            hint: 'Set username',
-                            onChanged: (_) => setState(() {}),
-                            suffix: buildAuthSwitchButton(),
-                          ),
+                        ),
+                        if (profileAuthValidationError != null) ...[
                           const SizedBox(height: 6),
                           Text(
-                            'Default login: ${_buildAtlasLoginUsername(_settings.username)}',
+                            profileAuthValidationError,
                             style: TextStyle(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onSurface.withValues(alpha: 0.72),
+                              color: Theme.of(context).colorScheme.error,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
                         ],
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed:
-                                  (_settings.profileAvatarPath.isEmpty &&
-                                      _settings.username == 'Player')
-                                  ? null
-                                  : () async {
-                                      setState(() {
-                                        _setActiveSettingsUsername('Player');
-                                        _usernameController.text = '';
-                                        _settings = _settings.copyWith(
-                                          profileAvatarPath: '',
-                                        );
-                                      });
-                                      await _saveSettings(
-                                        applyControllers: false,
-                                      );
-                                    },
-                              icon: const Icon(Icons.restore_rounded),
-                              label: const Text('Reset'),
-                            ),
-                            FilledButton.icon(
-                              onPressed: _saveProfileSettings,
-                              style: FilledButton.styleFrom(
-                                foregroundColor: Colors.white,
-                              ),
-                              icon: const Icon(Icons.save_rounded),
-                              label: const Text('Save'),
-                            ),
-                          ],
+                      ] else ...[
+                        _input(
+                          label: 'Username',
+                          controller: _usernameController,
+                          hint: 'Set username',
+                          onChanged: (_) => setState(() {}),
+                          suffix: buildAuthSwitchButton(),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Default login: ${_buildAtlasLoginUsername(_settings.username)}',
+                          style: TextStyle(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurface.withValues(alpha: 0.72),
+                          ),
                         ),
                       ],
-                    );
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed:
+                                (_settings.profileAvatarPath.isEmpty &&
+                                    _settings.username == 'Player')
+                                ? null
+                                : () async {
+                                    setState(() {
+                                      _setActiveSettingsUsername('Player');
+                                      _usernameController.text = '';
+                                      _settings = _settings.copyWith(
+                                        profileAvatarPath: '',
+                                      );
+                                    });
+                                    await _saveSettings(
+                                      applyControllers: false,
+                                    );
+                                  },
+                            icon: const Icon(Icons.restore_rounded),
+                            label: const Text('Reset'),
+                          ),
+                          FilledButton.icon(
+                            onPressed: _saveProfileSettings,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Theme.of(
+                                context,
+                              ).colorScheme.secondary.withValues(alpha: 0.92),
+                              foregroundColor: Colors.white,
+                              shape: const StadiumBorder(),
+                            ),
+                            icon: const Icon(Icons.save_rounded),
+                            label: const Text('Save'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  );
 
-                    if (compactProfile) {
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [avatar, const SizedBox(height: 14), details],
-                      );
-                    }
-
-                    return Row(
+                  if (compactProfile) {
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        avatar,
-                        const SizedBox(width: 18),
-                        Expanded(child: details),
-                      ],
+                      children: [avatar, const SizedBox(height: 14), details],
                     );
-                  },
-                ),
-              ],
-            ),
+                  }
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      avatar,
+                      const SizedBox(width: 18),
+                      Expanded(child: details),
+                    ],
+                  );
+                },
+              ),
+            ],
           ),
         );
       case SettingsSection.appearance:
-        body = _glass(
-          radius: 24,
-          child: SingleChildScrollView(
-            primary: false,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Appearance',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 16),
-                SwitchListTile(
-                  value: _settings.popupBackgroundBlurEnabled,
-                  onChanged: (value) {
+        body = ListView(
+          shrinkWrap: true,
+          primary: false,
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Appearance', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 16),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked = constraints.maxWidth < 560;
+                final dropdown = DropdownButtonFormField<NavigationBarLocation>(
+                  initialValue: _settings.navigationBarLocation,
+                  decoration: _backendFieldDecoration(),
+                  items: _navigationBarLocationDropdownOrder.map((location) {
+                    return DropdownMenuItem<NavigationBarLocation>(
+                      value: location,
+                      child: Text(location.label),
+                    );
+                  }).toList(),
+                  onChanged: (location) {
+                    if (location == null) return;
                     setState(() {
                       _settings = _settings.copyWith(
-                        popupBackgroundBlurEnabled: value,
+                        navigationBarLocation: location,
                       );
                     });
                     unawaited(_saveSettings(toast: false));
                   },
-                  title: const Text('Popup Background Blur'),
-                  subtitle: const Text('Blur the background behind popups.'),
-                ),
-                const SizedBox(height: 8),
-                SwitchListTile(
-                  value: _settings.discordRpcEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(discordRpcEnabled: value);
-                    });
-                    _syncLauncherDiscordPresence();
-                    if (!value) {
-                      unawaited(
-                        _restoreOriginalDiscordRpcDllAcrossBuildsIfIdle(),
-                      );
-                    }
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Discord Rich Presence'),
+                );
+
+                if (stacked) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Navigation Bar Location'),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Move the location of the navigation bar.',
+                          style: TextStyle(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurface.withValues(alpha: 0.72),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(width: double.infinity, child: dropdown),
+                      ],
+                    ),
+                  );
+                }
+
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text('Navigation Bar Location'),
                   subtitle: const Text(
-                    'Display your status for ATLAS on Discord.',
+                    'Move the location of the navigation bar.',
                   ),
-                ),
-                const SizedBox(height: 12),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Background Image'),
-                  subtitle: Text(
-                    _settings.backgroundImagePath.isEmpty
-                        ? 'Default background'
-                        : _settings.backgroundImagePath,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  trailing: SizedBox(width: 170, child: dropdown),
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked = constraints.maxWidth < 560;
+                final dropdown = DropdownButtonFormField<PanelGlassStyle>(
+                  initialValue: _settings.panelGlassStyle,
+                  decoration: _backendFieldDecoration(),
+                  items: _panelGlassStyleDropdownOrder.map((style) {
+                    return DropdownMenuItem<PanelGlassStyle>(
+                      value: style,
+                      child: Text(style.label),
+                    );
+                  }).toList(),
+                  onChanged: (style) {
+                    if (style == null) return;
+                    setState(() {
+                      _settings = _settings.copyWith(panelGlassStyle: style);
+                    });
+                    unawaited(_saveSettings(toast: false));
+                  },
+                );
+
+                if (stacked) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Glass Style'),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Change the glass look for panels and the navigation bar.',
+                          style: TextStyle(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurface.withValues(alpha: 0.72),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            _panelGlassColorButton(),
+                            const SizedBox(width: 8),
+                            Expanded(child: dropdown),
+                          ],
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text('Glass Style'),
+                  subtitle: const Text(
+                    'Change the glass look for panels and the navigation bar.',
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      TextButton(
-                        onPressed: _settings.backgroundImagePath.isEmpty
-                            ? null
-                            : _clearBackground,
-                        child: const Text('Reset'),
-                      ),
+                      _panelGlassColorButton(),
                       const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: _pickBackground,
-                        child: const Text('Choose Image'),
+                      SizedBox(width: 170, child: dropdown),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Glass Opacity (${(_settings.panelGlassOpacity * 100).round()}%)',
+                  ),
+                  const SizedBox(height: 6),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      const min = 0.35;
+                      const max = 1.40;
+                      const defaultOpacity = 1.0;
+                      final dotX = _atlasSliderMarkerCenterX(
+                        width: constraints.maxWidth,
+                        value: defaultOpacity,
+                        minValue: min,
+                        maxValue: max,
+                      );
+                      return SizedBox(
+                        height: 36,
+                        child: Stack(
+                          alignment: Alignment.centerLeft,
+                          children: [
+                            Slider(
+                              value: _settings.panelGlassOpacity.clamp(
+                                min,
+                                max,
+                              ),
+                              min: min,
+                              max: max,
+                              divisions: 21,
+                              label:
+                                  '${(_settings.panelGlassOpacity * 100).round()}%',
+                              onChanged: (value) {
+                                setState(
+                                  () => _settings = _settings.copyWith(
+                                    panelGlassOpacity: value,
+                                  ),
+                                );
+                              },
+                              onChangeEnd: (_) =>
+                                  unawaited(_saveSettings(toast: false)),
+                            ),
+                            Positioned(
+                              left: dotX - 4,
+                              child: Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.secondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              value: _settings.popupBackgroundBlurEnabled,
+              onChanged: (value) {
+                setState(() {
+                  _settings = _settings.copyWith(
+                    popupBackgroundBlurEnabled: value,
+                  );
+                });
+                unawaited(_saveSettings(toast: false));
+              },
+              title: const Text('Popup Background Blur'),
+              subtitle: const Text('Blur the background behind popups.'),
+            ),
+            const SizedBox(height: 14),
+            Divider(height: 1, thickness: 1, color: _onSurface(context, 0.14)),
+            const SizedBox(height: 14),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Background Media'),
+              subtitle: Text(
+                _settings.backgroundImagePath.isEmpty
+                    ? 'Default looping video'
+                    : _settings.backgroundImagePath,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: _settings.backgroundImagePath.isEmpty
+                        ? null
+                        : _clearBackground,
+                    child: const Text('Reset'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: _pickBackground,
+                    child: const Text('Choose Media'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Background Blur (${_settings.backgroundBlur.toStringAsFixed(0)})',
+            ),
+            const SizedBox(height: 6),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                const min = 0.0;
+                const max = 30.0;
+                const defaultBlur = 5.0;
+                final value = _settings.backgroundBlur
+                    .clamp(min, max)
+                    .toDouble();
+                final dotX = _atlasSliderMarkerCenterX(
+                  width: constraints.maxWidth,
+                  value: defaultBlur,
+                  minValue: min,
+                  maxValue: max,
+                );
+                return SizedBox(
+                  height: 36,
+                  child: Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      Slider(
+                        value: value,
+                        min: min,
+                        max: max,
+                        divisions: 30,
+                        onChanged: (value) {
+                          setState(
+                            () => _settings = _settings.copyWith(
+                              backgroundBlur: value,
+                            ),
+                          );
+                        },
+                        onChangeEnd: (_) =>
+                            unawaited(_saveSettings(toast: false)),
+                      ),
+                      Positioned(
+                        left: dotX - 4,
+                        child: Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Theme.of(context).colorScheme.secondary,
+                          ),
+                        ),
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Background Blur (${_settings.backgroundBlur.toStringAsFixed(0)})',
-                ),
-                const SizedBox(height: 6),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    const min = 0.0;
-                    const max = 30.0;
-                    const defaultBlur = 15.0;
-                    final trackWidth = constraints.maxWidth;
-                    final normalized = (defaultBlur - min) / (max - min);
-                    final dotX = trackWidth * normalized;
-                    return SizedBox(
-                      height: 36,
-                      child: Stack(
-                        alignment: Alignment.centerLeft,
-                        children: [
-                          Slider(
-                            value: _settings.backgroundBlur,
-                            min: min,
-                            max: max,
-                            divisions: 30,
-                            onChanged: (value) {
-                              setState(
-                                () => _settings = _settings.copyWith(
-                                  backgroundBlur: value,
-                                ),
-                              );
-                            },
-                            onChangeEnd: (_) =>
-                                unawaited(_saveSettings(toast: false)),
-                          ),
-                          Positioned(
-                            left: dotX - 4,
-                            child: Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: Theme.of(context).colorScheme.secondary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Background Particles (${(_settings.backgroundParticlesOpacity * 100).round()}%)',
-                ),
-                const SizedBox(height: 6),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    const min = 0.0;
-                    const max = 2.0;
-                    const defaultOpacity = 1.0;
-                    final trackWidth = constraints.maxWidth;
-                    final normalized = (defaultOpacity - min) / (max - min);
-                    final dotX = trackWidth * normalized;
-                    return SizedBox(
-                      height: 36,
-                      child: Stack(
-                        alignment: Alignment.centerLeft,
-                        children: [
-                          Slider(
-                            value: _settings.backgroundParticlesOpacity,
-                            min: min,
-                            max: max,
-                            divisions: 20,
-                            label:
-                                '${(_settings.backgroundParticlesOpacity * 100).round()}%',
-                            onChanged: (value) {
-                              setState(
-                                () => _settings = _settings.copyWith(
-                                  backgroundParticlesOpacity: value,
-                                ),
-                              );
-                            },
-                            onChangeEnd: (_) =>
-                                unawaited(_saveSettings(toast: false)),
-                          ),
-                          Positioned(
-                            left: dotX - 4,
-                            child: Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: Theme.of(context).colorScheme.secondary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ],
+                );
+              },
             ),
-          ),
+            const SizedBox(height: 12),
+            Text(
+              'Background Particles (${(_settings.backgroundParticlesOpacity * 100).round()}%)',
+            ),
+            const SizedBox(height: 6),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                const min = 0.0;
+                const max = 2.0;
+                const defaultOpacity = 1.0;
+                final dotX = _atlasSliderMarkerCenterX(
+                  width: constraints.maxWidth,
+                  value: defaultOpacity,
+                  minValue: min,
+                  maxValue: max,
+                );
+                return SizedBox(
+                  height: 36,
+                  child: Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      Slider(
+                        value: _settings.backgroundParticlesOpacity,
+                        min: min,
+                        max: max,
+                        divisions: 20,
+                        label:
+                            '${(_settings.backgroundParticlesOpacity * 100).round()}%',
+                        onChanged: (value) {
+                          setState(
+                            () => _settings = _settings.copyWith(
+                              backgroundParticlesOpacity: value,
+                            ),
+                          );
+                        },
+                        onChangeEnd: (_) =>
+                            unawaited(_saveSettings(toast: false)),
+                      ),
+                      Positioned(
+                        left: dotX - 4,
+                        child: Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Theme.of(context).colorScheme.secondary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
         );
       case SettingsSection.startup:
-        body = _glass(
-          radius: 24,
-          child: SingleChildScrollView(
-            primary: false,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Startup', style: sectionTitleStyle),
-                const SizedBox(height: 16),
-                SwitchListTile(
-                  value: _settings.startupAnimationEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        startupAnimationEnabled: value,
-                      );
-                    });
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Startup Animation'),
-                  subtitle: const Text(
-                    'Play the intro animation when ATLAS launches.',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SwitchListTile(
-                  value: _settings.updateDefaultDllsOnLaunchEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        updateDefaultDllsOnLaunchEnabled: value,
-                      );
-                    });
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Update Files on Launch'),
-                  subtitle: const Text(
-                    'Refresh launcher-managed default DLLs and update your installed Paks and library DLLs when Link opens. Custom DLL paths are never changed.',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SwitchListTile(
-                  value: !_settings.launcherUpdateChecksEnabled,
-                  onChanged: (value) {
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        launcherUpdateChecksEnabled: !value,
-                      );
-                    });
-                    unawaited(_saveSettings(toast: false));
-                  },
-                  title: const Text('Disable Update Checks'),
-                  subtitle: const Text(
-                    'Skip update checks when launching Link.',
-                  ),
-                ),
-              ],
+        body = ListView(
+          shrinkWrap: true,
+          primary: false,
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Startup', style: sectionTitleStyle),
+            const SizedBox(height: 16),
+            SwitchListTile(
+              value: _settings.startupAnimationEnabled,
+              onChanged: (value) {
+                setState(() {
+                  _settings = _settings.copyWith(
+                    startupAnimationEnabled: value,
+                  );
+                });
+                unawaited(_saveSettings(toast: false));
+              },
+              title: const Text('Startup Animation'),
+              subtitle: const Text(
+                'Play the intro animation when ATLAS launches.',
+              ),
             ),
-          ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              value: _settings.discordRpcEnabled,
+              onChanged: (value) {
+                setState(() {
+                  _settings = _settings.copyWith(discordRpcEnabled: value);
+                });
+                _syncLauncherDiscordPresence();
+                if (!value) {
+                  unawaited(_restoreOriginalDiscordRpcDllAcrossBuildsIfIdle());
+                }
+                unawaited(_saveSettings(toast: false));
+              },
+              title: const Text('Discord Rich Presence'),
+              subtitle: const Text('Display your status for ATLAS on Discord.'),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              value: _settings.updateDefaultDllsOnLaunchEnabled,
+              onChanged: (value) {
+                setState(() {
+                  _settings = _settings.copyWith(
+                    updateDefaultDllsOnLaunchEnabled: value,
+                  );
+                });
+                unawaited(_saveSettings(toast: false));
+              },
+              title: const Text('Update Files on Launch'),
+              subtitle: const Text(
+                'Refresh launcher-managed default DLLs and update your installed Paks and library DLLs when Link opens. Custom DLL paths are never changed.',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              value: !_settings.launcherUpdateChecksEnabled,
+              onChanged: (value) {
+                setState(() {
+                  _settings = _settings.copyWith(
+                    launcherUpdateChecksEnabled: !value,
+                  );
+                });
+                unawaited(_saveSettings(toast: false));
+              },
+              title: const Text('Disable Update Checks'),
+              subtitle: const Text('Skip update checks when launching Link.'),
+            ),
+          ],
         );
       case SettingsSection.dataManagement:
-        body = _glass(
-          radius: 24,
-          child: SingleChildScrollView(
-            primary: false,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final compactHeader = constraints.maxWidth < 900;
-                    if (compactHeader) {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Data Management', style: sectionTitleStyle),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              FilledButton.icon(
-                                onPressed: _openInternalFiles,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFF1E88E5),
-                                  foregroundColor: Colors.white,
-                                  shape: const StadiumBorder(),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 11,
-                                  ),
-                                ),
-                                icon: const Icon(Icons.folder_rounded),
-                                label: const Text('View Internal Files'),
-                              ),
-                              FilledButton.icon(
-                                onPressed: _updatingDefaultDlls
-                                    ? null
-                                    : _updateAllDefaultDlls,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFF2E7D32),
-                                  foregroundColor: Colors.white,
-                                  shape: const StadiumBorder(),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 11,
-                                  ),
-                                ),
-                                icon: const Icon(
-                                  Icons.system_update_alt_rounded,
-                                ),
-                                label: Text(
-                                  _updatingDefaultDlls
-                                      ? 'Updating defaults...'
-                                      : 'Update Default DLLs',
-                                ),
-                              ),
-                              FilledButton.icon(
-                                onPressed: _showDllPresetsDialog,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFFDEAF37),
-                                  foregroundColor: Colors.white,
-                                  shape: const StadiumBorder(),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 11,
-                                  ),
-                                ),
-                                icon: const Icon(Icons.tune_rounded),
-                                label: const Text('DLL Presets'),
-                              ),
-                              FilledButton.icon(
-                                onPressed: _resetLauncher,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFFB3261E),
-                                  foregroundColor: Colors.white,
-                                  shape: const StadiumBorder(),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 11,
-                                  ),
-                                ),
-                                icon: const Icon(Icons.restart_alt_rounded),
-                                label: const Text('Reset Launcher'),
-                              ),
-                            ],
+        body = ListView(
+          shrinkWrap: true,
+          primary: false,
+          padding: const EdgeInsets.all(24),
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                Widget dataActionButton({
+                  required String tooltip,
+                  required IconData icon,
+                  required Color color,
+                  required VoidCallback? onPressed,
+                  Widget? busyChild,
+                }) {
+                  final onSurface = Theme.of(context).colorScheme.onSurface;
+                  return Tooltip(
+                    message: tooltip,
+                    child: SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: IconButton(
+                        onPressed: onPressed,
+                        icon: busyChild ?? Icon(icon, size: 18),
+                        style: IconButton.styleFrom(
+                          backgroundColor: color.withValues(alpha: 0.92),
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: onSurface.withValues(
+                            alpha: 0.16,
                           ),
-                        ],
-                      );
-                    }
+                          disabledForegroundColor: onSurface.withValues(
+                            alpha: 0.52,
+                          ),
+                          shape: const CircleBorder(),
+                          padding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ),
+                  );
+                }
 
-                    return Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Data Management',
-                            style: sectionTitleStyle,
-                          ),
-                        ),
-                        FilledButton.icon(
-                          onPressed: _openInternalFiles,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFF1E88E5),
-                            foregroundColor: Colors.white,
-                            shape: const StadiumBorder(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 11,
-                            ),
-                          ),
-                          icon: const Icon(Icons.folder_rounded),
-                          label: const Text('View Internal Files'),
-                        ),
-                        const SizedBox(width: 10),
-                        FilledButton.icon(
-                          onPressed: _updatingDefaultDlls
-                              ? null
-                              : _updateAllDefaultDlls,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFF2E7D32),
-                            foregroundColor: Colors.white,
-                            shape: const StadiumBorder(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 11,
-                            ),
-                          ),
-                          icon: const Icon(Icons.system_update_alt_rounded),
-                          label: Text(
-                            _updatingDefaultDlls
-                                ? 'Updating defaults...'
-                                : 'Update Default DLLs',
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        FilledButton.icon(
-                          onPressed: _showDllPresetsDialog,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFDEAF37),
-                            foregroundColor: Colors.white,
-                            shape: const StadiumBorder(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 11,
-                            ),
-                          ),
-                          icon: const Icon(Icons.tune_rounded),
-                          label: const Text('DLL Presets'),
-                        ),
-                        const SizedBox(width: 10),
-                        FilledButton.icon(
-                          onPressed: _resetLauncher,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFB3261E),
-                            foregroundColor: Colors.white,
-                            shape: const StadiumBorder(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 11,
-                            ),
-                          ),
-                          icon: const Icon(Icons.restart_alt_rounded),
-                          label: const Text('Reset Launcher'),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-                const SizedBox(height: 14),
-                if (_bundledDllDefaultsUpdateAvailable) ...[
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD93025).withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: const Color(0xFFD93025).withValues(alpha: 0.45),
+                final actionButtons = Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    dataActionButton(
+                      tooltip: 'View Internal Files',
+                      icon: Icons.folder_rounded,
+                      color: const Color(0xFF1E88E5),
+                      onPressed: _openInternalFiles,
+                    ),
+                    dataActionButton(
+                      tooltip: 'DLL Presets',
+                      icon: Icons.tune_rounded,
+                      color: const Color(0xFFDEAF37),
+                      onPressed: _showDllPresetsDialog,
+                    ),
+                    dataActionButton(
+                      tooltip: _updatingDefaultDlls
+                          ? 'Restoring and Updating DLLs...'
+                          : 'Restore DLLs',
+                      icon: Icons.system_update_alt_rounded,
+                      color: const Color(0xFF2E7D32),
+                      onPressed: _updatingDefaultDlls
+                          ? null
+                          : _updateAllDefaultDlls,
+                      busyChild: _updatingDefaultDlls
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
+                              ),
+                            )
+                          : null,
+                    ),
+                    dataActionButton(
+                      tooltip: 'Reset Launcher',
+                      icon: Icons.restart_alt_rounded,
+                      color: const Color(0xFFB3261E),
+                      onPressed: _resetLauncher,
+                    ),
+                  ],
+                );
+
+                final compactHeader = constraints.maxWidth < 520;
+                if (compactHeader) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Data Management', style: sectionTitleStyle),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: actionButtons,
                       ),
+                    ],
+                  );
+                }
+
+                return Row(
+                  children: [
+                    Expanded(
+                      child: Text('Data Management', style: sectionTitleStyle),
                     ),
-                    child: Text(
-                      '${_bundledDllUpdatedFileNames.length} Default DLL update(s) available on GitHub. Click Update Default DLLs to get the latest version(s).',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: _onSurface(context, 0.9),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                if (_hasMissingConfiguredDllPaths) ...[
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD93025).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: const Color(0xFFD93025).withValues(alpha: 0.4),
-                      ),
-                    ),
-                    child: Text(
-                      'One or more configured DLL paths are missing. Use Update Default DLLs or each row\'s reset button.',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: _onSurface(context, 0.9),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                _backendSettingTile(
-                  icon: Icons.description_outlined,
-                  title: 'Unreal Engine Patcher',
-                  subtitle: 'Unlocks the Unreal Engine Console',
-                  trailingWidth: 500,
-                  trailing: _dataPathPicker(
-                    slot: _DataDllSlot.unrealEnginePatcher,
-                    controller: _unrealEnginePatcherController,
-                    placeholder: 'No file selected',
-                    updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'Console.dll',
-                    ),
-                    onChanged: (value) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          unrealEnginePatcherPath: value.trim(),
-                        );
-                      });
-                      unawaited(_saveSettings(toast: false));
-                    },
-                    onPick: _pickUnrealEnginePatcher,
-                    onReset: _clearUnrealEnginePatcher,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _backendSettingTile(
-                  icon: Icons.description_outlined,
-                  title: 'Authentication Patcher',
-                  subtitle: 'Redirects all HTTP requests to the backend',
-                  trailingWidth: 500,
-                  trailing: _dataPathPicker(
-                    slot: _DataDllSlot.authenticationPatcher,
-                    controller: _authenticationPatcherController,
-                    placeholder: 'No file selected',
-                    updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'tellurium.dll',
-                    ),
-                    onChanged: (value) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          authenticationPatcherPath: value.trim(),
-                        );
-                      });
-                      unawaited(_saveSettings(toast: false));
-                    },
-                    onPick: _pickAuthenticationPatcher,
-                    onReset: _clearAuthenticationPatcher,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _backendSettingTile(
-                  icon: Icons.description_outlined,
-                  title: 'Memory Patcher',
-                  subtitle:
-                      'Prevents the client from crashing because of a memory leak',
-                  trailingWidth: 500,
-                  trailing: _dataPathPicker(
-                    slot: _DataDllSlot.memoryPatcher,
-                    controller: _memoryPatcherController,
-                    placeholder: 'No file selected',
-                    updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'Memory.dll',
-                    ),
-                    onChanged: (value) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          memoryPatcherPath: value.trim(),
-                        );
-                      });
-                      unawaited(_saveSettings(toast: false));
-                    },
-                    onPick: _pickMemoryPatcher,
-                    onReset: _clearMemoryPatcher,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _backendSettingTile(
-                  icon: Icons.description_outlined,
-                  title: 'Game Server',
-                  subtitle: 'The file injected to create the game server',
-                  trailingWidth: 500,
-                  trailing: _dataPathPicker(
-                    slot: _DataDllSlot.gameServer,
-                    controller: _gameServerFileController,
-                    placeholder: 'No file selected',
-                    updateWarningMessage: _dllRowUpdateWarningMessage(
-                      'magnesium.dll',
-                    ),
-                    onChanged: (value) {
-                      setState(() {
-                        _settings = _settings.copyWith(
-                          gameServerFilePath: value.trim(),
-                        );
-                      });
-                      unawaited(_saveSettings(toast: false));
-                    },
-                    onPick: _pickGameServerFile,
-                    onReset: _clearGameServerFile,
-                  ),
-                ),
-              ],
+                    actionButtons,
+                  ],
+                );
+              },
             ),
-          ),
+            const SizedBox(height: 14),
+            if (_bundledDllDefaultsUpdateAvailable) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD93025).withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFD93025).withValues(alpha: 0.45),
+                  ),
+                ),
+                child: Text(
+                  '${_bundledDllUpdatedFileNames.length} DLL update(s) available on GitHub. Click Update "Restore DLLs" to get the latest version(s).',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: _onSurface(context, 0.9),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (_hasMissingConfiguredDllPaths) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD93025).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFD93025).withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Text(
+                  'One or more configured DLL paths are missing. Use "Restore DLLs" or each row\'s reset button.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: _onSurface(context, 0.9),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            _backendSettingTile(
+              icon: Icons.description_outlined,
+              title: 'Unreal Engine Patcher',
+              subtitle: 'Unlocks the Unreal Engine Console',
+              trailingWidth: 500,
+              trailing: _dataPathPicker(
+                slot: _DataDllSlot.unrealEnginePatcher,
+                controller: _unrealEnginePatcherController,
+                placeholder: 'No file selected',
+                updateWarningMessage: _dllRowUpdateWarningMessage(
+                  'Console.dll',
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _settings = _settings.copyWith(
+                      unrealEnginePatcherPath: value.trim(),
+                    );
+                  });
+                  unawaited(_saveSettings(toast: false));
+                },
+                onPick: _pickUnrealEnginePatcher,
+                onReset: _clearUnrealEnginePatcher,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _backendSettingTile(
+              icon: Icons.description_outlined,
+              title: 'Authentication Patcher',
+              subtitle: 'Redirects all HTTP requests to the backend',
+              trailingWidth: 500,
+              trailing: _dataPathPicker(
+                slot: _DataDllSlot.authenticationPatcher,
+                controller: _authenticationPatcherController,
+                placeholder: 'No file selected',
+                updateWarningMessage: _dllRowUpdateWarningMessage(
+                  'tellurium.dll',
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _settings = _settings.copyWith(
+                      authenticationPatcherPath: value.trim(),
+                    );
+                  });
+                  unawaited(_saveSettings(toast: false));
+                },
+                onPick: _pickAuthenticationPatcher,
+                onReset: _clearAuthenticationPatcher,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _backendSettingTile(
+              icon: Icons.description_outlined,
+              title: 'Memory Patcher',
+              subtitle:
+                  'Prevents the client from crashing because of a memory leak',
+              trailingWidth: 500,
+              trailing: _dataPathPicker(
+                slot: _DataDllSlot.memoryPatcher,
+                controller: _memoryPatcherController,
+                placeholder: 'No file selected',
+                updateWarningMessage: _dllRowUpdateWarningMessage('Memory.dll'),
+                onChanged: (value) {
+                  setState(() {
+                    _settings = _settings.copyWith(
+                      memoryPatcherPath: value.trim(),
+                    );
+                  });
+                  unawaited(_saveSettings(toast: false));
+                },
+                onPick: _pickMemoryPatcher,
+                onReset: _clearMemoryPatcher,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _backendSettingTile(
+              icon: Icons.description_outlined,
+              title: 'Game Server',
+              subtitle: 'The file injected to create the game server',
+              trailingWidth: 500,
+              trailing: _dataPathPicker(
+                slot: _DataDllSlot.gameServer,
+                controller: _gameServerFileController,
+                placeholder: 'No file selected',
+                updateWarningMessage: _dllRowUpdateWarningMessage(
+                  'magnesium.dll',
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _settings = _settings.copyWith(
+                      gameServerFilePath: value.trim(),
+                    );
+                  });
+                  unawaited(_saveSettings(toast: false));
+                },
+                onPick: _pickGameServerFile,
+                onReset: _clearGameServerFile,
+              ),
+            ),
+          ],
         );
       case SettingsSection.credits:
       case SettingsSection.support:
@@ -32093,73 +33121,69 @@ foreach ($app in $appPaths) {
             ],
           ),
         ];
-        body = _glass(
-          radius: 24,
-          child: SingleChildScrollView(
-            primary: false,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        body = ListView(
+          shrinkWrap: true,
+          primary: false,
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Support', style: sectionTitleStyle),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                Text('Support', style: sectionTitleStyle),
-                const SizedBox(height: 12),
                 OutlinedButton.icon(
                   onPressed: _showLatestLauncherUpdateNotes,
                   icon: const Icon(Icons.auto_awesome_rounded),
                   label: const Text('Update Notes'),
                 ),
-                const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: () => _openUrl('https://discord.gg'),
                   icon: const Icon(Icons.discord_rounded),
                   label: const Text('Join Discord'),
                 ),
-                const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: _openLogs,
                   icon: const Icon(Icons.article_rounded),
                   label: const Text('Open Launcher Logs'),
                 ),
-                const SizedBox(height: 24),
-                Text('Credits', style: sectionTitleStyle),
-                const SizedBox(height: 12),
-                Text(
-                  'ATLAS Link was developed through open-source work. These people and projects provided core foundations for the launcher, dlls, etc.',
-                  style: TextStyle(
-                    color: _onSurface(context, 0.78),
-                    height: 1.45,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    const spacing = 16.0;
-                    final maxWidth = constraints.maxWidth;
-                    final columns = maxWidth >= 1180
-                        ? 4
-                        : maxWidth >= 820
-                        ? 2
-                        : 1;
-                    final cardWidth = columns == 1
-                        ? maxWidth
-                        : (maxWidth - ((columns - 1) * spacing)) / columns;
-
-                    return Wrap(
-                      spacing: spacing,
-                      runSpacing: spacing,
-                      children: [
-                        for (final credit in credits)
-                          SizedBox(
-                            width: cardWidth,
-                            child: _creditProfileCard(credit),
-                          ),
-                      ],
-                    );
-                  },
-                ),
               ],
             ),
-          ),
+            const SizedBox(height: 24),
+            Text('Credits', style: sectionTitleStyle),
+            const SizedBox(height: 12),
+            Text(
+              'ATLAS Link was developed through open-source work. These people and projects provided core foundations for the launcher, dlls, etc.',
+              style: TextStyle(color: _onSurface(context, 0.78), height: 1.45),
+            ),
+            const SizedBox(height: 18),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                const spacing = 16.0;
+                final maxWidth = constraints.maxWidth;
+                final columns = maxWidth >= 1180
+                    ? 4
+                    : maxWidth >= 820
+                    ? 2
+                    : 1;
+                final cardWidth = columns == 1
+                    ? maxWidth
+                    : (maxWidth - ((columns - 1) * spacing)) / columns;
+
+                return Wrap(
+                  spacing: spacing,
+                  runSpacing: spacing,
+                  children: [
+                    for (final credit in credits)
+                      SizedBox(
+                        width: cardWidth,
+                        child: _creditProfileCard(credit),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
         );
     }
 
@@ -32180,7 +33204,7 @@ foreach ($app in $appPaths) {
                 index: 1,
                 child: _animatedSwap(
                   switchKey: _settingsSection,
-                  duration: const Duration(milliseconds: 220),
+                  duration: const Duration(milliseconds: 520),
                   child: body,
                 ),
               ),
@@ -32209,7 +33233,7 @@ foreach ($app in $appPaths) {
                     index: 1,
                     child: _animatedSwap(
                       switchKey: _settingsSection,
-                      duration: const Duration(milliseconds: 220),
+                      duration: const Duration(milliseconds: 520),
                       expand: true,
                       layoutAlignment: Alignment.topCenter,
                       child: body,
@@ -32227,50 +33251,53 @@ foreach ($app in $appPaths) {
   Widget _animatedSwap({
     required Object switchKey,
     required Widget child,
-    Offset slideBegin = Offset.zero,
-    Duration duration = const Duration(milliseconds: 240),
+    Duration duration = const Duration(milliseconds: 520),
     bool expand = false,
-    AlignmentGeometry layoutAlignment = Alignment.center,
+    AlignmentGeometry layoutAlignment = Alignment.topCenter,
   }) {
     final keyed = KeyedSubtree(key: ValueKey(switchKey), child: child);
-    if (MediaQuery.of(context).disableAnimations) return keyed;
+    if (MediaQuery.of(context).disableAnimations) {
+      final panel = _glass(radius: 24, child: keyed);
+      if (!expand) return panel;
+      return SizedBox(width: double.infinity, child: panel);
+    }
 
     final switcher = AnimatedSwitcher(
       duration: duration,
+      reverseDuration: const Duration(milliseconds: 90),
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInCubic,
       layoutBuilder: (currentChild, previousChildren) {
-        // Do not keep outgoing page bodies alive in the layout. The settings
-        // panes can be tall and glassy, so overlapping old/new children during
-        // fast switching looks like stacked cards.
         return Align(
           alignment: layoutAlignment,
+          widthFactor: expand ? null : 1.0,
+          heightFactor: 1.0,
           child: currentChild ?? const SizedBox.shrink(),
         );
       },
       transitionBuilder: (child, animation) {
         final curved = CurvedAnimation(
           parent: animation,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeInCubic,
+          curve: const Interval(0.34, 1.0, curve: Curves.easeInOutCubic),
+          reverseCurve: Curves.easeOutCubic,
         );
 
-        return FadeTransition(
-          opacity: curved,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: slideBegin,
-              end: Offset.zero,
-            ).animate(curved),
-            child: child,
-          ),
-        );
+        return FadeTransition(opacity: curved, child: child);
       },
       child: keyed,
     );
 
-    if (!expand) return switcher;
-    return SizedBox(width: double.infinity, child: switcher);
+    final sizedSwitcher = AnimatedSize(
+      duration: duration,
+      curve: Curves.easeOutCubic,
+      alignment: layoutAlignment,
+      clipBehavior: Clip.hardEdge,
+      child: switcher,
+    );
+
+    final panel = _glass(radius: 24, child: sizedSwitcher);
+    if (!expand) return panel;
+    return SizedBox(width: double.infinity, child: panel);
   }
 
   Widget _menuItemEntrance({
@@ -32299,56 +33326,114 @@ foreach ($app in $appPaths) {
     final selectedColor = dark
         ? Colors.white.withValues(alpha: 0.18)
         : Theme.of(context).colorScheme.secondary.withValues(alpha: 0.14);
+    final sections = <({SettingsSection section, IconData icon, String title})>[
+      (
+        section: SettingsSection.profile,
+        icon: Icons.person_rounded,
+        title: 'Profile',
+      ),
+      (
+        section: SettingsSection.appearance,
+        icon: Icons.palette_rounded,
+        title: 'Appearance',
+      ),
+      (
+        section: SettingsSection.startup,
+        icon: Icons.power_settings_new_rounded,
+        title: 'Startup',
+      ),
+      (
+        section: SettingsSection.dataManagement,
+        icon: Icons.storage_rounded,
+        title: 'Data Management',
+      ),
+      (
+        section: SettingsSection.support,
+        icon: Icons.help_rounded,
+        title: 'Support',
+      ),
+    ];
 
-    Widget tile({
-      required SettingsSection section,
-      required IconData icon,
-      required String title,
+    Widget tile(
+      ({SettingsSection section, IconData icon, String title}) item, {
+      required bool useSlidingIndicator,
     }) {
-      final selected = _settingsSection == section;
-      return Padding(
-        padding: compact ? EdgeInsets.zero : const EdgeInsets.only(bottom: 8),
+      final selected = _settingsSection == item.section;
+      return SizedBox(
+        height: compact && !useSlidingIndicator ? null : 46,
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
           onTap: () {
-            if (_settingsSection != section) _pauseBackgroundMotionBriefly();
-            setState(() => _settingsSection = section);
+            if (_settingsSection != item.section) {
+              _pauseBackgroundMotionBriefly();
+            }
+            setState(() => _settingsSection = item.section);
             _syncLibraryActionsNudgePulse();
             _syncLauncherDiscordPresence();
           },
-          child: Container(
+          child: AnimatedContainer(
+            duration: useSlidingIndicator
+                ? Duration.zero
+                : const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
             padding: EdgeInsets.symmetric(
               horizontal: compact ? 12 : 12,
               vertical: compact ? 10 : 12,
             ),
+            alignment: compact ? Alignment.center : Alignment.centerLeft,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              color: selected ? selectedColor : Colors.transparent,
+              color: selected && !useSlidingIndicator
+                  ? selectedColor
+                  : Colors.transparent,
             ),
             child: Row(
-              mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
+              mainAxisSize: compact && !useSlidingIndicator
+                  ? MainAxisSize.min
+                  : MainAxisSize.max,
+              mainAxisAlignment: compact
+                  ? MainAxisAlignment.center
+                  : MainAxisAlignment.start,
               children: [
                 Icon(
-                  icon,
+                  item.icon,
                   size: compact ? 18 : 20,
                   color: _onSurface(context, selected ? 1.0 : 0.66),
                 ),
                 const SizedBox(width: 10),
                 if (compact)
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: _onSurface(context, selected ? 1.0 : 0.82),
-                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                    ),
-                  )
+                  if (useSlidingIndicator)
+                    Flexible(
+                      child: Text(
+                        item.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: _onSurface(context, selected ? 1.0 : 0.82),
+                          fontWeight: selected
+                              ? FontWeight.w800
+                              : FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  else
+                    Text(
+                      item.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: _onSurface(context, selected ? 1.0 : 0.82),
+                        fontWeight: selected
+                            ? FontWeight.w800
+                            : FontWeight.w600,
+                      ),
+                    )
                 else
                   Expanded(
                     child: Text(
-                      title,
+                      item.title,
                       style: TextStyle(
                         fontSize: 17,
                         color: _onSurface(context, selected ? 1.0 : 0.82),
@@ -32365,70 +33450,96 @@ foreach ($app in $appPaths) {
       );
     }
 
+    Widget compactTabs() {
+      const tileHeight = 46.0;
+      final selectedIndex = max(
+        0,
+        sections.indexWhere((item) => item.section == _settingsSection),
+      );
+      final selectedAlignment = sections.length <= 1
+          ? 0.0
+          : -1.0 + (2.0 * selectedIndex / (sections.length - 1));
+      return SizedBox(
+        height: tileHeight,
+        child: Stack(
+          children: [
+            AnimatedAlign(
+              duration: const Duration(milliseconds: 280),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment(selectedAlignment, 0),
+              child: FractionallySizedBox(
+                widthFactor: 1 / sections.length,
+                heightFactor: 1,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    color: selectedColor,
+                  ),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                for (final item in sections)
+                  Expanded(child: tile(item, useSlidingIndicator: true)),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget desktopTabs() {
+      const tileHeight = 46.0;
+      const tileGap = 8.0;
+      final selectedIndex = max(
+        0,
+        sections.indexWhere((item) => item.section == _settingsSection),
+      );
+      return SizedBox(
+        height:
+            (sections.length * tileHeight) + ((sections.length - 1) * tileGap),
+        child: Stack(
+          children: [
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOutCubic,
+              left: 0,
+              right: 0,
+              top: selectedIndex * (tileHeight + tileGap),
+              height: tileHeight,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: selectedColor,
+                ),
+              ),
+            ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var index = 0; index < sections.length; index++) ...[
+                  tile(sections[index], useSlidingIndicator: true),
+                  if (index < sections.length - 1)
+                    const SizedBox(height: tileGap),
+                ],
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return _glass(
       radius: 24,
       child: Padding(
         padding: EdgeInsets.fromLTRB(16, compact ? 12 : 16, 16, 16),
         child: compact
-            ? Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  tile(
-                    section: SettingsSection.profile,
-                    icon: Icons.person_rounded,
-                    title: 'Profile',
-                  ),
-                  tile(
-                    section: SettingsSection.appearance,
-                    icon: Icons.palette_rounded,
-                    title: 'Appearance',
-                  ),
-                  tile(
-                    section: SettingsSection.startup,
-                    icon: Icons.power_settings_new_rounded,
-                    title: 'Startup',
-                  ),
-                  tile(
-                    section: SettingsSection.dataManagement,
-                    icon: Icons.storage_rounded,
-                    title: 'Data Management',
-                  ),
-                  tile(
-                    section: SettingsSection.support,
-                    icon: Icons.help_rounded,
-                    title: 'Support',
-                  ),
-                ],
-              )
+            ? compactTabs()
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  tile(
-                    section: SettingsSection.profile,
-                    icon: Icons.person_rounded,
-                    title: 'Profile',
-                  ),
-                  tile(
-                    section: SettingsSection.appearance,
-                    icon: Icons.palette_rounded,
-                    title: 'Appearance',
-                  ),
-                  tile(
-                    section: SettingsSection.startup,
-                    icon: Icons.power_settings_new_rounded,
-                    title: 'Startup',
-                  ),
-                  tile(
-                    section: SettingsSection.dataManagement,
-                    icon: Icons.storage_rounded,
-                    title: 'Data Management',
-                  ),
-                  tile(
-                    section: SettingsSection.support,
-                    icon: Icons.help_rounded,
-                    title: 'Support',
-                  ),
+                  desktopTabs(),
                   const SizedBox(height: 10),
                   Container(height: 1, color: _onSurface(context, 0.12)),
                   const SizedBox(height: 12),
@@ -32469,37 +33580,24 @@ foreach ($app in $appPaths) {
       },
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),
-        child: ValueListenableBuilder<bool>(
-          valueListenable: _windowResizeBlurPausedNotifier,
-          child: child,
-          builder: (context, blurPaused, panelChild) {
-            return TweenAnimationBuilder<double>(
-              tween: Tween<double>(end: blurPaused ? 0.0 : 16.0),
-              duration: blurPaused
-                  ? Duration.zero
-                  : _windowResizeBlurFadeInDuration,
-              curve: Curves.easeOutCubic,
-              builder: (context, blurSigma, panelChild) {
-                final panel = Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(radius),
-                    color: _glassSurfaceColor(context),
-                    border: Border.all(color: _onSurface(context, 0.08)),
-                  ),
-                  child: panelChild,
-                );
-                if (blurSigma <= 0.01) return panel;
-                return BackdropFilter(
-                  filter: ImageFilter.blur(
-                    sigmaX: blurSigma,
-                    sigmaY: blurSigma,
-                  ),
-                  child: panel,
-                );
-              },
-              child: panelChild,
-            );
-          },
+        child: BackdropFilter(
+          filter: ImageFilter.blur(
+            sigmaX: _glassBlurSigma(_settings.panelGlassStyle),
+            sigmaY: _glassBlurSigma(_settings.panelGlassStyle),
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(radius),
+              color: _glassSurfaceColor(
+                context,
+                _settings.panelGlassStyle,
+                Color(_settings.panelGlassColorValue),
+                _settings.panelGlassOpacity,
+              ),
+              border: Border.all(color: _onSurface(context, 0.08)),
+            ),
+            child: child,
+          ),
         ),
       ),
     );
@@ -32537,6 +33635,7 @@ foreach ($app in $appPaths) {
               BoxShadow(
                 color: _glassShadowColor(
                   context,
+                  _settings.panelGlassStyle,
                 ).withValues(alpha: dark ? 0.18 : 0.10),
                 blurRadius: 26,
                 offset: const Offset(0, 14),
@@ -32737,6 +33836,7 @@ foreach ($app in $appPaths) {
           BoxShadow(
             color: _glassShadowColor(
               dialogContext,
+              _settings.panelGlassStyle,
             ).withValues(alpha: dark ? 0.16 : 0.10),
             blurRadius: 24,
             offset: const Offset(0, 14),
@@ -33221,6 +34321,354 @@ class _AtlasStartupAnimationOverlayState
   }
 }
 
+class _AtlasBackgroundMedia extends StatefulWidget {
+  const _AtlasBackgroundMedia({
+    required this.enabled,
+    required this.fallbackImage,
+    required this.videoSource,
+    this.onStatus,
+  });
+
+  final bool enabled;
+  final ImageProvider<Object> fallbackImage;
+  final String? videoSource;
+  final ValueChanged<String>? onStatus;
+
+  @override
+  State<_AtlasBackgroundMedia> createState() => _AtlasBackgroundMediaState();
+}
+
+class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
+  VideoPlayerController? _controller;
+  media_kit.Player? _fallbackPlayer;
+  media_kit_video.VideoController? _fallbackController;
+  StreamSubscription<String>? _fallbackErrorSubscription;
+  String? _activeSource;
+  bool _videoVisible = false;
+  bool _videoFailed = false;
+  bool _usingMediaKitFallback = false;
+  int _loadGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncVideoSource();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AtlasBackgroundMedia oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.enabled != widget.enabled ||
+        oldWidget.videoSource != widget.videoSource) {
+      _syncVideoSource();
+    }
+  }
+
+  bool _hasDecodedVideo(VideoPlayerController controller) {
+    final value = controller.value;
+    return value.isInitialized && value.size.width > 0 && value.size.height > 0;
+  }
+
+  bool _hasDecodedMediaKitVideo(media_kit.Player player) {
+    final width =
+        player.state.width ??
+        player.state.videoParams.dw ??
+        player.state.videoParams.w;
+    final height =
+        player.state.height ??
+        player.state.videoParams.dh ??
+        player.state.videoParams.h;
+    return (width ?? 0) > 0 && (height ?? 0) > 0;
+  }
+
+  Future<bool> _waitForMediaKitVideo(
+    media_kit.Player player, {
+    required int generation,
+    required String source,
+  }) async {
+    if (_hasDecodedMediaKitVideo(player)) return true;
+
+    final completer = Completer<bool>();
+    late final Timer timeout;
+    final subscriptions = <StreamSubscription<Object?>>[];
+
+    void finish(bool value) {
+      if (!completer.isCompleted) completer.complete(value);
+    }
+
+    void check() {
+      if (!mounted ||
+          generation != _loadGeneration ||
+          widget.videoSource != source ||
+          !widget.enabled) {
+        finish(false);
+        return;
+      }
+      if (_hasDecodedMediaKitVideo(player)) finish(true);
+    }
+
+    subscriptions.add(
+      player.stream.width.listen((_) => check(), onError: (_) => finish(false)),
+    );
+    subscriptions.add(
+      player.stream.height.listen(
+        (_) => check(),
+        onError: (_) => finish(false),
+      ),
+    );
+    subscriptions.add(
+      player.stream.videoParams.listen(
+        (_) => check(),
+        onError: (_) => finish(false),
+      ),
+    );
+    subscriptions.add(player.stream.error.listen((_) => finish(false)));
+
+    timeout = Timer(const Duration(seconds: 12), () => finish(false));
+    check();
+
+    try {
+      return await completer.future;
+    } finally {
+      timeout.cancel();
+      for (final subscription in subscriptions) {
+        unawaited(subscription.cancel());
+      }
+    }
+  }
+
+  void _disposeVideoPlayerController() {
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      unawaited(controller.dispose());
+    }
+  }
+
+  void _disposeMediaKitFallback() {
+    unawaited(_fallbackErrorSubscription?.cancel());
+    _fallbackErrorSubscription = null;
+    final player = _fallbackPlayer;
+    _fallbackPlayer = null;
+    _fallbackController = null;
+    if (player != null) {
+      unawaited(player.dispose());
+    }
+  }
+
+  void _disposeControllers() {
+    _disposeVideoPlayerController();
+    _disposeMediaKitFallback();
+  }
+
+  void _syncVideoSource() {
+    final source = widget.enabled ? widget.videoSource : null;
+    if (source == null || source.isEmpty) {
+      _activeSource = null;
+      _loadGeneration++;
+      setState(() {
+        _videoVisible = false;
+        _videoFailed = false;
+        _usingMediaKitFallback = false;
+      });
+      _disposeControllers();
+      return;
+    }
+    if (_activeSource == source && !_videoFailed) return;
+    _activeSource = source;
+    unawaited(_openVideo(source));
+  }
+
+  Future<void> _openVideo(String source) async {
+    final generation = ++_loadGeneration;
+    setState(() {
+      _videoVisible = false;
+      _videoFailed = false;
+      _usingMediaKitFallback = false;
+    });
+    _disposeControllers();
+    VideoPlayerController? controller;
+    try {
+      controller = _atlasCreateVideoController(source);
+      _controller = controller;
+      await controller.initialize().timeout(const Duration(seconds: 20));
+      final ready = _hasDecodedVideo(controller);
+      if (ready) {
+        await controller.setVolume(0);
+        await controller.setLooping(true);
+        await controller.play();
+      }
+      if (!mounted ||
+          generation != _loadGeneration ||
+          widget.videoSource != source ||
+          !widget.enabled) {
+        if (_controller == controller) _controller = null;
+        unawaited(controller.dispose());
+        return;
+      }
+      if (ready) {
+        widget.onStatus?.call('Wallpaper opened with video_player_win.');
+        setState(() {
+          _videoVisible = true;
+          _videoFailed = false;
+          _usingMediaKitFallback = false;
+        });
+        return;
+      }
+      widget.onStatus?.call(
+        'video_player_win opened wallpaper without video frames; trying media-kit fallback.',
+      );
+      if (_controller == controller) _controller = null;
+      unawaited(controller.dispose());
+      await _openMediaKitFallback(source, generation: generation);
+    } catch (error) {
+      if (_controller == controller) _controller = null;
+      unawaited(controller?.dispose());
+      if (!mounted || generation != _loadGeneration) return;
+      widget.onStatus?.call(
+        'video_player_win failed to open wallpaper: $error. Trying media-kit fallback.',
+      );
+      await _openMediaKitFallback(source, generation: generation);
+    }
+  }
+
+  Future<void> _openMediaKitFallback(
+    String source, {
+    required int generation,
+  }) async {
+    _disposeMediaKitFallback();
+    media_kit.Player? player;
+    try {
+      player = media_kit.Player();
+      _fallbackPlayer = player;
+      _fallbackController = media_kit_video.VideoController(player);
+      _fallbackErrorSubscription = player.stream.error.listen((error) {
+        widget.onStatus?.call('media-kit wallpaper error: $error');
+        if (!mounted || generation != _loadGeneration) return;
+        setState(() {
+          _videoVisible = false;
+          _videoFailed = true;
+          _usingMediaKitFallback = false;
+        });
+      });
+      await player.setVolume(0);
+      await player.setPlaylistMode(media_kit.PlaylistMode.loop);
+      final mediaSource = _atlasMediaKitVideoSource(source);
+      await player.open(media_kit.Media(mediaSource), play: true);
+      final ready = await _waitForMediaKitVideo(
+        player,
+        generation: generation,
+        source: source,
+      );
+      if (!mounted ||
+          generation != _loadGeneration ||
+          widget.videoSource != source ||
+          !widget.enabled) {
+        if (_fallbackPlayer == player) {
+          _fallbackPlayer = null;
+          _fallbackController = null;
+        }
+        unawaited(player.dispose());
+        return;
+      }
+      if (ready) {
+        widget.onStatus?.call('Wallpaper opened with media-kit fallback.');
+        setState(() {
+          _videoVisible = true;
+          _videoFailed = false;
+          _usingMediaKitFallback = true;
+        });
+        return;
+      }
+      widget.onStatus?.call(
+        'media-kit fallback opened wallpaper without video frames.',
+      );
+      setState(() {
+        _videoVisible = false;
+        _videoFailed = true;
+        _usingMediaKitFallback = false;
+      });
+    } catch (error) {
+      if (_fallbackPlayer == player) {
+        _fallbackPlayer = null;
+        _fallbackController = null;
+      }
+      unawaited(player?.dispose());
+      if (!mounted || generation != _loadGeneration) return;
+      widget.onStatus?.call('media-kit wallpaper fallback failed: $error');
+      setState(() {
+        _videoVisible = false;
+        _videoFailed = true;
+        _usingMediaKitFallback = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposeControllers();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0E14),
+        image: widget.enabled
+            ? DecorationImage(image: widget.fallbackImage, fit: BoxFit.cover)
+            : null,
+      ),
+    );
+
+    if (!widget.enabled ||
+        widget.videoSource == null ||
+        widget.videoSource!.isEmpty ||
+        _videoFailed) {
+      return fallback;
+    }
+    final controller = _controller;
+    final fallbackController = _fallbackController;
+    if (_usingMediaKitFallback) {
+      if (fallbackController == null) return fallback;
+    } else if (controller == null || !controller.value.isInitialized) {
+      return fallback;
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        fallback,
+        IgnorePointer(
+          child: AnimatedOpacity(
+            opacity: _videoVisible ? 1 : 0,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+            child: _usingMediaKitFallback
+                ? media_kit_video.Video(
+                    controller: fallbackController!,
+                    fit: BoxFit.cover,
+                    filterQuality: FilterQuality.high,
+                    controls: media_kit_video.NoVideoControls,
+                    onEnterFullscreen: () async {},
+                    onExitFullscreen: () async {},
+                  )
+                : FittedBox(
+                    fit: BoxFit.cover,
+                    clipBehavior: Clip.hardEdge,
+                    child: SizedBox(
+                      width: controller!.value.size.width,
+                      height: controller.value.size.height,
+                      child: VideoPlayer(controller),
+                    ),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _AtlasParticleField extends StatefulWidget {
   const _AtlasParticleField({required this.opacity});
 
@@ -33686,14 +35134,52 @@ bool _isDarkTheme(BuildContext context) {
   return Theme.of(context).brightness == Brightness.dark;
 }
 
-Color _glassSurfaceColor(BuildContext context) {
-  final dark = _isDarkTheme(context);
-  return Colors.white.withValues(alpha: dark ? 0.06 : 0.30);
+double _glassBlurSigma(PanelGlassStyle style) {
+  return switch (style) {
+    PanelGlassStyle.frosted => 16,
+    PanelGlassStyle.soft => 10,
+    PanelGlassStyle.solid => 0,
+  };
 }
 
-Color _glassShadowColor(BuildContext context) {
+Color _glassSurfaceColor(
+  BuildContext context, [
+  PanelGlassStyle style = PanelGlassStyle.frosted,
+  Color? tintColor,
+  double opacityScale = 1.0,
+]) {
   final dark = _isDarkTheme(context);
-  return Colors.black.withValues(alpha: dark ? 0.24 : 0.14);
+  final opacity = opacityScale.clamp(0.35, 1.40).toDouble();
+  final tint =
+      tintColor ??
+      (dark
+          ? const Color(_defaultPanelGlassColorValue)
+          : const Color(0xFFF6FAFF));
+  return switch (style) {
+    PanelGlassStyle.frosted => Colors.white.withValues(
+      alpha: ((dark ? 0.06 : 0.30) * opacity).clamp(0.0, 1.0),
+    ),
+    PanelGlassStyle.soft => tint.withValues(
+      alpha: ((dark ? 0.72 : 0.70) * opacity).clamp(0.0, 1.0),
+    ),
+    PanelGlassStyle.solid => tint.withValues(
+      alpha: ((dark ? 0.92 : 0.90) * opacity).clamp(0.0, 1.0),
+    ),
+  };
+}
+
+Color _glassShadowColor(
+  BuildContext context, [
+  PanelGlassStyle style = PanelGlassStyle.frosted,
+]) {
+  final dark = _isDarkTheme(context);
+  return switch (style) {
+    PanelGlassStyle.frosted => Colors.black.withValues(
+      alpha: dark ? 0.24 : 0.14,
+    ),
+    PanelGlassStyle.soft => Colors.black.withValues(alpha: dark ? 0.20 : 0.12),
+    PanelGlassStyle.solid => Colors.black.withValues(alpha: dark ? 0.16 : 0.10),
+  };
 }
 
 Color _dialogSurfaceColor(BuildContext context) {
@@ -34271,6 +35757,68 @@ String _atlasPlayableVideoUrl(String value) {
     return Uri.file(trimmed).toString();
   }
   return trimmed;
+}
+
+VideoPlayerController _atlasCreateVideoController(String value) {
+  final source = _atlasPlayableVideoUrl(value);
+  if (source.startsWith('asset:///')) {
+    final asset = source.substring('asset:///'.length);
+    if (Platform.isWindows) {
+      final file = File(_atlasBundledAssetPath(asset));
+      if (file.existsSync()) return VideoPlayerController.file(file);
+    }
+    return VideoPlayerController.asset(asset);
+  }
+  if (source.startsWith('assets/')) {
+    if (Platform.isWindows) {
+      final file = File(_atlasBundledAssetPath(source));
+      if (file.existsSync()) return VideoPlayerController.file(file);
+    }
+    return VideoPlayerController.asset(source);
+  }
+
+  final uri = Uri.tryParse(source);
+  if (uri != null && uri.hasScheme) {
+    if (uri.scheme.toLowerCase() == 'file') {
+      return VideoPlayerController.file(
+        File(uri.toFilePath(windows: Platform.isWindows)),
+      );
+    }
+    return VideoPlayerController.networkUrl(uri);
+  }
+
+  if (source.startsWith(r'\\') ||
+      RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(source) ||
+      File(source).existsSync()) {
+    return VideoPlayerController.file(File(source));
+  }
+
+  return VideoPlayerController.networkUrl(Uri.parse(source));
+}
+
+String _atlasMediaKitVideoSource(String value) {
+  final source = _atlasPlayableVideoUrl(value);
+  if (source.startsWith('asset:///')) {
+    final asset = source.substring('asset:///'.length);
+    final file = File(_atlasBundledAssetPath(asset));
+    if (file.existsSync()) return file.uri.toString();
+    return source;
+  }
+  if (source.startsWith('assets/')) {
+    final file = File(_atlasBundledAssetPath(source));
+    if (file.existsSync()) return file.uri.toString();
+  }
+  return source;
+}
+
+String _atlasBundledAssetPath(String asset) {
+  final normalized = asset.replaceAll('/', Platform.pathSeparator);
+  return [
+    File(Platform.resolvedExecutable).parent.path,
+    'data',
+    'flutter_assets',
+    normalized,
+  ].join(Platform.pathSeparator);
 }
 
 class _AtlasModPlaybackViewer extends StatelessWidget {
@@ -35333,6 +36881,10 @@ class LauncherSettings {
     required this.backendConnectionTipComplete,
     required this.popupBackgroundBlurEnabled,
     required this.discordRpcEnabled,
+    required this.navigationBarLocation,
+    required this.panelGlassStyle,
+    required this.panelGlassColorValue,
+    required this.panelGlassOpacity,
     required this.backgroundImagePath,
     required this.backgroundBlur,
     required this.backgroundParticlesOpacity,
@@ -35384,6 +36936,10 @@ class LauncherSettings {
   final bool backendConnectionTipComplete;
   final bool popupBackgroundBlurEnabled;
   final bool discordRpcEnabled;
+  final NavigationBarLocation navigationBarLocation;
+  final PanelGlassStyle panelGlassStyle;
+  final int panelGlassColorValue;
+  final double panelGlassOpacity;
   final String backgroundImagePath;
   final double backgroundBlur;
   final double backgroundParticlesOpacity;
@@ -35451,6 +37007,11 @@ class LauncherSettings {
         'popupBackgroundBlur',
         'PopupBackgroundBlur',
         'DiscordRpcEnabled',
+        'NavigationBarLocation',
+        'PanelGlassStyle',
+        'PanelGlassColor',
+        'PanelGlassColorValue',
+        'PanelGlassOpacity',
         'BackgroundImagePath',
         'BackgroundBlur',
         'BackgroundParticlesOpacity',
@@ -35500,6 +37061,10 @@ class LauncherSettings {
     bool? backendConnectionTipComplete,
     bool? popupBackgroundBlurEnabled,
     bool? discordRpcEnabled,
+    NavigationBarLocation? navigationBarLocation,
+    PanelGlassStyle? panelGlassStyle,
+    int? panelGlassColorValue,
+    double? panelGlassOpacity,
     String? backgroundImagePath,
     double? backgroundBlur,
     double? backgroundParticlesOpacity,
@@ -35556,6 +37121,11 @@ class LauncherSettings {
       popupBackgroundBlurEnabled:
           popupBackgroundBlurEnabled ?? this.popupBackgroundBlurEnabled,
       discordRpcEnabled: discordRpcEnabled ?? this.discordRpcEnabled,
+      navigationBarLocation:
+          navigationBarLocation ?? this.navigationBarLocation,
+      panelGlassStyle: panelGlassStyle ?? this.panelGlassStyle,
+      panelGlassColorValue: panelGlassColorValue ?? this.panelGlassColorValue,
+      panelGlassOpacity: panelGlassOpacity ?? this.panelGlassOpacity,
       backgroundImagePath: backgroundImagePath ?? this.backgroundImagePath,
       backgroundBlur: backgroundBlur ?? this.backgroundBlur,
       backgroundParticlesOpacity:
@@ -35629,8 +37199,12 @@ class LauncherSettings {
       backendConnectionTipComplete: false,
       popupBackgroundBlurEnabled: true,
       discordRpcEnabled: true,
+      navigationBarLocation: NavigationBarLocation.top,
+      panelGlassStyle: PanelGlassStyle.frosted,
+      panelGlassColorValue: _defaultPanelGlassColorValue,
+      panelGlassOpacity: 1.0,
       backgroundImagePath: '',
-      backgroundBlur: 15,
+      backgroundBlur: 5,
       backgroundParticlesOpacity: 1.0,
       startupAnimationEnabled: true,
       updateDefaultDllsOnLaunchEnabled: true,
@@ -35708,6 +37282,37 @@ class LauncherSettings {
         return EmbeddedBackendType.neoniteV2;
       }
       return EmbeddedBackendType.lawinServer;
+    }
+
+    NavigationBarLocation asNavigationBarLocation(dynamic value) {
+      final raw = (value ?? '').toString().toLowerCase().trim();
+      if (raw == 'left') return NavigationBarLocation.left;
+      if (raw == 'right') return NavigationBarLocation.right;
+      return NavigationBarLocation.top;
+    }
+
+    PanelGlassStyle asPanelGlassStyle(dynamic value) {
+      final raw = (value ?? '').toString().toLowerCase().trim();
+      if (raw == 'soft') return PanelGlassStyle.soft;
+      if (raw == 'solid') return PanelGlassStyle.solid;
+      return PanelGlassStyle.frosted;
+    }
+
+    int asColorValue(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) {
+        var raw = value.trim();
+        if (raw.isEmpty) return fallback;
+        raw = raw
+            .replaceFirst(RegExp(r'^#'), '')
+            .replaceFirst(RegExp(r'^0x', caseSensitive: false), '');
+        if (raw.length == 6) raw = 'FF$raw';
+        if (raw.length == 8) {
+          return int.tryParse(raw, radix: 16) ?? fallback;
+        }
+      }
+      return fallback;
     }
 
     BackendRuntimeProvider asBackendRuntimeProvider(dynamic value) {
@@ -35848,12 +37453,29 @@ class LauncherSettings {
         json['discordRpcEnabled'] ?? json['DiscordRpcEnabled'],
         true,
       ),
+      navigationBarLocation: asNavigationBarLocation(
+        json['navigationBarLocation'] ?? json['NavigationBarLocation'],
+      ),
+      panelGlassStyle: asPanelGlassStyle(
+        json['panelGlassStyle'] ?? json['PanelGlassStyle'],
+      ),
+      panelGlassColorValue: asColorValue(
+        json['panelGlassColor'] ??
+            json['panelGlassColorValue'] ??
+            json['PanelGlassColor'] ??
+            json['PanelGlassColorValue'],
+        _defaultPanelGlassColorValue,
+      ),
+      panelGlassOpacity: asDouble(
+        json['panelGlassOpacity'] ?? json['PanelGlassOpacity'],
+        1.0,
+      ).clamp(0.35, 1.40).toDouble(),
       backgroundImagePath:
           (json['backgroundImagePath'] ?? json['BackgroundImagePath'] ?? '')
               .toString(),
       backgroundBlur: asDouble(
         json['backgroundBlur'] ?? json['BackgroundBlur'],
-        15,
+        5,
       ).clamp(0, 30),
       backgroundParticlesOpacity: asDouble(
         json['backgroundParticlesOpacity'] ??
@@ -36005,6 +37627,10 @@ class LauncherSettings {
       'backendConnectionTipComplete': backendConnectionTipComplete,
       'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
       'discordRpcEnabled': discordRpcEnabled,
+      'navigationBarLocation': navigationBarLocation.name,
+      'panelGlassStyle': panelGlassStyle.name,
+      'panelGlassColor': _colorValueToHex(panelGlassColorValue),
+      'panelGlassOpacity': panelGlassOpacity,
       'backgroundImagePath': backgroundImagePath,
       'backgroundBlur': backgroundBlur,
       'backgroundParticlesOpacity': backgroundParticlesOpacity,

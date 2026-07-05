@@ -226,7 +226,7 @@ begin
   DefenderIntroLabel.WordWrap := True;
   DefenderIntroLabel.Font.Style := [fsBold];
   DefenderIntroLabel.Caption :=
-    'ATLAS Link can use bundled DLLs for overall compatibility on ATLAS supported versions.';
+    'ATLAS Link can use bundled DLLs for compatibility on natively supported versions.';
   WizardForm.AdjustLabelHeight(DefenderIntroLabel);
 
   DefenderDetailsLabel := TNewStaticText.Create(DefenderOptionsPage);
