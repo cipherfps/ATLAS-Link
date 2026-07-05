@@ -84,13 +84,14 @@ class LauncherContentConfig {
         heroRotationSeconds: 5,
         slides: <LauncherContentSlide>[
           LauncherContentSlide(
-            image: 'assets/images/missingasset.webp',
+            image: 'assets/images/atlas_banner_v2.png',
             category: 'LAUNCHER',
-            title: 'ATLAS Link',
+            title: 'ATLAS',
             description:
-                'ATLAS has released a new launcher focused on clean visuals, ease of use, and overall backend compatability!',
-            buttonLabel: 'Open ATLAS Link GitHub',
-            buttonUrl: repositoryUrl,
+                'ATLAS is the new era of OGFN. Built with a clean UI and user experience. Enjoy your stay.',
+            buttonLabel: '',
+            buttonUrl: '',
+            imageFit: BoxFit.cover,
           ),
           LauncherContentSlide(
             image: 'assets/images/discord.webp',

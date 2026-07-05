@@ -7,13 +7,13 @@
     "heroRotationSeconds": 5,
     "slides": [
       {
-        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/atlas_apps.png",
-        "imageFit": "contain",
-        "category": "SPOTLIGHT SUBMISSION",
-        "title": "ATLAS Tutorial",
-        "description": "Watch this YouTube tutorial to learn how to use ATLAS, made by Mineluke (@mineluke)!",
-        "buttonLabel": "Watch Video",
-        "buttonUrl": "https://www.youtube.com/watch?v=C3pRAjzELzI"
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/atlas_banner_v2.png",
+        "imageFit": "cover",
+        "category": "LAUNCHER",
+        "title": "ATLAS",
+        "description": "ATLAS is the new era of OGFN. Built with a clean UI and user experience. Enjoy your stay.",
+        "buttonLabel": "",
+        "buttonUrl": ""
       },
       {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/discord.webp",
