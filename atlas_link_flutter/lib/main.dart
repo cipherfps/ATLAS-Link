@@ -276,6 +276,9 @@ bool _isWindows11OrLater() {
 Future<void> main() async {
   final binding = WidgetsFlutterBinding.ensureInitialized();
   media_kit.MediaKit.ensureInitialized();
+  // Default cache is 100MB; large libraries (cover art per imported build)
+  // could evict entries mid-scroll and force repeated disk decodes.
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 200 << 20;
   binding.deferFirstFrame();
   _firstFrameDeferred = true;
   final lockAcquired = await _acquireSingleInstanceLock();
@@ -301,6 +304,40 @@ Future<void> main() async {
   runApp(const AtlasLauncherApp());
 }
 
+/// Soft two-layer drop shadow applied to every text style in the app theme
+/// (and reused for icons), keeping text legible over bright backgrounds.
+const List<Shadow> _kTextDropShadows = [
+  Shadow(color: Color(0x59000000), blurRadius: 5, offset: Offset(0, 1)),
+  Shadow(color: Color(0x33000000), blurRadius: 12, offset: Offset(0, 3)),
+];
+
+/// Returns [base] with [shadows] applied to every style. Used to give all
+/// text the app-wide drop shadow, and (with an empty list) to strip it again
+/// inside light panels where the dark halo hurts legibility.
+TextTheme _textThemeWithShadows(TextTheme base, List<Shadow> shadows) {
+  TextStyle? shadowed(TextStyle? style) => style?.copyWith(shadows: shadows);
+  return TextTheme(
+    displayLarge: shadowed(base.displayLarge),
+    displayMedium: shadowed(base.displayMedium),
+    displaySmall: shadowed(base.displaySmall),
+    headlineLarge: shadowed(base.headlineLarge),
+    headlineMedium: shadowed(base.headlineMedium),
+    headlineSmall: shadowed(base.headlineSmall),
+    titleLarge: shadowed(base.titleLarge),
+    titleMedium: shadowed(base.titleMedium),
+    titleSmall: shadowed(base.titleSmall),
+    bodyLarge: shadowed(base.bodyLarge),
+    bodyMedium: shadowed(base.bodyMedium),
+    bodySmall: shadowed(base.bodySmall),
+    labelLarge: shadowed(base.labelLarge),
+    labelMedium: shadowed(base.labelMedium),
+    labelSmall: shadowed(base.labelSmall),
+  );
+}
+
+TextTheme _shadowedTextTheme(TextTheme base) =>
+    _textThemeWithShadows(base, _kTextDropShadows);
+
 class AtlasLauncherApp extends StatelessWidget {
   const AtlasLauncherApp({super.key});
 
@@ -309,7 +346,7 @@ class AtlasLauncherApp extends StatelessWidget {
     const seed = Color(0xFF2A9DF4);
     const accentBlue = Color(0xFF1E88E5);
 
-    final darkTheme = ThemeData(
+    final baseTheme = ThemeData(
       brightness: Brightness.dark,
       useMaterial3: true,
       fontFamily: 'Segoe UI',
@@ -370,6 +407,16 @@ class AtlasLauncherApp extends StatelessWidget {
       ),
       snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // Every resolved text style and icon gets the soft drop shadow, so all
+    // text and icons in the launcher inherit it without per-widget styling.
+    final darkTheme = baseTheme.copyWith(
+      textTheme: _shadowedTextTheme(baseTheme.textTheme),
+      primaryTextTheme: _shadowedTextTheme(baseTheme.primaryTextTheme),
+      iconTheme: baseTheme.iconTheme.copyWith(shadows: _kTextDropShadows),
+      primaryIconTheme: baseTheme.primaryIconTheme.copyWith(
+        shadows: _kTextDropShadows,
       ),
     );
 
@@ -1199,6 +1246,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   List<VersionEntry> _sortedVersionsCache = const <VersionEntry>[];
   _LibrarySortMode _librarySortMode = _LibrarySortMode.highestFirst;
   _StatsSortMode _statsSortMode = _StatsSortMode.highestTimeFirst;
+  // Kept across rebuilds so the stats StreamBuilder doesn't tear down and
+  // recreate its periodic timer on every frame the stats tab rebuilds.
+  Stream<int>? _statsLiveTicker;
 
   String? _librarySplashPrefetchSignature;
   bool _librarySplashPrefetchQueued = false;
@@ -1236,7 +1286,17 @@ class _LauncherScreenState extends State<LauncherScreen>
   int? _backendTerminalPid;
   EmbeddedBackendType? _downloadingBackend;
   DateTime? _lastEmbeddedOrphanCleanupAt;
-  bool _backgroundMotionPaused = false;
+  // ValueNotifier so pausing/resuming background motion only rebuilds the
+  // particle field subtree instead of the whole launcher tree (which caused
+  // visible hitches on every tab switch and drag scroll).
+  final ValueNotifier<bool> _backgroundMotionPaused = ValueNotifier<bool>(
+    false,
+  );
+  // Keeps the background media element (and its native video player) alive
+  // when the blur ImageFiltered wrapper is inserted/removed around it.
+  final GlobalKey _backgroundMediaKey = GlobalKey(
+    debugLabel: 'background-media',
+  );
   bool _backgroundMotionPauseQueued = false;
   bool _windowResizeBlurPaused = false;
   _GameActionState _gameAction = _GameActionState.idle;
@@ -1453,6 +1513,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _pollTimer?.cancel();
     _gameServerCrashStatusClearTimer?.cancel();
     _backgroundMotionPauseTimer?.cancel();
+    _backgroundMotionPaused.dispose();
     _windowResizeBlurResumeTimer?.cancel();
     _toastOverlayEntry?.remove();
     _toastOverlayEntry = null;
@@ -1812,30 +1873,35 @@ class _LauncherScreenState extends State<LauncherScreen>
 
     final dpr = MediaQuery.of(context).devicePixelRatio;
 
-    // Pre-cache the selected cover at its typical display size.
+    // Pre-cache the selected cover at the hero panel's display size.
     try {
       final coverProvider = ResizeImage(
         _libraryCoverImage(_settings.selectedVersion),
-        width: _imageCacheExtent(300, dpr),
+        width: _coverTileCacheWidth(250, 300, dpr),
       );
       await precacheImage(coverProvider, context);
     } catch (_) {
       // Ignore bad images.
     }
 
-    // Pre-cache a small batch of grid covers to reduce first-scroll pop-in.
-    final cacheWidth = _imageCacheExtent(520, dpr, qualityScale: 1.0);
-    final count = min(4, installed.length);
+    // Pre-cache a batch of grid covers at the exact decode sizes the library
+    // cards render with, so the first Library open paints from cache instead
+    // of kicking off a burst of file decodes.
+    final count = min(24, installed.length);
     for (var i = 0; i < count; i++) {
       if (!mounted) return;
       try {
+        await precacheImage(_libraryCardBgProvider(installed[i], dpr), context);
+        if (!mounted) return;
         await precacheImage(
-          ResizeImage(_libraryCoverImage(installed[i]), width: cacheWidth),
+          _libraryCardCoverProvider(installed[i], dpr),
           context,
         );
       } catch (_) {
         // Ignore bad images.
       }
+      // Yield between builds so the warmup never contends with user input.
+      await Future<void>.delayed(const Duration(milliseconds: 4));
     }
 
     _libraryWarmupCompleted = true;
@@ -1875,19 +1941,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
 
     _backgroundMotionPauseTimer?.cancel();
-    if (!_backgroundMotionPaused && mounted) {
-      setState(() => _backgroundMotionPaused = true);
-    } else {
-      _backgroundMotionPaused = true;
-    }
+    _backgroundMotionPaused.value = true;
     _backgroundMotionPauseTimer = Timer(duration, () {
       _backgroundMotionPauseTimer = null;
-      if (!_backgroundMotionPaused) return;
-      if (mounted) {
-        setState(() => _backgroundMotionPaused = false);
-      } else {
-        _backgroundMotionPaused = false;
-      }
+      _backgroundMotionPaused.value = false;
     });
   }
 
@@ -7673,12 +7730,15 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<void> _saveSettings({
     bool toast = true,
     bool applyControllers = true,
+    // Callers that already ran setState for the visible change can skip the
+    // post-save rebuild of the whole launcher tree.
+    bool notify = true,
   }) async {
     if (applyControllers) _applyControllers();
     await _saveSettingsSnapshot();
     _log('settings', 'Settings saved.');
     if (!mounted) return;
-    setState(() {});
+    if (notify) setState(() {});
     if (toast) _toast('Settings saved');
   }
 
@@ -8328,7 +8388,9 @@ class _LauncherScreenState extends State<LauncherScreen>
           return;
         }
       } else {
-        await _cleanupOrphanedEmbeddedBackendProcesses(force: true);
+        // Periodic safety net; the non-forced path is throttled so the poll
+        // doesn't spawn a PowerShell process-scan every 4 seconds.
+        await _cleanupOrphanedEmbeddedBackendProcesses();
       }
 
       final proxyOk = await _syncBackendProxy();
@@ -11412,7 +11474,8 @@ for (\$i = 0; \$i -lt 180; \$i++) {
 \$logRootNeedle = 'atlas_link_backend_'
 \$logNeedles = @('backend-log-terminal.cmd', 'backend-log-terminal.ps1', 'backend.log')
 \$backendExeNames = @('atlas_lawinserver.exe', 'atlas_neonitev2.exe')
-foreach (\$process in Get-CimInstance Win32_Process) {
+\$candidateFilter = "Name='node.exe' OR Name='cmd.exe' OR Name='powershell.exe' OR Name='atlas_lawinserver.exe' OR Name='atlas_neonitev2.exe'"
+foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
   \$targetPid = [int]\$process.ProcessId
   if (\$targetPid -eq \$ownPid) { continue }
   \$name = ([string]\$process.Name).ToLowerInvariant()
@@ -16433,7 +16496,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             .toList(),
       );
     });
-    unawaited(_saveSettings(toast: false));
+    unawaited(
+      _saveSettings(toast: false, applyControllers: false, notify: false),
+    );
   }
 
   Future<_BuildImportRequest?> _promptImportBuildDialog({
@@ -16833,7 +16898,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                               OutlinedButton(
                                                 onPressed: pickBuildFolder,
                                                 style: OutlinedButton.styleFrom(
-                                                  shape: const StadiumBorder(),
+                                                  // Match the corner radius of
+                                                  // the path field this button
+                                                  // sits next to.
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          14,
+                                                        ),
+                                                  ),
                                                   padding:
                                                       const EdgeInsets.symmetric(
                                                         horizontal: 18,
@@ -17032,7 +17105,15 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                               OutlinedButton(
                                                 onPressed: pickBuildFolder,
                                                 style: OutlinedButton.styleFrom(
-                                                  shape: const StadiumBorder(),
+                                                  // Match the corner radius of
+                                                  // the path field this button
+                                                  // sits next to.
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          14,
+                                                        ),
+                                                  ),
                                                   padding:
                                                       const EdgeInsets.symmetric(
                                                         horizontal: 18,
@@ -20343,6 +20424,29 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return const AssetImage('assets/images/missingasset.webp');
   }
 
+  /// Blurred card background provider. Single source of truth for the decode
+  /// size so warmup/prefetch hit the exact cache entries the cards render.
+  /// The image sits behind a sigma-9 blur and a dark scrim, so a small decode
+  /// is visually identical while costing a fraction of the memory and CPU.
+  ImageProvider<Object> _libraryCardBgProvider(VersionEntry entry, double dpr) {
+    return ResizeImage(
+      _libraryCoverImage(entry),
+      width: _imageCacheExtent(520, dpr, qualityScale: 0.5, max: 768),
+    );
+  }
+
+  /// Sharp cover-art provider for the library cards (the square splash tile
+  /// on the card's left edge).
+  ImageProvider<Object> _libraryCardCoverProvider(
+    VersionEntry entry,
+    double dpr,
+  ) {
+    return ResizeImage(
+      _libraryCoverImage(entry),
+      width: _coverTileCacheWidth(_mediaCardHeight, _mediaCardHeight, dpr),
+    );
+  }
+
   int _compareVersionStrings(String a, String b) {
     final partsA = RegExp(r'\d+')
         .allMatches(a)
@@ -20421,6 +20525,17 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     );
   }
 
+  /// Decode width for a cover-fit tile of [tileWidth] x [tileHeight] logical
+  /// pixels. Cover-fit scales wide art by the tile's *height*, so a
+  /// width-only decode needs aspect headroom — otherwise 16:9 art decodes
+  /// shorter than the tile and gets upscaled (blurry). 2x headroom keeps
+  /// wide art pixel-sharp while staying far cheaper than blanket
+  /// high-resolution decodes.
+  int _coverTileCacheWidth(double tileWidth, double tileHeight, double dpr) {
+    final needed = max(tileWidth, tileHeight * 2.0);
+    return _imageCacheExtent(needed, dpr, qualityScale: 1.1, max: 1024);
+  }
+
   @override
   Widget build(BuildContext context) {
     final blurSigma = _settings.backgroundBlur.clamp(0.0, 30.0).toDouble();
@@ -20433,7 +20548,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 // Until settings are loaded, paint only the opaque base color.
                 // Once ready, the fallback image is always present; a selected
                 // or default video fades in above it only after it initializes.
+                // The GlobalKey keeps the media state (and its native video
+                // player) alive when the blur wrapper is added/removed as the
+                // slider crosses zero.
                 final background = _AtlasBackgroundMedia(
+                  key: _backgroundMediaKey,
                   enabled: _startupConfigResolved,
                   fallbackImage: _backgroundImage(),
                   videoSource: _backgroundVideoSource(),
@@ -20454,19 +20573,25 @@ foreach (\$process in Get-CimInstance Win32_Process) {
             child: _settings.backgroundParticlesOpacity <= 0
                 ? const SizedBox.shrink()
                 : IgnorePointer(
-                    child: TickerMode(
-                      // Launching Fortnite can be CPU/GPU heavy. Pause the
-                      // particle animation during launch/close so the launcher
-                      // UI stays responsive.
-                      enabled:
-                          _gameAction == _GameActionState.idle &&
-                          !_gameServerLaunching &&
-                          !_backgroundMotionPaused,
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _backgroundMotionPaused,
                       child: _AtlasParticleField(
                         opacity: _settings.backgroundParticlesOpacity
                             .clamp(0.0, 2.0)
                             .toDouble(),
                       ),
+                      builder: (context, motionPaused, particleField) {
+                        // Launching Fortnite can be CPU/GPU heavy. Pause the
+                        // particle animation during launch/close so the
+                        // launcher UI stays responsive.
+                        return TickerMode(
+                          enabled:
+                              _gameAction == _GameActionState.idle &&
+                              !_gameServerLaunching &&
+                              !motionPaused,
+                          child: particleField!,
+                        );
+                      },
                     ),
                   ),
           ),
@@ -22866,6 +22991,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         _settingsReturnTab = previousTab;
         _settingsReturnContentTabId = previousContentTabId;
       }
+      // The stats StreamBuilder unmounts on tab switches and a
+      // single-subscription stream can't be listened to again, so hand the
+      // next visit a fresh ticker.
+      _statsLiveTicker = null;
       _tab = tab;
       if (tab == LauncherTab.home) {
         _selectedContentTabId = normalizedContentTabId.isEmpty
@@ -23410,8 +23539,9 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                       : constrainedHeight
                       ? 220.0
                       : 300.0;
-                  final coverCacheWidth = _imageCacheExtent(
-                    max(coverWidth, coverHeight),
+                  final coverCacheWidth = _coverTileCacheWidth(
+                    coverWidth,
+                    coverHeight,
                     dpr,
                   );
                   final ImageProvider<Object> heroCoverProvider =
@@ -24081,12 +24211,16 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                           crossAxisCount: columns,
                           crossAxisSpacing: spacing,
                           mainAxisSpacing: spacing,
-                          mainAxisExtent: 116,
+                          mainAxisExtent: _mediaCardHeight,
                         ),
                         delegate: SliverChildBuilderDelegate(
                           (context, index) =>
                               _installedVersionCard(filteredVersions[index]),
                           childCount: filteredVersions.length,
+                          // Cards hold no state worth keeping alive off-screen;
+                          // skipping the KeepAlive wrappers trims per-card
+                          // build cost in large libraries.
+                          addAutomaticKeepAlives: false,
                         ),
                       );
                     },
@@ -24254,10 +24388,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     final visibleVersions = versions.take(3).toList();
     final width = splashSize + (max(visibleVersions.length - 1, 0) * overlap);
     final signature = visibleVersions.map((version) => version.id).join('|');
-    final imageCacheSize = _imageCacheExtent(
+    final imageCacheSize = _coverTileCacheWidth(
       splashSize,
-      MediaQuery.of(context).devicePixelRatio,
-      max: 1024,
+      splashSize,
+      MediaQuery.devicePixelRatioOf(context),
     );
 
     return AnimatedSwitcher(
@@ -24442,10 +24576,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           const sectionSpacing = 18.0;
           const summarySpacing = 12.0;
           final mediaSize = compact ? min(136.0, constraints.maxWidth) : 128.0;
-          final mediaCacheSize = _imageCacheExtent(
+          final mediaCacheSize = _coverTileCacheWidth(
             mediaSize,
-            MediaQuery.of(context).devicePixelRatio,
-            max: 1024,
+            mediaSize,
+            MediaQuery.devicePixelRatioOf(context),
           );
           final imageProvider = ResizeImage(
             _libraryCoverImage(entry),
@@ -24868,9 +25002,7 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                                             crossAxisCount: columns,
                                             crossAxisSpacing: 16,
                                             mainAxisSpacing: 16,
-                                            mainAxisExtent: columns == 1
-                                                ? 138
-                                                : 150,
+                                            mainAxisExtent: _mediaCardHeight,
                                           ),
                                       delegate: SliverChildBuilderDelegate(
                                         (
@@ -25381,16 +25513,13 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 520;
-        final dpr = MediaQuery.of(context).devicePixelRatio;
-        final thumbSize = compact ? 78.0 : 88.0;
-        final thumbProvider = ResizeImage(
+        final dpr = MediaQuery.devicePixelRatioOf(context);
+        // Square cover tile: full card height, identical crop for every card
+        // (matches the library build cards).
+        const coverWidth = _mediaCardHeight;
+        final coverProvider = ResizeImage(
           image,
-          width: _imageCacheExtent(
-            thumbSize,
-            dpr,
-            qualityScale: 3.0,
-            max: 1024,
-          ),
+          width: _coverTileCacheWidth(coverWidth, _mediaCardHeight, dpr),
         );
         final bgProvider = ResizeImage(
           image,
@@ -25402,47 +25531,43 @@ foreach (\$process in Get-CimInstance Win32_Process) {
           ),
         );
 
-        final thumbImage = ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Image(
-            image: thumbProvider,
-            width: thumbSize,
-            height: thumbSize,
-            fit: BoxFit.cover,
-            alignment: Alignment.center,
-            filterQuality: FilterQuality.high,
-            gaplessPlayback: true,
-            errorBuilder: (context, error, stackTrace) {
-              return Image.asset(
-                'assets/images/missingasset.webp',
-                width: thumbSize,
-                height: thumbSize,
-                fit: BoxFit.cover,
-                filterQuality: FilterQuality.high,
-              );
-            },
-          ),
-        );
         // A "!" badge marks installed mods that have a newer catalog release.
-        final thumb = updateAvailable
-            ? Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  thumbImage,
-                  Positioned(
-                    top: -5,
-                    right: -5,
-                    child: _atlasUpdateBadge(size: 18),
-                  ),
-                ],
-              )
-            : thumbImage;
+        final cover = Stack(
+          fit: StackFit.expand,
+          children: [
+            Image(
+              image: coverProvider,
+              fit: BoxFit.cover,
+              // Bias the crop toward the top of the art, matching the
+              // library cards.
+              alignment: Alignment.topCenter,
+              filterQuality: FilterQuality.medium,
+              gaplessPlayback: true,
+              errorBuilder: (context, error, stackTrace) {
+                return Image.asset(
+                  'assets/images/missingasset.webp',
+                  fit: BoxFit.cover,
+                  alignment: Alignment.topCenter,
+                  filterQuality: FilterQuality.medium,
+                );
+              },
+            ),
+            if (updateAvailable)
+              Positioned(top: 7, right: 7, child: _atlasUpdateBadge(size: 18)),
+          ],
+        );
 
         // Pills are fully metadata-driven: the optional version pill and any
-        // free-form tags from the mod's metadata.json. Tags are capped to fit
-        // the card; overflow collapses into a "+N" pill (the details dialog
-        // shows the full list). "Installed" is launcher runtime state.
-        final maxVisibleTags = compact ? 1 : 3;
+        // free-form tags from the mod's metadata.json. Tags are capped by the
+        // card's width so the pill row rarely wraps; overflow collapses into
+        // a "+N" pill (the details dialog shows the full list). "Installed"
+        // is launcher runtime state and sits right after the version so tags
+        // can never push it out of view.
+        final maxVisibleTags = constraints.maxWidth >= 700
+            ? 3
+            : constraints.maxWidth >= 560
+            ? 2
+            : 1;
         final visibleTags = mod.tags.length <= maxVisibleTags
             ? mod.tags
             : mod.tags.take(maxVisibleTags).toList();
@@ -25457,23 +25582,20 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 icon: Icons.sell_rounded,
                 prominent: true,
               ),
-            for (final tag in visibleTags) _modPill(tag),
-            if (hiddenTagCount > 0) _modPill('+$hiddenTagCount'),
             if (updateAvailable)
               _modPill(
                 'Update',
                 icon: Icons.upgrade_rounded,
                 color: const Color(0xFFE8A23D),
-              )
-            else if (installed)
-              _modPill(
-                'Installed',
-                icon: Icons.check_rounded,
-                color: secondary,
               ),
+            for (final tag in visibleTags) _modPill(tag),
+            if (hiddenTagCount > 0) _modPill('+$hiddenTagCount'),
           ],
         );
 
+        // Card text carries explicit shadows: the card body stays dark over
+        // its art even inside a light panel, so these must bypass the panel
+        // shadow strip.
         final details = Column(
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -25484,9 +25606,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: onSurface.withValues(alpha: 0.98),
-                fontSize: compact ? 20 : 23,
-                height: 1,
+                fontSize: compact ? 20 : 21,
+                height: 1.05,
                 fontWeight: FontWeight.w800,
+                shadows: _kTextDropShadows,
               ),
             ),
             const SizedBox(height: 6),
@@ -25498,20 +25621,26 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 color: onSurface.withValues(alpha: 0.72),
                 fontSize: 12.5,
                 fontWeight: FontWeight.w800,
+                shadows: _kTextDropShadows,
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              descriptionPreview.isEmpty
-                  ? 'No description provided.'
-                  : descriptionPreview,
-              maxLines: compact ? 1 : 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: onSurface.withValues(alpha: 0.74),
-                height: 1.22,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+            // Flexible so a wrapped pill row squeezes the description down a
+            // line instead of overflowing the fixed-height card.
+            Flexible(
+              child: Text(
+                descriptionPreview.isEmpty
+                    ? 'No description provided.'
+                    : descriptionPreview,
+                maxLines: compact ? 1 : 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: onSurface.withValues(alpha: 0.74),
+                  height: 1.22,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  shadows: _kTextDropShadows,
+                ),
               ),
             ),
             const SizedBox(height: 9),
@@ -25562,93 +25691,163 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 borderRadius: cardRadius,
                 clipBehavior: Clip.antiAlias,
                 child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Positioned.fill(
-                      child: ImageFiltered(
-                        imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
-                        child: Image(
-                          image: bgProvider,
-                          fit: BoxFit.cover,
-                          filterQuality: FilterQuality.low,
-                          gaplessPlayback: true,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Image.asset(
-                              'assets/images/missingasset.webp',
-                              fit: BoxFit.cover,
-                              filterQuality: FilterQuality.low,
-                            );
-                          },
-                        ),
+                    // Ambient backdrop: the art blurred into a color wash.
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
+                      child: Image(
+                        image: bgProvider,
+                        fit: BoxFit.cover,
+                        filterQuality: FilterQuality.low,
+                        gaplessPlayback: true,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Image.asset(
+                            'assets/images/missingasset.webp',
+                            fit: BoxFit.cover,
+                            filterQuality: FilterQuality.low,
+                          );
+                        },
                       ),
                     ),
-                    Positioned.fill(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              _adaptiveScrimColor(
-                                context,
-                                darkAlpha: 0.50,
-                                lightAlpha: 0.30,
+                    // Cover panel + clean body, split so the tint never dims
+                    // the artwork (matches the library build cards).
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(width: coverWidth, child: cover),
+                        Expanded(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.centerLeft,
+                                end: Alignment.centerRight,
+                                colors: [
+                                  _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.66,
+                                    lightAlpha: 0.46,
+                                  ),
+                                  _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.76,
+                                    lightAlpha: 0.58,
+                                  ),
+                                ],
                               ),
-                              _adaptiveScrimColor(
-                                context,
-                                darkAlpha: 0.40,
-                                lightAlpha: 0.18,
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                10,
+                                12,
+                                10,
                               ),
-                            ],
+                              child: Row(
+                                children: [
+                                  Expanded(child: details),
+                                  const SizedBox(width: 10),
+                                  Tooltip(
+                                    message: installed
+                                        ? 'Installed — view mod'
+                                        : 'View mod',
+                                    child: AnimatedContainer(
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      curve: Curves.easeOutCubic,
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        // Installed state lives here as a blue
+                                        // check instead of a pill on the card.
+                                        color: installed
+                                            ? secondary.withValues(alpha: 0.92)
+                                            : _adaptiveScrimColor(
+                                                context,
+                                                darkAlpha: 0.22,
+                                                lightAlpha: 0.24,
+                                              ),
+                                        border: Border.all(
+                                          color: installed
+                                              ? secondary.withValues(
+                                                  alpha: 0.95,
+                                                )
+                                              : onSurface.withValues(
+                                                  alpha: 0.22,
+                                                ),
+                                        ),
+                                      ),
+                                      child: Icon(
+                                        installed
+                                            ? Icons.check_rounded
+                                            : Icons.chevron_right_rounded,
+                                        size: installed ? 18 : 24,
+                                        color: installed
+                                            ? Colors.white
+                                            : onSurface.withValues(alpha: 0.88),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
-                      ),
+                      ],
                     ),
-                    Positioned.fill(
+                    // Soft shadow the cover casts onto the body for depth.
+                    Positioned(
+                      left: coverWidth,
+                      top: 0,
+                      bottom: 0,
+                      width: 18,
                       child: IgnorePointer(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
-                            borderRadius: cardRadius,
-                            border: Border.all(
-                              color: installed
-                                  ? secondary.withValues(alpha: 0.82)
-                                  : onSurface.withValues(alpha: 0.20),
-                              width: installed ? 1.35 : 1.0,
+                            gradient: LinearGradient(
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                              colors: [
+                                Colors.black.withValues(alpha: 0.30),
+                                Colors.black.withValues(alpha: 0.0),
+                              ],
                             ),
                           ),
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      child: Row(
-                        children: [
-                          thumb,
-                          const SizedBox(width: 14),
-                          Expanded(child: details),
-                          const SizedBox(width: 10),
-                          Container(
-                            width: 32,
-                            height: 32,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: _adaptiveScrimColor(
-                                context,
-                                darkAlpha: 0.22,
-                                lightAlpha: 0.24,
-                              ),
-                              border: Border.all(
-                                color: onSurface.withValues(alpha: 0.22),
-                              ),
-                            ),
-                            child: Icon(
-                              Icons.chevron_right_rounded,
-                              color: onSurface.withValues(alpha: 0.88),
-                            ),
+                    // Glass top light.
+                    IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.08),
+                              Colors.white.withValues(alpha: 0.0),
+                            ],
+                            stops: const [0.0, 0.30],
                           ),
-                        ],
+                        ),
+                      ),
+                    ),
+                    // Accent border drawn last so it sits above the artwork.
+                    IgnorePointer(
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        decoration: BoxDecoration(
+                          borderRadius: cardRadius,
+                          border: Border.all(
+                            color: installed
+                                ? secondary.withValues(alpha: 0.82)
+                                : onSurface.withValues(alpha: 0.18),
+                            width: installed ? 1.35 : 1.0,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -26684,9 +26883,18 @@ foreach (\$process in Get-CimInstance Win32_Process) {
   Widget _statsTab() {
     final activeTrackedVersions = _activeTrackedVersions();
     final liveTrackingActive = activeTrackedVersions.isNotEmpty;
-    final liveTicker = liveTrackingActive
-        ? Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick)
-        : null;
+    if (liveTrackingActive) {
+      // Reuse one ticker while the tab stays mounted; passing a fresh stream
+      // every build makes StreamBuilder cancel and resubscribe each rebuild,
+      // which can stall the live counter during rebuild bursts.
+      _statsLiveTicker ??= Stream<int>.periodic(
+        const Duration(seconds: 1),
+        (tick) => tick,
+      );
+    } else {
+      _statsLiveTicker = null;
+    }
+    final liveTicker = _statsLiveTicker;
 
     return StreamBuilder<int>(
       stream: liveTicker,
@@ -27511,21 +27719,26 @@ foreach (\$process in Get-CimInstance Win32_Process) {
       if (!mounted) return;
 
       // Pre-cache the first batch of splash images so scrolling feels instant.
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final cacheWidth = _imageCacheExtent(520, dpr, qualityScale: 1.0);
-      final count = min(8, versions.length);
+      // Uses the exact card decode sizes so the cache entries are the ones the
+      // grid actually renders.
+      final dpr = MediaQuery.devicePixelRatioOf(context);
+      final count = min(10, versions.length);
 
       unawaited(() async {
         await Future<void>.delayed(const Duration(milliseconds: 220));
         for (var i = 0; i < count; i++) {
           if (!mounted) return;
           if (_tab != LauncherTab.library) return;
-          final provider = ResizeImage(
-            _libraryCoverImage(versions[i]),
-            width: cacheWidth,
-          );
           try {
-            await precacheImage(provider, context);
+            await precacheImage(
+              _libraryCardBgProvider(versions[i], dpr),
+              context,
+            );
+            if (!mounted) return;
+            await precacheImage(
+              _libraryCardCoverProvider(versions[i], dpr),
+              context,
+            );
           } catch (_) {
             // Ignore bad images.
           }
@@ -27536,29 +27749,26 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     });
   }
 
+  /// Row height shared by the library build cards and the mod cards; the
+  /// cover tile is a square of this size, so every card crops its art the
+  /// same way.
+  static const double _mediaCardHeight = 148;
+
   Widget _installedVersionCard(VersionEntry entry) {
     final active = _settings.selectedVersionId == entry.id;
     final favorite = entry.isFavorite;
     final lockedByModDownload = _isModDownloadLockedVersion(entry.id);
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final secondary = Theme.of(context).colorScheme.secondary;
-    final splashImage = _libraryCoverImage(entry);
     final cardRadius = BorderRadius.circular(18);
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final dpr = MediaQuery.of(context).devicePixelRatio;
-        final thumbCache = _imageCacheExtent(
-          72,
-          dpr,
-          qualityScale: 1.15,
-          max: 384,
-        );
-        final bgProvider = ResizeImage(
-          splashImage,
-          width: _imageCacheExtent(520, dpr, qualityScale: 0.7, max: 1024),
-        );
-        final thumbProvider = ResizeImage(splashImage, width: thumbCache);
+        final dpr = MediaQuery.devicePixelRatioOf(context);
+        final bgProvider = _libraryCardBgProvider(entry, dpr);
+        final coverProvider = _libraryCardCoverProvider(entry, dpr);
+        // Square cover tile: full card height, identical crop for every card.
+        const coverWidth = _mediaCardHeight;
 
         final versionPill = _formatLibraryVersionLabel(entry.gameVersion);
 
@@ -27571,12 +27781,18 @@ foreach (\$process in Get-CimInstance Win32_Process) {
               setState(() {
                 _settings = _settings.copyWith(selectedVersionId: entry.id);
               });
-              unawaited(_saveSettings(toast: false));
+              unawaited(
+                _saveSettings(
+                  toast: false,
+                  applyControllers: false,
+                  notify: false,
+                ),
+              );
             },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
-              height: 116,
+              height: _mediaCardHeight,
               decoration: BoxDecoration(
                 borderRadius: cardRadius,
                 boxShadow: active
@@ -27612,164 +27828,223 @@ foreach (\$process in Get-CimInstance Win32_Process) {
                 borderRadius: cardRadius,
                 clipBehavior: Clip.antiAlias,
                 child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Positioned.fill(
-                      child: ImageFiltered(
-                        imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
-                        child: Image(
-                          image: bgProvider,
-                          fit: BoxFit.cover,
-                          filterQuality: FilterQuality.low,
-                          gaplessPlayback: true,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Image.asset(
-                              'assets/images/missingasset.webp',
-                              fit: BoxFit.cover,
-                              filterQuality: FilterQuality.low,
-                            );
-                          },
-                        ),
+                    // Ambient backdrop: the splash blurred into a color wash.
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(sigmaX: 9, sigmaY: 9),
+                      child: Image(
+                        image: bgProvider,
+                        fit: BoxFit.cover,
+                        filterQuality: FilterQuality.low,
+                        gaplessPlayback: true,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Image.asset(
+                            'assets/images/missingasset.webp',
+                            fit: BoxFit.cover,
+                            filterQuality: FilterQuality.low,
+                          );
+                        },
                       ),
                     ),
-                    Positioned.fill(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              _adaptiveScrimColor(
-                                context,
-                                darkAlpha: 0.58,
-                                lightAlpha: 0.36,
-                              ),
-                              _adaptiveScrimColor(
-                                context,
-                                darkAlpha: 0.48,
-                                lightAlpha: 0.24,
-                              ),
-                            ],
+                    // Cover panel + clean body, split so the tint never dims
+                    // the artwork.
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(
+                          width: coverWidth,
+                          child: Image(
+                            image: coverProvider,
+                            fit: BoxFit.cover,
+                            // Bias the crop toward the top of the splash,
+                            // where the characters and logo usually are.
+                            alignment: Alignment.topCenter,
+                            filterQuality: FilterQuality.medium,
+                            gaplessPlayback: true,
+                            errorBuilder: (context, error, stackTrace) {
+                              return Image.asset(
+                                'assets/images/missingasset.webp',
+                                fit: BoxFit.cover,
+                                alignment: Alignment.topCenter,
+                                filterQuality: FilterQuality.medium,
+                              );
+                            },
                           ),
                         ),
-                      ),
+                        Expanded(
+                          child: DecoratedBox(
+                            // Near-opaque body tint so only a hint of the
+                            // splash color bleeds through behind the text.
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.centerLeft,
+                                end: Alignment.centerRight,
+                                colors: [
+                                  _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.66,
+                                    lightAlpha: 0.46,
+                                  ),
+                                  _adaptiveScrimColor(
+                                    context,
+                                    darkAlpha: 0.76,
+                                    lightAlpha: 0.58,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                10,
+                                12,
+                                10,
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          entry.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 21,
+                                            fontWeight: FontWeight.w800,
+                                            color: onSurface.withValues(
+                                              alpha: 0.98,
+                                            ),
+                                            height: 1.05,
+                                            // Explicit: the card body stays
+                                            // dark over its art even inside a
+                                            // light panel, so this must bypass
+                                            // the panel shadow strip.
+                                            shadows: _kTextDropShadows,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 9),
+                                        Wrap(
+                                          spacing: 6,
+                                          runSpacing: 4,
+                                          children: [
+                                            // Same pills as the mod cards so
+                                            // both pages share one chip style.
+                                            _modPill(
+                                              versionPill == '?'
+                                                  ? 'Unknown'
+                                                  : versionPill,
+                                              icon: Icons.sell_rounded,
+                                              prominent: true,
+                                            ),
+                                            if (active)
+                                              _modPill(
+                                                'Selected',
+                                                icon: Icons.check_rounded,
+                                                color: secondary,
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _versionCardAction(
+                                    icon: favorite
+                                        ? Icons.star_rounded
+                                        : Icons.star_border_rounded,
+                                    tooltip: favorite
+                                        ? 'Remove favorite'
+                                        : 'Favorite build',
+                                    iconColor: favorite
+                                        ? const Color(0xFFFACC15)
+                                        : Colors.white,
+                                    onTap: () =>
+                                        _toggleVersionFavorite(entry.id),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _versionCardAction(
+                                    icon: Icons.edit_rounded,
+                                    tooltip: lockedByModDownload
+                                        ? 'Finish mod download before editing'
+                                        : 'Edit build',
+                                    onTap: lockedByModDownload
+                                        ? null
+                                        : () => _editVersion(entry),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _versionCardAction(
+                                    icon: Icons.delete_outline_rounded,
+                                    tooltip: lockedByModDownload
+                                        ? 'Finish mod download before removing'
+                                        : 'Remove build',
+                                    onTap: lockedByModDownload
+                                        ? null
+                                        : () => _removeVersion(entry.id),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    Positioned.fill(
+                    // Soft shadow the cover casts onto the body for depth.
+                    Positioned(
+                      left: coverWidth,
+                      top: 0,
+                      bottom: 0,
+                      width: 18,
                       child: IgnorePointer(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
-                            borderRadius: cardRadius,
-                            border: Border.all(
-                              color: active
-                                  ? secondary.withValues(alpha: 0.78)
-                                  : onSurface.withValues(alpha: 0.20),
-                              width: active ? 1.2 : 1.0,
+                            gradient: LinearGradient(
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                              colors: [
+                                Colors.black.withValues(alpha: 0.30),
+                                Colors.black.withValues(alpha: 0.0),
+                              ],
                             ),
                           ),
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
+                    // Glass top light.
+                    IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.08),
+                              Colors.white.withValues(alpha: 0.0),
+                            ],
+                            stops: const [0.0, 0.30],
+                          ),
+                        ),
                       ),
-                      child: Row(
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: Image(
-                              image: thumbProvider,
-                              width: 72,
-                              height: 72,
-                              fit: BoxFit.cover,
-                              filterQuality: FilterQuality.medium,
-                              gaplessPlayback: true,
-                              errorBuilder: (context, error, stackTrace) {
-                                return Image.asset(
-                                  'assets/images/missingasset.webp',
-                                  width: 72,
-                                  height: 72,
-                                  fit: BoxFit.cover,
-                                  filterQuality: FilterQuality.medium,
-                                );
-                              },
-                            ),
+                    ),
+                    // Accent border drawn last so it sits above the artwork.
+                    IgnorePointer(
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        decoration: BoxDecoration(
+                          borderRadius: cardRadius,
+                          border: Border.all(
+                            color: active
+                                ? secondary.withValues(alpha: 0.85)
+                                : onSurface.withValues(alpha: 0.18),
+                            width: active ? 1.4 : 1.0,
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  entry.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w700,
-                                    color: onSurface.withValues(alpha: 0.98),
-                                    height: 1,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                _modPill(
-                                  versionPill == '?' ? 'Unknown' : versionPill,
-                                  icon: Icons.sell_rounded,
-                                  prominent: true,
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (active) ...[
-                            Container(
-                              width: 24,
-                              height: 24,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: secondary.withValues(alpha: 0.9),
-                              ),
-                              child: const Icon(
-                                Icons.check_rounded,
-                                size: 15,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                          ],
-                          _versionCardAction(
-                            icon: favorite
-                                ? Icons.star_rounded
-                                : Icons.star_border_rounded,
-                            tooltip: favorite
-                                ? 'Remove favorite'
-                                : 'Favorite build',
-                            iconColor: favorite
-                                ? const Color(0xFFFACC15)
-                                : Colors.white,
-                            onTap: () => _toggleVersionFavorite(entry.id),
-                          ),
-                          const SizedBox(width: 6),
-                          _versionCardAction(
-                            icon: Icons.edit_rounded,
-                            tooltip: lockedByModDownload
-                                ? 'Finish mod download before editing'
-                                : 'Edit build',
-                            onTap: lockedByModDownload
-                                ? null
-                                : () => _editVersion(entry),
-                          ),
-                          const SizedBox(width: 6),
-                          _versionCardAction(
-                            icon: Icons.delete_outline_rounded,
-                            tooltip: lockedByModDownload
-                                ? 'Finish mod download before removing'
-                                : 'Remove build',
-                            onTap: lockedByModDownload
-                                ? null
-                                : () => _removeVersion(entry.id),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                   ],
@@ -27789,6 +28064,10 @@ foreach (\$process in Get-CimInstance Win32_Process) {
     double iconRotation = 0,
     Color? iconColor,
     bool busy = false,
+    // When set, the button becomes a rounded square with this corner radius
+    // so it visually matches an adjacent rectangular element (e.g. the
+    // radius-8 search fields); null keeps the default circular shape.
+    double? cornerRadius,
   }) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final enabled = onTap != null;
@@ -27816,6 +28095,11 @@ foreach (\$process in Get-CimInstance Win32_Process) {
         style: IconButton.styleFrom(
           minimumSize: const Size(32, 32),
           padding: const EdgeInsets.all(6),
+          shape: cornerRadius == null
+              ? null
+              : RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(cornerRadius),
+                ),
           backgroundColor: _adaptiveScrimColor(
             context,
             darkAlpha: enabled ? 0.22 : 0.10,
@@ -34331,6 +34615,7 @@ class _AtlasStartupAnimationOverlayState
 
 class _AtlasBackgroundMedia extends StatefulWidget {
   const _AtlasBackgroundMedia({
+    super.key,
     required this.enabled,
     required this.fallbackImage,
     required this.videoSource,
@@ -34891,6 +35176,9 @@ class _HoverScaleState extends State<_HoverScale> {
         scale: _hovered ? widget.scale : 1,
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeOutCubic,
+        // No filterQuality here: a non-null value rasterizes the subtree
+        // through an image filter, which breaks BackdropFilter glass inside
+        // (hovered header buttons visibly lost their blur).
         child: widget.child,
       ),
     );
