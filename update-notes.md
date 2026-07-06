@@ -1,4 +1,4 @@
-<!-- version: 1.4.7 -->
+<!-- version: 2.0.0 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,6 +15,9 @@ Markdown Quick Key
 ---
 
 # Improvements
-- ATLAS Network now requires Discord OAuth to allow real users to connect
+- Any media type as your wallpaper
+- Custom navigation bar to your preference (up, left, and right)
+- Fixed performance issues
+- Changing the colors of your UI
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
