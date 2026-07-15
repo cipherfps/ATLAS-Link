@@ -3,7 +3,8 @@ param(
   [switch]$SkipFlutterBuild,
   [switch]$SkipFlutterClean,
   [switch]$SkipInnoCompile,
-  [switch]$SkipBackendZips
+  [switch]$SkipBackendZips,
+  [switch]$SkipDiscordRpcBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -262,6 +263,22 @@ if (-not (Test-Path $distDir)) {
 
 $version = Get-PubspecVersion -PubspecPath $pubspecPath
 Write-Step "Resolved app version: $version"
+
+if (-not $SkipDiscordRpcBuild) {
+  $discordRpcBuildScript = Join-Path $repoRoot "discord_rpc_proxy\build-proxy.ps1"
+  if (-not (Test-Path $discordRpcBuildScript)) {
+    throw "Discord RPC proxy build script not found at $discordRpcBuildScript"
+  }
+
+  Write-Step "Building Discord RPC proxy DLL"
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $discordRpcBuildScript
+  if ($LASTEXITCODE -ne 0) {
+    throw "Discord RPC proxy build failed with exit code $LASTEXITCODE"
+  }
+}
+else {
+  Write-Step "Skipping Discord RPC proxy build (-SkipDiscordRpcBuild)"
+}
 
 if (-not $SkipFlutterBuild) {
   Write-Step "Building embedded backend executables"

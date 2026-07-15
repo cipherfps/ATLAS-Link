@@ -25,6 +25,7 @@ import 'package:win32/win32.dart';
 
 import 'build_import.dart';
 import 'discord_gate.dart';
+import 'fortnite_installer.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 import 'mesh_controller.dart';
@@ -367,6 +368,14 @@ class AtlasLauncherApp extends StatelessWidget {
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
+          backgroundColor: accentBlue,
+          foregroundColor: Colors.white,
+        ),
+      ),
+      // Keep FilledButton identical to ElevatedButton (accent blue + white);
+      // without this it falls back to M3 defaults (pale primary + black text).
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
           backgroundColor: accentBlue,
           foregroundColor: Colors.white,
         ),
@@ -1057,8 +1066,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.0';
-  static const String _launcherBuildLabel = 'Stable 2.0.0';
+  static const String _launcherVersion = '2.0.1';
+  static const String _launcherBuildLabel = 'Stable 2.0.1';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1268,7 +1277,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   bool _bundledDllLaunchToastQueued = false;
   bool _bundledDllAutoUpdateOnLaunchQueued = false;
   bool _bundledDllAutoUpdateOnLaunchStarted = false;
-  bool _installedModAutoUpdateOnLaunchStarted = false;
+  bool _updatingAllAtlasMods = false;
   bool _checkingLauncherUpdate = false;
   bool _checkingBundledDllDefaultsUpdate = false;
   bool _bundledDllDefaultsUpdateAvailable = false;
@@ -1398,11 +1407,13 @@ class _LauncherScreenState extends State<LauncherScreen>
   late File _launcherContentCacheFile;
   late File _modsLibraryCacheFile;
   late File _dllPresetsFile;
+  late File _themePresetsFile;
   late File _injectorDllLibraryFile;
   late File _installedModsFile;
   late File _logFile;
   bool _storageReady = false;
   List<_DllPreset> _dllPresets = <_DllPreset>[];
+  List<_ThemePreset> _themePresets = <_ThemePreset>[];
   List<_SavedInjectorDll> _injectorDllLibrary = <_SavedInjectorDll>[];
   List<_AtlasModEntry> _modsLibrary = <_AtlasModEntry>[];
   Map<String, _InstalledAtlasMod> _installedModsById =
@@ -1482,10 +1493,17 @@ class _LauncherScreenState extends State<LauncherScreen>
   Future<AppExitResponse> _handleAppExitRequest() async {
     if (_atlasModBusy) {
       _toast(
-        'A mod is still downloading — cancel it (✕ on the toast) or let it '
+        'A mod is still downloading, cancel it (✕) or let it '
         'finish before closing',
       );
       return AppExitResponse.cancel;
+    }
+    // Closing ATLAS interrupts (not cancels) a version install: files and
+    // resume data stay, so installing the same version later continues
+    // where it stopped.
+    final fnJob = _fnInstallJob;
+    if (fnJob != null && !fnJob.isFinished) {
+      await fnJob.cancel(deleteFiles: false);
     }
     // Leave the Tailscale network on close so nobody lingers in a room while
     // ATLAS is shut.
@@ -1505,6 +1523,11 @@ class _LauncherScreenState extends State<LauncherScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _appExitListener?.dispose();
+    final fnJob = _fnInstallJob;
+    if (fnJob != null) {
+      fnJob.removeListener(_handleFnInstallJobChanged);
+      if (!fnJob.isFinished) unawaited(fnJob.cancel(deleteFiles: false));
+    }
     _killManagedBackendProcessOnShutdown();
     _checkpointActivePlaytime(syncSave: true);
     _playtimeCheckpointTimer?.cancel();
@@ -1571,6 +1594,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       await _loadInstallState();
       await _loadSettings();
       await _loadDllPresets();
+      await _loadThemePresets();
       await _loadInstalledMods();
       await _loadLauncherContent();
       await _reconcileInstallState();
@@ -1777,24 +1801,22 @@ class _LauncherScreenState extends State<LauncherScreen>
     } catch (error) {
       _log('settings', 'Failed to auto-update DLLs after launch: $error');
     }
-    // "Update Files on Launch" also keeps installed Paks and library DLLs in
-    // sync with the catalog.
-    unawaited(_runInstalledModAutoUpdateOnLaunch());
   }
 
-  /// Auto-updates installed Pak/DLL mods that have a newer catalog release.
-  /// Each mod is refreshed across every build it is installed to. Gated by the
-  /// same "Update Files on Launch" toggle as the bundled DLL refresh.
-  Future<void> _runInstalledModAutoUpdateOnLaunch() async {
-    if (!mounted) return;
-    if (!_settings.updateDefaultDllsOnLaunchEnabled) return;
-    if (_installedModAutoUpdateOnLaunchStarted) return;
-    _installedModAutoUpdateOnLaunchStarted = true;
+  /// Updates every installed Pak/DLL mod that has a newer catalog release,
+  /// across all sections. Mods never auto-update — this only runs from the
+  /// "Update all mods" toolbar button (per-mod Update buttons handle singles).
+  Future<void> _updateAllAtlasMods() async {
+    if (_updatingAllAtlasMods) return;
+    setState(() => _updatingAllAtlasMods = true);
     try {
-      // Ensure the catalog is loaded so we can compare it against installs.
+      // Refresh the catalog so installs are compared against latest releases.
       await _loadModsLibrary(silentRefreshToast: true);
       final pending = _modsLibrary.where(_atlasModUpdateAvailable).toList();
-      if (pending.isEmpty) return;
+      if (pending.isEmpty) {
+        if (mounted) _toast('No updates available');
+        return;
+      }
       var updated = 0;
       for (final mod in pending) {
         // Re-check: a build may have been removed, or state changed mid-run.
@@ -1802,11 +1824,24 @@ class _LauncherScreenState extends State<LauncherScreen>
         await _updateAtlasMod(mod, announce: false);
         if (!_atlasModUpdateAvailable(mod)) updated++;
       }
-      if (updated > 0 && mounted) {
-        _toast(updated == 1 ? 'Updated 1 mod' : 'Updated $updated mods');
+      if (mounted) {
+        _toast(
+          updated == 0
+              ? 'No mods could be updated'
+              : updated == 1
+              ? 'Updated 1 mod'
+              : 'Updated $updated mods',
+        );
       }
     } catch (error) {
-      _log('mods', 'Failed to auto-update installed mods on launch: $error');
+      _log('mods', 'Failed to update all mods: $error');
+      if (mounted) _toast('Failed to update mods');
+    } finally {
+      if (mounted) {
+        setState(() => _updatingAllAtlasMods = false);
+      } else {
+        _updatingAllAtlasMods = false;
+      }
     }
   }
 
@@ -2881,6 +2916,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       _joinPath([_dataDir.path, 'mods_library_cache.json']),
     );
     _dllPresetsFile = File(_joinPath([_dataDir.path, 'dll_presets.json']));
+    _themePresetsFile = File(_joinPath([_dataDir.path, 'theme_presets.json']));
     _injectorDllLibraryFile = File(
       _joinPath([_dataDir.path, 'injector_dlls.json']),
     );
@@ -3366,7 +3402,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
           final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
           _toastProgress(
-            progressMessage,
+            '$progressMessage ${(ratio * 100).round()}%',
             progress: ratio,
             indeterminate: false,
           );
@@ -3833,6 +3869,99 @@ class _LauncherScreenState extends State<LauncherScreen>
       );
     }
     return files;
+  }
+
+  static final RegExp _githubReleaseAssetUrlRe = RegExp(
+    r'^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$',
+    caseSensitive: false,
+  );
+
+  /// Fills content fingerprints for mod files hosted as GitHub release assets
+  /// (e.g. Core.dll from PongooDev/Core's rolling "latest" release). Those
+  /// files have no blob SHA in the ATLAS-Resources tree, so without this the
+  /// launcher could never detect the author's re-uploads as updates. The
+  /// GitHub API exposes a per-asset sha256 digest that changes exactly when
+  /// the asset is replaced; the asset's updated time also feeds the mod's
+  /// lastUpdated so "Recent" ordering follows external releases too.
+  Future<void> _applyGithubReleaseAssetFingerprints(
+    List<_AtlasModEntry> mods,
+  ) async {
+    // One API call per distinct release, shared across all mods in this load.
+    final releaseCache = <String, Map<String, dynamic>?>{};
+
+    Future<Map<String, dynamic>?> releaseFor(
+      String owner,
+      String repo,
+      String tag,
+    ) async {
+      final key = '$owner/$repo@$tag'.toLowerCase();
+      if (releaseCache.containsKey(key)) return releaseCache[key];
+      Map<String, dynamic>? release;
+      try {
+        final raw = await _downloadText(
+          'https://api.github.com/repos/$owner/$repo/releases/tags/$tag',
+        );
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) release = decoded;
+      } catch (error) {
+        _log('mods', 'Release lookup for $key failed: $error');
+      }
+      releaseCache[key] = release;
+      return release;
+    }
+
+    for (var i = 0; i < mods.length; i++) {
+      final mod = mods[i];
+      var changed = false;
+      var latestAssetMs = 0;
+      final files = List<_AtlasModFile>.of(mod.files);
+      for (var f = 0; f < files.length; f++) {
+        final file = files[f];
+        if (file.sha.trim().isNotEmpty) continue;
+        final match = _githubReleaseAssetUrlRe.firstMatch(
+          file.downloadUrl.trim(),
+        );
+        if (match == null) continue;
+        final release = await releaseFor(
+          match.group(1)!,
+          match.group(2)!,
+          Uri.decodeComponent(match.group(3)!),
+        );
+        if (release == null) continue;
+        final assets = release['assets'];
+        if (assets is! List) continue;
+        final assetName = Uri.decodeComponent(match.group(4)!).toLowerCase();
+        Map<String, dynamic>? asset;
+        for (final entry in assets) {
+          if (entry is Map<String, dynamic> &&
+              (entry['name'] ?? '').toString().toLowerCase() == assetName) {
+            asset = entry;
+            break;
+          }
+        }
+        if (asset == null) continue;
+        final digest = (asset['digest'] ?? '').toString().trim();
+        final fingerprint = digest.isNotEmpty
+            ? digest
+            : 'release:${asset['id']}:${asset['updated_at']}';
+        files[f] = file.withSha(fingerprint);
+        changed = true;
+        final updatedMs =
+            DateTime.tryParse(
+              (asset['updated_at'] ?? '').toString(),
+            )?.millisecondsSinceEpoch ??
+            0;
+        if (updatedMs > latestAssetMs) latestAssetMs = updatedMs;
+      }
+      if (changed) {
+        mods[i] = mod.copyWith(
+          files: files,
+          lastUpdatedEpochMs: latestAssetMs > mod.lastUpdatedEpochMs
+              ? latestAssetMs
+              : null,
+        );
+      }
+    }
   }
 
   /// Fills in git blob SHAs for [files] using a basename -> sha map built from
@@ -4404,6 +4533,26 @@ class _LauncherScreenState extends State<LauncherScreen>
     return changed ? next : mods;
   }
 
+  /// Stamps mods with no resolvable update time (a just-added folder whose
+  /// commit lookup failed, or local/dev entries) as "first seen now", so a
+  /// newly added mod shows up in Recent and its card never reads
+  /// "Last Updated: Unknown". The stamp persists through the mods cache, so
+  /// it stays stable across sessions instead of resetting every load.
+  void _stampFirstSeenAtlasMods(
+    List<_AtlasModEntry> mods,
+    Map<String, _AtlasModEntry> cachedModsById,
+  ) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (var i = 0; i < mods.length; i++) {
+      final mod = mods[i];
+      if (mod.lastUpdatedEpochMs > 0) continue;
+      final cachedMs = cachedModsById[mod.id]?.lastUpdatedEpochMs ?? 0;
+      mods[i] = mod.copyWith(
+        lastUpdatedEpochMs: cachedMs > 0 ? cachedMs : nowMs,
+      );
+    }
+  }
+
   Future<List<_AtlasModEntry>> _refreshAtlasModLastUpdatedFromGitHub(
     List<_AtlasModEntry> mods,
     Map<String, _AtlasModEntry> cachedModsById,
@@ -4818,6 +4967,8 @@ class _LauncherScreenState extends State<LauncherScreen>
         final mods = await _loadModsLibraryFromGitHub(
           cachedModsById: cachedModsById,
         );
+        await _applyGithubReleaseAssetFingerprints(mods);
+        _stampFirstSeenAtlasMods(mods, cachedModsById);
         _sortAtlasMods(mods);
         await _saveModsLibraryCache(mods);
         if (mounted) {
@@ -4838,6 +4989,8 @@ class _LauncherScreenState extends State<LauncherScreen>
             fallbackMods,
             cachedModsById,
           );
+          await _applyGithubReleaseAssetFingerprints(fallbackMods);
+          _stampFirstSeenAtlasMods(fallbackMods, cachedModsById);
         }
         if (fallbackMods.isEmpty) {
           fallbackMods = cachedMods;
@@ -5794,8 +5947,11 @@ class _LauncherScreenState extends State<LauncherScreen>
               final pct = progress == null
                   ? ''
                   : ' ${(progress * 100).round()}%';
+              final count = totalDownloads > 1
+                  ? ' (${base + 1}/$totalDownloads)'
+                  : '';
               _toastProgress(
-                'Downloading "${mod.name}" (${base + 1}/$totalDownloads)$pct',
+                'Downloading "${mod.name}"...$pct$count',
                 progress: progress,
                 indeterminate: false,
                 onCancel: onCancel,
@@ -6302,8 +6458,11 @@ class _LauncherScreenState extends State<LauncherScreen>
               final pct = progress == null
                   ? ''
                   : ' ${(progress * 100).round()}%';
+              final count = totalDownloads > 1
+                  ? ' (${base + 1}/$totalDownloads)'
+                  : '';
               _toastProgress(
-                'Updating "${mod.name}" (${base + 1}/$totalDownloads)$pct',
+                'Updating "${mod.name}"...$pct$count',
                 progress: progress,
                 indeterminate: false,
                 onCancel: onCancel,
@@ -6607,7 +6766,7 @@ class _LauncherScreenState extends State<LauncherScreen>
           }
           final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
           _toastProgress(
-            progressMessage,
+            '$progressMessage ${(ratio * 100).round()}%',
             progress: ratio,
             indeterminate: false,
           );
@@ -7197,6 +7356,101 @@ class _LauncherScreenState extends State<LauncherScreen>
     final pretty = const JsonEncoder.withIndent('  ').convert(payload);
     await _dllPresetsFile.writeAsString(pretty, flush: true);
     _dllPresets = normalized;
+    if (mounted) setState(() {});
+  }
+
+  static const String _defaultThemePresetName = 'Default';
+
+  _ThemePreset _defaultThemePreset() {
+    return _ThemePreset.fromSettings(
+      _defaultThemePresetName,
+      LauncherSettings.defaults(),
+    );
+  }
+
+  bool _isDefaultThemePresetName(String name) {
+    return name.trim().toLowerCase() ==
+        _defaultThemePresetName.toLowerCase();
+  }
+
+  Future<void> _loadThemePresets() async {
+    if (!_storageReady) return;
+    if (!await _themePresetsFile.exists()) {
+      // First launch: seed the bundled Default preset so the dropdown always
+      // has the factory theme to fall back to.
+      try {
+        await _saveThemePresets(<_ThemePreset>[_defaultThemePreset()]);
+      } catch (error) {
+        _themePresets = <_ThemePreset>[_defaultThemePreset()];
+        _log('settings', 'Failed to seed theme presets: $error');
+      }
+      return;
+    }
+
+    try {
+      final raw = await _themePresetsFile.readAsString();
+      final decoded = jsonDecode(raw);
+      final presetsRaw = decoded is Map
+          ? decoded['presets']
+          : decoded is List
+          ? decoded
+          : null;
+      final parsed = <_ThemePreset>[];
+      if (presetsRaw is List) {
+        for (final item in presetsRaw) {
+          if (item is Map<String, dynamic>) {
+            final preset = _ThemePreset.fromJson(item);
+            if (preset.name.trim().isNotEmpty) parsed.add(preset);
+          } else if (item is Map) {
+            final preset = _ThemePreset.fromJson(item.cast<String, dynamic>());
+            if (preset.name.trim().isNotEmpty) parsed.add(preset);
+          }
+        }
+      }
+      _themePresets = _normalizedThemePresets(parsed);
+    } catch (error) {
+      _themePresets = <_ThemePreset>[_defaultThemePreset()];
+      _log(
+        'settings',
+        'Invalid theme presets file. Loaded default preset only. $error',
+      );
+    }
+  }
+
+  /// Dedupes by name and keeps the bundled Default preset first, followed by
+  /// user presets in creation order.
+  List<_ThemePreset> _normalizedThemePresets(Iterable<_ThemePreset> presets) {
+    final byName = <String, _ThemePreset>{};
+    for (final preset in presets) {
+      final name = preset.name.trim();
+      if (name.isEmpty) continue;
+      byName[name.toLowerCase()] = preset.copyWith(name: name);
+    }
+    byName.putIfAbsent(
+      _defaultThemePresetName.toLowerCase(),
+      _defaultThemePreset,
+    );
+    final defaultPreset = byName.remove(
+      _defaultThemePresetName.toLowerCase(),
+    )!;
+    final rest = byName.values.toList()
+      ..sort(
+        (left, right) => left.createdAtEpochMs.compareTo(right.createdAtEpochMs),
+      );
+    return <_ThemePreset>[defaultPreset, ...rest];
+  }
+
+  Future<void> _saveThemePresets(List<_ThemePreset> presets) async {
+    if (!_storageReady) return;
+    final normalized = _normalizedThemePresets(presets);
+    final payload = <String, dynamic>{
+      'version': 1,
+      'updatedAtEpochMs': DateTime.now().millisecondsSinceEpoch,
+      'presets': normalized.map((preset) => preset.toJson()).toList(),
+    };
+    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
+    await _themePresetsFile.writeAsString(pretty, flush: true);
+    _themePresets = normalized;
     if (mounted) setState(() {});
   }
 
@@ -11625,7 +11879,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     }
     if (_isModDownloadLockedVersion(version.id)) {
       _toast(
-        'A mod is still downloading for this build — wait for it to finish',
+        'A mod is still downloading for this build, wait for it to finish',
       );
       return;
     }
@@ -14641,7 +14895,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       case 'account_too_new':
         return 'Your Discord account is too new to join the network.';
       case 'rate_limited':
-        return 'You connected recently — please try again later.';
+        return 'You connected recently, please try again later.';
       case 'discord_denied':
         return 'Discord login was cancelled.';
       case 'timeout':
@@ -14851,7 +15105,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
           child: Center(
             child: Text(
               query.isEmpty
-                  ? 'No one else online yet — invite your friends.'
+                  ? 'No one else online yet, invite your friends!'
                   : 'No players match "$search".',
               textAlign: TextAlign.center,
               style: TextStyle(color: onSurface.withValues(alpha: 0.6)),
@@ -15081,7 +15335,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  peer.tailscaleIp.isEmpty ? '—' : peer.tailscaleIp,
+                  peer.tailscaleIp.isEmpty ? ', ' : peer.tailscaleIp,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -16291,7 +16545,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
 
       void phase(String name, double localT) {
         final p = (i + localT.clamp(0.0, 1.0)) / total;
-        onProgress?.call('$name — $label (${i + 1} of $total)', progress: p);
+        onProgress?.call('$name $label (${i + 1} of $total)', progress: p);
       }
 
       phase('Checking', 0.05);
@@ -18054,6 +18308,333 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     );
   }
 
+  _ThemePreset? _matchingThemePreset() {
+    for (final preset in _themePresets) {
+      if (preset.matchesSettings(_settings)) return preset;
+    }
+    return null;
+  }
+
+  Future<void> _applyThemePreset(_ThemePreset preset) async {
+    var backgroundImagePath = preset.backgroundImagePath.trim();
+    if (backgroundImagePath.isNotEmpty &&
+        !File(backgroundImagePath).existsSync()) {
+      backgroundImagePath = '';
+    }
+    setState(() {
+      _settings = _settings.copyWith(
+        navigationBarLocation: preset.navigationBarLocation,
+        panelGlassStyle: preset.panelGlassStyle,
+        panelGlassColorValue: preset.panelGlassColorValue,
+        panelGlassOpacity: preset.panelGlassOpacity,
+        popupBackgroundBlurEnabled: preset.popupBackgroundBlurEnabled,
+        backgroundImagePath: backgroundImagePath,
+        backgroundBlur: preset.backgroundBlur,
+        backgroundParticlesOpacity: preset.backgroundParticlesOpacity,
+      );
+    });
+    await _saveSettings(toast: false);
+  }
+
+  String _suggestThemePresetName() {
+    final existing = _themePresets
+        .map((preset) => preset.name.trim().toLowerCase())
+        .where((name) => name.isNotEmpty)
+        .toSet();
+    var index = existing.length;
+    while (true) {
+      final candidate = 'Theme $index';
+      if (!existing.contains(candidate.toLowerCase())) return candidate;
+      index++;
+    }
+  }
+
+  Future<void> _createThemePresetFromCurrent() async {
+    final name = await _promptThemePresetName();
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    final trimmed = name.trim();
+    final lowerName = trimmed.toLowerCase();
+    _ThemePreset? replacing;
+    for (final preset in _themePresets) {
+      if (preset.name.trim().toLowerCase() == lowerName) {
+        replacing = preset;
+        break;
+      }
+    }
+    final nextPreset = _ThemePreset.fromSettings(
+      trimmed,
+      _settings,
+      createdAtEpochMs: replacing?.createdAtEpochMs,
+    );
+    try {
+      final nextPresets =
+          _themePresets
+              .where(
+                (preset) => preset.name.trim().toLowerCase() != lowerName,
+              )
+              .toList()
+            ..add(nextPreset);
+      await _saveThemePresets(nextPresets);
+      _toast(
+        replacing == null
+            ? 'Theme preset "${nextPreset.name}" saved'
+            : 'Theme preset "${nextPreset.name}" updated',
+      );
+      _log(
+        'settings',
+        'Saved theme preset "${nextPreset.name}" to ${_themePresetsFile.path}.',
+      );
+    } catch (error) {
+      _toast('Failed to save theme preset');
+      _log('settings', 'Failed to save theme preset: $error');
+    }
+  }
+
+  Future<void> _deleteThemePreset(_ThemePreset preset) async {
+    if (_isDefaultThemePresetName(preset.name)) return;
+    try {
+      final lowerName = preset.name.trim().toLowerCase();
+      final nextPresets = _themePresets
+          .where((item) => item.name.trim().toLowerCase() != lowerName)
+          .toList();
+      await _saveThemePresets(nextPresets);
+      _toast('Theme preset "${preset.name}" deleted');
+      _log(
+        'settings',
+        'Deleted theme preset "${preset.name}" from ${_themePresetsFile.path}.',
+      );
+    } catch (error) {
+      _toast('Failed to delete theme preset');
+      _log('settings', 'Failed to delete theme preset: $error');
+    }
+  }
+
+  Future<String?> _promptThemePresetName() async {
+    if (!mounted) return null;
+
+    final controller = TextEditingController(text: _suggestThemePresetName());
+    final focusNode = FocusNode();
+
+    final result = await showGeneralDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        var validation = '';
+
+        void submit(StateSetter setDialogState) {
+          final name = controller.text.trim();
+          if (name.isEmpty) {
+            setDialogState(() => validation = 'Name is required');
+            return;
+          }
+          if (_isDefaultThemePresetName(name)) {
+            setDialogState(
+              () => validation = 'The Default preset can\'t be replaced',
+            );
+            return;
+          }
+          Navigator.of(dialogContext).pop(name);
+        }
+
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: StatefulBuilder(
+                  builder: (dialogContext, setDialogState) {
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: _dialogSurfaceColor(dialogContext),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.1),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _dialogShadowColor(dialogContext),
+                            blurRadius: 30,
+                            offset: const Offset(0, 16),
+                          ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.palette_rounded),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Save Theme Preset',
+                                    style: TextStyle(
+                                      fontSize: 25,
+                                      fontWeight: FontWeight.w700,
+                                      color: _onSurface(dialogContext, 0.95),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Saves the current appearance settings as a preset.',
+                              style: TextStyle(
+                                color: _onSurface(dialogContext, 0.72),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: controller,
+                              focusNode: focusNode,
+                              autofocus: true,
+                              textInputAction: TextInputAction.done,
+                              onChanged: (_) {
+                                if (validation.isEmpty) return;
+                                setDialogState(() => validation = '');
+                              },
+                              onSubmitted: (_) => submit(setDialogState),
+                              decoration: InputDecoration(
+                                labelText: 'Name',
+                                hintText: 'My Theme',
+                                isDense: true,
+                                filled: true,
+                                fillColor: _onSurface(dialogContext, 0.06),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.18),
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.18),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: secondary,
+                                    width: 1.2,
+                                  ),
+                                ),
+                                errorText: validation.isEmpty
+                                    ? null
+                                    : validation,
+                              ),
+                              style: TextStyle(color: onSurface),
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                _dialogCancelButton(
+                                  dialogContext,
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(null),
+                                ),
+                                const SizedBox(width: 10),
+                                FilledButton.icon(
+                                  onPressed: () => submit(setDialogState),
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: secondary.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    foregroundColor: Colors.white,
+                                    shape: const StadiumBorder(),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 12,
+                                    ),
+                                  ),
+                                  icon: const Icon(
+                                    Icons.save_rounded,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Save'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (dialogContext, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _settings.popupBackgroundBlurEnabled
+                  ? BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: 3.2 * curved.value,
+                        sigmaY: 3.2 * curved.value,
+                      ),
+                      child: Container(
+                        color: _dialogBarrierColor(dialogContext, curved.value),
+                      ),
+                    )
+                  : Container(
+                      color: _dialogBarrierColor(dialogContext, curved.value),
+                    ),
+            ),
+            FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+                child: child,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    focusNode.dispose();
+    controller.dispose();
+    return result;
+  }
+
+  Widget _createThemePresetButton() {
+    return Tooltip(
+      message: 'Save the current theme as a preset',
+      child: SizedBox(
+        width: 42,
+        height: 42,
+        child: IconButton(
+          onPressed: () => unawaited(_createThemePresetFromCurrent()),
+          icon: const Icon(Icons.add_rounded, size: 20),
+          style: _hoverOutlineIconButtonStyle(),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showPanelGlassColorPicker() async {
     if (!mounted) return;
     final controller = TextEditingController(
@@ -18349,9 +18930,16 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
   }
 
   Future<void> _openPath(String target) async {
-    if (target.trim().isEmpty) return;
+    var normalized = target.trim().replaceAll('/', '\\');
+    if (normalized.isEmpty) return;
     if (!Platform.isWindows) return;
-    await Process.start('explorer', [target], runInShell: true);
+    // Strip trailing separators (keep drive roots like "G:\"): when the
+    // argument is quoted for the shell, a trailing backslash escapes the
+    // closing quote and explorer receives a mangled path.
+    while (normalized.length > 3 && normalized.endsWith('\\')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    await Process.start('explorer', [normalized], runInShell: true);
   }
 
   Future<void> _openLogs() => _openPath(_logFile.path);
@@ -18567,6 +19155,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     await deleteFile(_installStateFile);
     await deleteFile(_settingsFile);
     await deleteFile(_dllPresetsFile);
+    await deleteFile(_themePresetsFile);
     await deleteFile(_modsLibraryCacheFile);
     await deleteFile(_installedModsFile);
     await deleteFile(_logFile);
@@ -18602,6 +19191,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
         _bundledDllUpdatedFileNames = <String>{};
         _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
         _dllPresets = <_DllPreset>[];
+        _themePresets = <_ThemePreset>[_defaultThemePreset()];
         _modsLibrary = <_AtlasModEntry>[];
         _installedModsById = <String, _InstalledAtlasMod>{};
         _modsType = _AtlasModType.pak;
@@ -18660,6 +19250,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       _bundledDllUpdatedFileNames = <String>{};
       _bundledDllRemoteAssetsByName = <String, _BundledDllRemoteAsset>{};
       _dllPresets = <_DllPreset>[];
+      _themePresets = <_ThemePreset>[_defaultThemePreset()];
       _modsLibrary = <_AtlasModEntry>[];
       _installedModsById = <String, _InstalledAtlasMod>{};
       _modsType = _AtlasModType.pak;
@@ -21191,7 +21782,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
           _titleActionButton(Icons.download_rounded, () {
             unawaited(
               _dismissLibraryImportTip(
-                onDismissedAction: _showBuildDownloadMenu,
+                onDismissedAction: _showFortniteVersionInstaller,
               ),
             );
           }, tooltip: 'Download'),
@@ -22415,6 +23006,1725 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  // ===== Fortnite version installer (fn-releases catalog + native downloader) =====
+
+  FortniteInstallService? _fnInstallService;
+  FortniteReleaseCatalogService? _fnCatalogService;
+  FortniteInstallJob? _fnInstallJob;
+  bool _fnInstallDialogOpen = false;
+  String _fnToastSignature = '';
+
+  /// "Speed" maps to how many chunks download in parallel.
+  static const List<({String id, String label, int workers})>
+  _fnSpeedPresets = [
+    (id: 'slow', label: 'Slow', workers: 4),
+    (id: 'balanced', label: 'Balanced', workers: 8),
+    (id: 'fast', label: 'Fast', workers: 16),
+    (id: 'max', label: 'Maximum', workers: 32),
+  ];
+
+  FortniteInstallService _ensureFnInstallService() {
+    return _fnInstallService ??= FortniteInstallService(
+      dataDirPath: _dataDir.path,
+      log: (message) => _log('installer', message),
+    );
+  }
+
+  FortniteReleaseCatalogService _ensureFnCatalogService() {
+    return _fnCatalogService ??= FortniteReleaseCatalogService(
+      dataDirPath: _dataDir.path,
+      log: (message) => _log('installer', message),
+    );
+  }
+
+  String _fnSanitizeFolderName(String value) {
+    final cleaned = value
+        .replaceAll(RegExp(r'[<>:"/\\|?*]'), '-')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return cleaned.isEmpty ? 'Fortnite Build' : cleaned;
+  }
+
+  /// legendary prints `HH:MM:SS`; drop the hour block when it is zero.
+  String _fnEtaDisplay(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '--:--';
+    final parts = trimmed.split(':');
+    if (parts.length == 3 && parts[0] == '00') {
+      return '${parts[1]}:${parts[2]}';
+    }
+    return trimmed;
+  }
+
+  String _fnFormatMiB(double? mib) {
+    if (mib == null) return '—';
+    if (mib >= 1024) return '${(mib / 1024).toStringAsFixed(2)} GiB';
+    return '${mib.toStringAsFixed(0)} MiB';
+  }
+
+  Future<void> _showFortniteVersionInstaller() async {
+    if (!mounted) return;
+    final runningJob = _fnInstallJob;
+    if (runningJob != null && !runningJob.isFinished) {
+      await _showFortniteInstallProgressDialog();
+      return;
+    }
+
+    final service = _ensureFnInstallService();
+    final prefs = service.readPrefs();
+    // Install location is deliberately not remembered — the user picks a fresh
+    // folder for every download.
+    var baseDirPath = '';
+    var speedId = (prefs['speedPreset'] as String?)?.trim() ?? 'balanced';
+    if (!_fnSpeedPresets.any((preset) => preset.id == speedId)) {
+      speedId = 'balanced';
+    }
+
+    FortniteReleaseCatalog? catalog;
+    String? catalogError;
+    var catalogLoading = true;
+    FortniteRelease? selected;
+    // Two-level picker: null = season tile grid, else that season's build list.
+    int? openSeason;
+    // Default view shows Seasons 1–30 (what ATLAS runs natively); the filter
+    // toggles the full 1–41 set.
+    var showAllSeasons = false;
+    var searchQuery = '';
+    var starting = false;
+    var dialogOpen = true;
+    StateSetter? rebuildDialog;
+    final searchController = TextEditingController();
+
+    void refreshDialog() {
+      if (!dialogOpen) return;
+      rebuildDialog?.call(() {});
+    }
+
+    Future<void> loadCatalog({bool forceRefresh = false}) async {
+      catalogLoading = true;
+      catalogError = null;
+      refreshDialog();
+      try {
+        catalog = await _ensureFnCatalogService().load(
+          forceRefresh: forceRefresh,
+        );
+      } catch (error) {
+        catalogError =
+            'Could not load the version list. Check your connection and '
+            'retry. ($error)';
+      }
+      catalogLoading = false;
+      refreshDialog();
+    }
+
+    unawaited(loadCatalog());
+
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Fortnite version installer',
+      barrierColor: Colors.transparent,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            rebuildDialog = setDialogState;
+            final onSurface = Theme.of(dialogContext).colorScheme.onSurface;
+            final secondary = Theme.of(dialogContext).colorScheme.secondary;
+            final maxHeight = max(
+              420.0,
+              MediaQuery.of(dialogContext).size.height * 0.82,
+            );
+
+            final query = searchQuery.trim().toLowerCase();
+            final releases = catalog?.releases ?? const <FortniteRelease>[];
+            final bySeason = <int, List<FortniteRelease>>{};
+            for (final release in releases) {
+              bySeason.putIfAbsent(release.season, () => []).add(release);
+            }
+
+            // Seasons shown as tiles: default 1–30, or all when toggled.
+            // Highest season first, matching the build list ordering.
+            final gridSeasons =
+                bySeason.keys.where((s) => showAllSeasons || s <= 30).toList()
+                  ..sort((a, b) => b.compareTo(a));
+
+            // Builds for the drilled-into season: only ones with an archived
+            // manifest (actually downloadable), highest build first,
+            // search-filtered. List.of guarantees a modifiable copy so the
+            // sort is safe even for the empty (grid-view) case.
+            final seasonBuilds = List<FortniteRelease>.of(
+              openSeason == null
+                  ? const <FortniteRelease>[]
+                  : (bySeason[openSeason] ?? const <FortniteRelease>[]).where((
+                      release,
+                    ) {
+                      if (!release.installable) return false;
+                      if (query.isEmpty) return true;
+                      return release.displayVersion.toLowerCase().contains(
+                            query,
+                          ) ||
+                          release.buildVersion.toLowerCase().contains(query) ||
+                          release.netCl.contains(query) ||
+                          release.notes.toLowerCase().contains(query);
+                    }),
+            )..sort((a, b) => _fnBuildSortKey(b).compareTo(_fnBuildSortKey(a)));
+
+            // Non-scroll states get the same right inset as the sections
+            // above them, so their centering matches the visible content
+            // area (the raw viewport extends to the dialog edge).
+            Widget listBody;
+            if (catalogLoading) {
+              listBody = _fnPadRight22(
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 26,
+                        height: 26,
+                        child: CircularProgressIndicator(strokeWidth: 2.6),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Loading version list…',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: _onSurface(dialogContext, 0.7),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            } else if (catalogError != null) {
+              listBody = _fnPadRight22(
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.wifi_off_rounded,
+                        size: 30,
+                        color: _onSurface(dialogContext, 0.55),
+                      ),
+                      const SizedBox(height: 10),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Text(
+                          catalogError!,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(dialogContext, 0.72),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _dialogOutlinedButton(
+                        dialogContext,
+                        onPressed: () =>
+                            unawaited(loadCatalog(forceRefresh: true)),
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            } else if (openSeason == null) {
+              // Season tile grid — 3 across, square, scrolls vertically.
+              listBody = gridSeasons.isEmpty
+                  ? _fnPadRight22(
+                      Center(
+                        child: Text(
+                          'No seasons available',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(dialogContext, 0.7),
+                          ),
+                        ),
+                      ),
+                    )
+                  : GridView.builder(
+                      // Left/top padding gives the hover-scaled tiles room so
+                      // the viewport doesn't clip them; right padding keeps
+                      // tiles inset while the viewport reaches the dialog
+                      // edge (so the scrollbar hugs it).
+                      padding: const EdgeInsets.fromLTRB(6, 6, 22, 6),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            childAspectRatio: 1,
+                            mainAxisSpacing: 10,
+                            crossAxisSpacing: 10,
+                          ),
+                      itemCount: gridSeasons.length,
+                      itemBuilder: (context, index) {
+                        final season = gridSeasons[index];
+                        return _fnSeasonTile(
+                          dialogContext,
+                          season: season,
+                          buildCount: bySeason[season]!
+                              .where((release) => release.installable)
+                              .length,
+                          onTap: () => setDialogState(() {
+                            openSeason = season;
+                            selected = null;
+                            searchQuery = '';
+                            searchController.clear();
+                          }),
+                        );
+                      },
+                    );
+            } else if (seasonBuilds.isEmpty) {
+              listBody = _fnPadRight22(
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 28),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          query.isEmpty
+                              ? 'There are currently no manifests available. '
+                                    'Search manually to see if they '
+                                    'exist.'
+                              : 'No versions match "${searchQuery.trim()}"',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(dialogContext, 0.7),
+                            height: 1.35,
+                          ),
+                        ),
+                        if (query.isEmpty) ...[
+                          const SizedBox(height: 14),
+                          _dialogOutlinedButton(
+                            dialogContext,
+                            onPressed: () {
+                              Navigator.of(dialogContext).pop();
+                              unawaited(_showBuildDownloadMenu());
+                            },
+                            child: const Text('Browse Build Archives'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            } else {
+              listBody = ListView.builder(
+                // Right padding keeps rows aligned with the search field
+                // while the viewport itself reaches the dialog edge (so the
+                // scrollbar hugs it).
+                padding: const EdgeInsets.only(right: 22),
+                itemCount: seasonBuilds.length,
+                itemBuilder: (context, index) {
+                  final release = seasonBuilds[index];
+                  final isSelected = identical(selected, release);
+                  return _fnReleaseRow(
+                    dialogContext,
+                    release: release,
+                    selected: isSelected,
+                    onTap: () {
+                      if (!release.installable) {
+                        _toast(
+                          'No manifest is archived for '
+                          '${release.displayVersion}, so it cannot be '
+                          'installed automatically',
+                        );
+                        return;
+                      }
+                      setDialogState(() => selected = release);
+                    },
+                  );
+                },
+              );
+            }
+
+            final selectedRelease = selected;
+            final speedPreset = _fnSpeedPresets.firstWhere(
+              (preset) => preset.id == speedId,
+              orElse: () => _fnSpeedPresets[1],
+            );
+            final destinationPreview =
+                selectedRelease != null && baseDirPath.isNotEmpty
+                ? _joinPath([
+                    baseDirPath,
+                    _fnSanitizeFolderName(
+                      'Fortnite ${selectedRelease.displayVersion}',
+                    ),
+                  ])
+                : null;
+            final canInstall =
+                !starting &&
+                !catalogLoading &&
+                selectedRelease != null &&
+                selectedRelease.installable &&
+                baseDirPath.trim().isNotEmpty;
+
+            return SafeArea(
+              child: Center(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Container(
+                    constraints: BoxConstraints(
+                      maxWidth: 640,
+                      maxHeight: maxHeight,
+                    ),
+                    margin: const EdgeInsets.symmetric(horizontal: 24),
+                    // Right padding is applied per-section instead of here so
+                    // the scroll area can reach the dialog's right edge and
+                    // the scrollbar hugs it.
+                    padding: const EdgeInsets.fromLTRB(22, 20, 0, 18),
+                    decoration: BoxDecoration(
+                      color: _dialogSurfaceColor(dialogContext),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(
+                        color: _onSurface(dialogContext, 0.12),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _dialogShadowColor(dialogContext),
+                          blurRadius: 34,
+                          offset: const Offset(0, 18),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(right: 22),
+                          child: Row(
+                            children: [
+                              _dialogHeaderIconBadge(
+                                dialogContext,
+                                Icons.cloud_download_rounded,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  'Install Fortnite',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 34,
+                                    fontWeight: FontWeight.w700,
+                                    color: _onSurface(dialogContext, 0.96),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        if (openSeason == null) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(right: 22),
+                            child: Text(
+                              'Pick a season, then choose a build to download through manifests. '
+                              'ATLAS runs Seasons 1-30 natively on Magnesium, switch to "All" for newer builds '
+                              'if needed. Please note that some manifests may not work as Epic no longer hosts them.',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: _onSurface(dialogContext, 0.74),
+                                height: 1.25,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              _fnSeasonFilterChip(
+                                dialogContext,
+                                label: 'Seasons 1-30',
+                                selected: !showAllSeasons,
+                                onTap: () => setDialogState(
+                                  () => showAllSeasons = false,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              _fnSeasonFilterChip(
+                                dialogContext,
+                                label: 'All',
+                                selected: showAllSeasons,
+                                onTap: () =>
+                                    setDialogState(() => showAllSeasons = true),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ] else ...[
+                          Padding(
+                            padding: const EdgeInsets.only(right: 22),
+                            child: Row(
+                              children: [
+                                IconButton(
+                                  tooltip: 'Back to seasons',
+                                  onPressed: () => setDialogState(() {
+                                    openSeason = null;
+                                    selected = null;
+                                    searchQuery = '';
+                                    searchController.clear();
+                                  }),
+                                  icon: const Icon(Icons.arrow_back_rounded),
+                                  color: onSurface.withValues(alpha: 0.85),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Season $openSeason',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w800,
+                                    color: _onSurface(dialogContext, 0.95),
+                                  ),
+                                ),
+                                const Spacer(),
+                                Text(
+                                  '${seasonBuilds.length} '
+                                  'build${seasonBuilds.length == 1 ? '' : 's'}',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: _onSurface(dialogContext, 0.6),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          _fnPadRight22(
+                            TextField(
+                              controller: searchController,
+                              onChanged: (value) =>
+                                  setDialogState(() => searchQuery = value),
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: _onSurface(dialogContext, 0.92),
+                              ),
+                              decoration: InputDecoration(
+                                hintText:
+                                    'Search for a version (e.g. 7.30, CL number)',
+                                hintStyle: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: _onSurface(dialogContext, 0.45),
+                                ),
+                                prefixIcon: Icon(
+                                  Icons.search_rounded,
+                                  size: 20,
+                                  color: _onSurface(dialogContext, 0.6),
+                                ),
+                                isDense: true,
+                                filled: true,
+                                fillColor: _adaptiveScrimColor(
+                                  dialogContext,
+                                  darkAlpha: 0.08,
+                                  lightAlpha: 0.14,
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 11,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.12),
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: _onSurface(dialogContext, 0.12),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(
+                                    color: secondary.withValues(alpha: 0.6),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        // Flexible (not Expanded) so the dialog shrink-wraps
+                        // short result sets, with a hard height cap so the
+                        // list can never overflow even if a transition frame
+                        // hands it loose constraints.
+                        Flexible(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(maxHeight: maxHeight),
+                            // Fade the scroll fold: when the viewport cuts
+                            // through the next grid row, its bright artwork
+                            // top otherwise shows as a thin glowing "line" at
+                            // the bottom edge.
+                            child: ShaderMask(
+                              shaderCallback: (rect) {
+                                final fade = (18.0 / rect.height).clamp(
+                                  0.0,
+                                  0.5,
+                                );
+                                return LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: const [
+                                    Colors.white,
+                                    Colors.white,
+                                    Colors.transparent,
+                                  ],
+                                  stops: [0.0, 1.0 - fade, 1.0],
+                                ).createShader(rect);
+                              },
+                              blendMode: BlendMode.dstIn,
+                              child: listBody,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        // Install controls appear only after a season is open.
+                        if (openSeason != null) ...[
+                          // IntrinsicHeight + stretch keeps the Browse button
+                          // exactly the folder field's height.
+                          _fnPadRight22(
+                            IntrinsicHeight(
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                        vertical: 10,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(12),
+                                        color: _adaptiveScrimColor(
+                                          dialogContext,
+                                          darkAlpha: 0.08,
+                                          lightAlpha: 0.14,
+                                        ),
+                                        border: Border.all(
+                                          color: _onSurface(
+                                            dialogContext,
+                                            0.12,
+                                          ),
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            Icons.folder_rounded,
+                                            size: 17,
+                                            color: _onSurface(
+                                              dialogContext,
+                                              0.62,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              baseDirPath.isEmpty
+                                                  ? 'Choose where builds download…'
+                                                  : baseDirPath,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: _onSurface(
+                                                  dialogContext,
+                                                  baseDirPath.isEmpty
+                                                      ? 0.5
+                                                      : 0.85,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  OutlinedButton(
+                                    onPressed: () async {
+                                      final picked =
+                                          await _fnPickInstallBaseDir(
+                                            baseDirPath,
+                                          );
+                                      if (picked == null ||
+                                          picked.trim().isEmpty) {
+                                        return;
+                                      }
+                                      if (!dialogOpen) return;
+                                      setDialogState(
+                                        () => baseDirPath = picked.trim(),
+                                      );
+                                    },
+                                    style: OutlinedButton.styleFrom(
+                                      // Match the folder field: same corner
+                                      // radius, same height (via stretch),
+                                      // white text like the importer's Browse.
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                      ),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      foregroundColor: _onSurface(
+                                        dialogContext,
+                                        0.92,
+                                      ),
+                                      side: BorderSide(
+                                        color: _onSurface(dialogContext, 0.14),
+                                      ),
+                                    ),
+                                    child: const Text('Browse…'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          _fnPadRight22(
+                            Text(
+                              destinationPreview != null
+                                  ? 'Installs to: $destinationPreview  •  '
+                                        '${speedPreset.label} speed'
+                                  : selectedRelease == null
+                                  ? 'Select a build above, then choose a folder.'
+                                  : 'Choose a download folder to install.',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _onSurface(dialogContext, 0.55),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        _fnPadRight22(
+                          Row(
+                            children: openSeason == null
+                                ? [
+                                    _dialogCancelButton(
+                                      dialogContext,
+                                      onPressed: () =>
+                                          Navigator.of(dialogContext).pop(),
+                                    ),
+                                    const Spacer(),
+                                    _dialogOutlinedButton(
+                                      dialogContext,
+                                      onPressed: () {
+                                        Navigator.of(dialogContext).pop();
+                                        unawaited(_showBuildDownloadMenu());
+                                      },
+                                      child: const Text('Install manually'),
+                                    ),
+                                  ]
+                                : [
+                                    _dialogCancelButton(
+                                      dialogContext,
+                                      onPressed: () =>
+                                          Navigator.of(dialogContext).pop(),
+                                    ),
+                                    const Spacer(),
+                                    _fnSpeedCircleButton(
+                                      dialogContext,
+                                      currentId: speedId,
+                                      onSelected: (value) =>
+                                          setDialogState(() => speedId = value),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    FilledButton(
+                                      onPressed: !canInstall
+                                          ? null
+                                          : () async {
+                                              setDialogState(
+                                                () => starting = true,
+                                              );
+                                              final navigator = Navigator.of(
+                                                dialogContext,
+                                              );
+                                              final started =
+                                                  await _fnBeginInstall(
+                                                    release: selectedRelease,
+                                                    baseDirPath: baseDirPath
+                                                        .trim(),
+                                                    speedId: speedId,
+                                                  );
+                                              if (!dialogOpen) return;
+                                              if (started) {
+                                                navigator.pop();
+                                              } else {
+                                                setDialogState(
+                                                  () => starting = false,
+                                                );
+                                              }
+                                            },
+                                      style: FilledButton.styleFrom(
+                                        shape: const StadiumBorder(),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 20,
+                                          vertical: 12,
+                                        ),
+                                      ),
+                                      child: starting
+                                          ? const SizedBox(
+                                              width: 16,
+                                              height: 16,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2.2,
+                                              ),
+                                            )
+                                          : const Text('Install'),
+                                    ),
+                                  ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+
+    dialogOpen = false;
+    rebuildDialog = null;
+    // Defer disposal one frame: the route's exit transition can still paint the
+    // search field on the frame this future completes, and disposing the
+    // controller synchronously would be "used after disposed".
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => searchController.dispose(),
+    );
+
+    final startedJob = _fnInstallJob;
+    if (mounted &&
+        startedJob != null &&
+        !startedJob.isFinished &&
+        !_fnInstallDialogOpen) {
+      await _showFortniteInstallProgressDialog();
+    }
+  }
+
+  /// Confirms cancelling an active install; warns that the partial download
+  /// gets deleted.
+  Future<bool> _fnConfirmCancelInstall(FortniteInstallJob job) async {
+    if (!mounted) return false;
+    final downloadedSoFar = job.writtenMiB > 0
+        ? ' The ${_fnFormatMiB(job.writtenMiB)} downloaded so far will be '
+              'deleted.'
+        : ' Anything downloaded so far will be deleted.';
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Cancel install',
+      barrierColor: Colors.transparent,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 460),
+                margin: const EdgeInsets.symmetric(horizontal: 24),
+                padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                decoration: BoxDecoration(
+                  color: _dialogSurfaceColor(dialogContext),
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: _onSurface(dialogContext, 0.12)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _dialogShadowColor(dialogContext),
+                      blurRadius: 34,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Cancel this install?',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w800,
+                        color: _onSurface(dialogContext, 0.96),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'This stops downloading '
+                      '${job.release.displayVersion}.$downloadedSoFar '
+                      'You can install it again at any time.',
+                      style: TextStyle(
+                        color: _onSurface(dialogContext, 0.86),
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        FilledButton(
+                          onPressed: () =>
+                              Navigator.of(dialogContext).pop(true),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFB3261E),
+                            foregroundColor: Colors.white,
+                            shape: const StadiumBorder(),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 12,
+                            ),
+                          ),
+                          child: const Text('Cancel Install'),
+                        ),
+                        const Spacer(),
+                        _dialogOutlinedButton(
+                          dialogContext,
+                          onPressed: () =>
+                              Navigator.of(dialogContext).pop(false),
+                          child: const Text('Keep Downloading'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+    return confirmed == true;
+  }
+
+  /// Directory picker that survives a stale remembered path. The Windows
+  /// dialog throws 0x80070002 when `initialDirectory` cannot be resolved
+  /// (deleted folder, drive roots in some picker versions), so validate first
+  /// and fall back to opening with no initial directory.
+  Future<String?> _fnPickInstallBaseDir(String rememberedPath) async {
+    const dialogTitle = 'Choose where Fortnite builds are installed';
+    String? initialDirectory = rememberedPath.trim();
+    if (initialDirectory.isEmpty || !Directory(initialDirectory).existsSync()) {
+      initialDirectory = null;
+    }
+    try {
+      return await FilePicker.platform.getDirectoryPath(
+        dialogTitle: dialogTitle,
+        initialDirectory: initialDirectory,
+      );
+    } catch (error) {
+      _log(
+        'installer',
+        'Folder picker failed with initialDirectory "$initialDirectory": '
+            '$error — retrying without it',
+      );
+    }
+    try {
+      return await FilePicker.platform.getDirectoryPath(
+        dialogTitle: dialogTitle,
+      );
+    } catch (error) {
+      _log('installer', 'Folder picker failed again: $error');
+      _toast('Could not open the folder picker');
+      return null;
+    }
+  }
+
+  /// Square season tile for the installer grid: season artwork with a legible
+  /// label + build count. Falls back to a gradient when artwork is missing
+  /// (e.g. Seasons 15/16 have no bundled image).
+  Widget _fnSeasonTile(
+    BuildContext dialogContext, {
+    required int season,
+    required int buildCount,
+    required VoidCallback onTap,
+  }) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    return _HoverScale(
+      scale: 1.03,
+      child: Material(
+        color: _adaptiveScrimColor(
+          dialogContext,
+          darkAlpha: 0.06,
+          lightAlpha: 0.1,
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: _onSurface(dialogContext, 0.1)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.asset(
+                'assets/seasons/Season$season.jpg',
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (context, error, stackTrace) => DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        secondary.withValues(alpha: 0.4),
+                        _onSurface(dialogContext, 0.08),
+                      ],
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      'S$season',
+                      style: TextStyle(
+                        fontSize: 30,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white.withValues(alpha: 0.85),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, Color(0xD9000000)],
+                    stops: [0.42, 1.0],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Season $season',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        shadows: [Shadow(blurRadius: 6, color: Colors.black)],
+                      ),
+                    ),
+                    Text(
+                      '$buildCount build${buildCount == 1 ? '' : 's'}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white.withValues(alpha: 0.85),
+                        shadows: const [
+                          Shadow(blurRadius: 6, color: Colors.black),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Circular download-speed picker shown to the right of Install; styled to
+  /// match the library page's circular action buttons.
+  Widget _fnSpeedCircleButton(
+    BuildContext dialogContext, {
+    required String currentId,
+    required ValueChanged<String> onSelected,
+  }) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    final preset = _fnSpeedPresets.firstWhere(
+      (p) => p.id == currentId,
+      orElse: () => _fnSpeedPresets[1],
+    );
+    return PopupMenuButton<String>(
+      tooltip: 'Download speed: ${preset.label}',
+      onSelected: onSelected,
+      itemBuilder: (context) => [
+        for (final p in _fnSpeedPresets)
+          PopupMenuItem<String>(
+            value: p.id,
+            child: Text(
+              p.label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: _onSurface(
+                  dialogContext,
+                  p.id == currentId ? 0.95 : 0.7,
+                ),
+              ),
+            ),
+          ),
+      ],
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: _onSurface(dialogContext, _softButtonOutlineAlpha()),
+          ),
+        ),
+        child: Icon(Icons.speed_rounded, size: 16, color: secondary),
+      ),
+    );
+  }
+
+  /// Standard right inset for installer-dialog sections; the dialog container
+  /// itself has no right padding so scroll areas can reach its edge.
+  Widget _fnPadRight22(Widget child) {
+    return Padding(padding: const EdgeInsets.only(right: 22), child: child);
+  }
+
+  Widget _fnSeasonFilterChip(
+    BuildContext dialogContext, {
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    return Material(
+      color: selected
+          ? secondary.withValues(alpha: 0.18)
+          : _adaptiveScrimColor(
+              dialogContext,
+              darkAlpha: 0.06,
+              lightAlpha: 0.1,
+            ),
+      shape: StadiumBorder(
+        side: BorderSide(
+          color: selected
+              ? secondary.withValues(alpha: 0.55)
+              : _onSurface(dialogContext, 0.12),
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: _onSurface(dialogContext, selected ? 0.95 : 0.7),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Sort key for ordering a season's builds highest-first. The changelist
+  /// number (from `…-CL-<n>`, else the Net CL column) increases with every
+  /// build, so it's a reliable "how new" ranking.
+  int _fnBuildSortKey(FortniteRelease release) {
+    final clMatch = RegExp(r'-CL-(\d+)').firstMatch(release.buildVersion);
+    if (clMatch != null) {
+      return int.tryParse(clMatch.group(1)!) ?? 0;
+    }
+    return int.tryParse(release.netCl.trim()) ?? 0;
+  }
+
+  Widget _fnReleaseRow(
+    BuildContext dialogContext, {
+    required FortniteRelease release,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final secondary = Theme.of(dialogContext).colorScheme.secondary;
+    // Subtitle is just the changelist; fall back to the raw build string for
+    // the rare row without a CL.
+    final clMatch = RegExp(r'CL-\d+').firstMatch(release.buildVersion);
+    final subtitle =
+        clMatch?.group(0) ??
+        (release.netCl.trim().isNotEmpty
+            ? 'CL-${release.netCl.trim()}'
+            : release.buildVersion);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: selected
+            ? secondary.withValues(alpha: 0.16)
+            : _adaptiveScrimColor(
+                dialogContext,
+                darkAlpha: 0.06,
+                lightAlpha: 0.1,
+              ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: selected
+                ? secondary.withValues(alpha: 0.55)
+                : _onSurface(dialogContext, 0.1),
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Opacity(
+            opacity: release.installable ? 1 : 0.45,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          release.displayVersion,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: _onSurface(dialogContext, 0.94),
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _onSurface(dialogContext, 0.58),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (!release.installable)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: _onSurface(dialogContext, 0.18),
+                        ),
+                      ),
+                      child: Text(
+                        'No manifest',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                          color: _onSurface(dialogContext, 0.55),
+                        ),
+                      ),
+                    )
+                  else if (selected)
+                    Icon(
+                      Icons.check_circle_rounded,
+                      size: 20,
+                      color: secondary,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _fnBeginInstall({
+    required FortniteRelease release,
+    required String baseDirPath,
+    required String speedId,
+  }) async {
+    final service = _ensureFnInstallService();
+    final preset = _fnSpeedPresets.firstWhere(
+      (candidate) => candidate.id == speedId,
+      orElse: () => _fnSpeedPresets[1],
+    );
+    service.writePrefs({'speedPreset': preset.id});
+
+    final gameFolderPath = _joinPath([
+      baseDirPath,
+      _fnSanitizeFolderName('Fortnite ${release.displayVersion}'),
+    ]);
+
+    final FortniteInstallJob job;
+    try {
+      job = service.startInstall(
+        release: release,
+        gameFolderPath: gameFolderPath,
+        maxWorkers: preset.workers,
+      );
+    } on StateError {
+      _toast('Another install is already running');
+      return false;
+    }
+    _fnToastSignature = '';
+    _fnInstallJob = job;
+    job.addListener(_handleFnInstallJobChanged);
+    _log(
+      'installer',
+      'Installing ${release.buildVersion} (manifest ${release.manifestId}) '
+          'into $gameFolderPath with ${preset.workers} workers',
+    );
+    return true;
+  }
+
+  void _handleFnInstallJobChanged() {
+    final job = _fnInstallJob;
+    if (job == null) return;
+
+    if (job.isFinished) {
+      job.removeListener(_handleFnInstallJobChanged);
+      _toastProgressDismiss();
+      switch (job.phase) {
+        case FortniteInstallPhase.completed:
+          _toast('Fortnite ${job.release.displayVersion} finished downloading');
+          if (!job.importHandled) {
+            job.importHandled = true;
+            unawaited(_importManyVersionsFromFolders([job.gameFolderPath]));
+          }
+        case FortniteInstallPhase.failed:
+          _toast('Install failed, ${job.failureReason ?? 'unknown error'}');
+        case FortniteInstallPhase.cancelled:
+          _toast(
+            job.deletedFilesOnCancel
+                ? 'Install cancelled, downloaded files removed'
+                : 'Install stopped, it will continue if you install '
+                      '${job.release.displayVersion} again',
+          );
+        default:
+          break;
+      }
+      if (!_fnInstallDialogOpen) _fnInstallJob = null;
+      return;
+    }
+
+    if (!_fnInstallDialogOpen) _showFnInstallToast(job);
+  }
+
+  void _showFnInstallToast(FortniteInstallJob job) {
+    if (!mounted || job.isFinished || _fnInstallDialogOpen) return;
+    final percent = job.percent;
+    final String message;
+    if (job.isCancelRequested) {
+      // "Cancelling…" / "Removing downloaded files…"
+      message = '${job.release.displayVersion}: ${job.statusMessage}';
+    } else if (job.phase == FortniteInstallPhase.downloading &&
+        percent != null) {
+      message =
+          'Downloading Fortnite ${job.release.displayVersion}... '
+          '${percent.round()}% (ETA ${_fnEtaDisplay(job.etaText)})';
+    } else {
+      // Manifest fetch / analysis: one indeterminate message keeps the toast
+      // consistent; the install dialog still shows the detailed status.
+      message = 'Downloading Fortnite ${job.release.displayVersion}...';
+    }
+    final signature = '$message|${job.isCancelRequested}';
+    if (signature == _fnToastSignature) return;
+    _fnToastSignature = signature;
+    _toastProgress(
+      message,
+      progress: percent == null ? null : (percent / 100).clamp(0.0, 1.0),
+      indeterminate: percent == null,
+      // ✕ on the toast opens the same cancel confirmation as the dialog;
+      // hidden once a cancel is already underway.
+      onCancel: job.isCancelRequested
+          ? null
+          : () => unawaited(_fnCancelInstallFromToast(job)),
+    );
+  }
+
+  Future<void> _fnCancelInstallFromToast(FortniteInstallJob job) async {
+    if (job.isFinished || job.isCancelRequested) return;
+    final confirmed = await _fnConfirmCancelInstall(job);
+    if (!confirmed || job.isFinished || job.isCancelRequested) return;
+    await job.cancel();
+  }
+
+  Future<void> _showFortniteInstallProgressDialog() async {
+    final job = _fnInstallJob;
+    if (job == null || !mounted) return;
+    _fnInstallDialogOpen = true;
+    _toastProgressDismiss();
+
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Install progress',
+      barrierColor: Colors.transparent,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final secondary = Theme.of(dialogContext).colorScheme.secondary;
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: AnimatedBuilder(
+                animation: job,
+                builder: (context, _) {
+                  final percent = job.percent;
+                  final title = switch (job.phase) {
+                    FortniteInstallPhase.completed => 'Install Complete',
+                    FortniteInstallPhase.failed => 'Install Failed',
+                    FortniteInstallPhase.cancelled => 'Install Cancelled',
+                    _ => 'Installing ${job.release.displayVersion}',
+                  };
+                  return Container(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    margin: const EdgeInsets.symmetric(horizontal: 24),
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                    decoration: BoxDecoration(
+                      color: _dialogSurfaceColor(dialogContext),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(
+                        color: _onSurface(dialogContext, 0.12),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _dialogShadowColor(dialogContext),
+                          blurRadius: 34,
+                          offset: const Offset(0, 18),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            _dialogHeaderIconBadge(
+                              dialogContext,
+                              switch (job.phase) {
+                                FortniteInstallPhase.completed =>
+                                  Icons.check_circle_rounded,
+                                FortniteInstallPhase.failed =>
+                                  Icons.error_rounded,
+                                FortniteInstallPhase.cancelled =>
+                                  Icons.cancel_rounded,
+                                _ => Icons.downloading_rounded,
+                              },
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 28,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(dialogContext, 0.96),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          job.isFinished || job.isCancelRequested
+                              ? job.statusMessage
+                              : 'This may take a while. Do not close ATLAS '
+                                    'as your version installs.',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: _onSurface(dialogContext, 0.74),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: LinearProgressIndicator(
+                            value: percent == null
+                                ? null
+                                : (percent / 100).clamp(0.0, 1.0),
+                            minHeight: 10,
+                            backgroundColor: _onSurface(dialogContext, 0.1),
+                            valueColor: AlwaysStoppedAnimation(
+                              job.phase == FortniteInstallPhase.failed
+                                  ? const Color(0xFFE2574C)
+                                  : secondary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              percent == null
+                                  ? '—'
+                                  : '${percent.toStringAsFixed(1)}%',
+                              style: TextStyle(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w800,
+                                color: _onSurface(dialogContext, 0.95),
+                              ),
+                            ),
+                            const Spacer(),
+                            if (!job.isFinished)
+                              Text(
+                                'ETA ${_fnEtaDisplay(job.etaText)}'
+                                '${job.elapsedText.isEmpty ? '' : '  •  Elapsed ${_fnEtaDisplay(job.elapsedText)}'}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: _onSurface(dialogContext, 0.66),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            _fnStatTile(
+                              dialogContext,
+                              label: 'Speed',
+                              value:
+                                  '${job.rawSpeedMiBps.toStringAsFixed(1)} MiB/s',
+                            ),
+                            const SizedBox(width: 8),
+                            _fnStatTile(
+                              dialogContext,
+                              label: 'Downloaded',
+                              value:
+                                  '${_fnFormatMiB(job.downloadedMiB)} / ${_fnFormatMiB(job.downloadSizeMiB)}',
+                            ),
+                            const SizedBox(width: 8),
+                            _fnStatTile(
+                              dialogContext,
+                              label: 'Install size',
+                              value: _fnFormatMiB(job.installSizeMiB),
+                            ),
+                          ],
+                        ),
+                        if (job.phase == FortniteInstallPhase.failed &&
+                            job.failureReason != null) ...[
+                          const SizedBox(height: 12),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              color: const Color(
+                                0xFFE2574C,
+                              ).withValues(alpha: 0.12),
+                              border: Border.all(
+                                color: const Color(
+                                  0xFFE2574C,
+                                ).withValues(alpha: 0.4),
+                              ),
+                            ),
+                            child: SelectableText(
+                              job.failureReason!,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: _onSurface(dialogContext, 0.85),
+                                height: 1.3,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        if (job.isFinished)
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              if (job.phase ==
+                                  FortniteInstallPhase.failed) ...[
+                                _dialogOutlinedButton(
+                                  dialogContext,
+                                  onPressed: () {
+                                    Navigator.of(dialogContext).pop();
+                                    unawaited(_showBuildDownloadMenu());
+                                  },
+                                  child: const Text('Install manually'),
+                                ),
+                                const Spacer(),
+                              ],
+                              if (job.phase ==
+                                  FortniteInstallPhase.completed) ...[
+                                _dialogOutlinedButton(
+                                  dialogContext,
+                                  onPressed: () => unawaited(
+                                    _openPath(job.gameFolderPath),
+                                  ),
+                                  child: const Text('Open Folder'),
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              FilledButton(
+                                onPressed: () =>
+                                    Navigator.of(dialogContext).pop(),
+                                style: FilledButton.styleFrom(
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 12,
+                                  ),
+                                ),
+                                child: const Text('Close'),
+                              ),
+                            ],
+                          )
+                        else
+                          Row(
+                            children: [
+                              FilledButton(
+                                onPressed: job.isCancelRequested
+                                    ? null
+                                    : () async {
+                                        final navigator = Navigator.of(
+                                          dialogContext,
+                                        );
+                                        final confirmed =
+                                            await _fnConfirmCancelInstall(job);
+                                        if (!confirmed || job.isFinished) {
+                                          return;
+                                        }
+                                        // Close the progress dialog once the
+                                        // cancel (incl. file cleanup) is done
+                                        // — the toast is feedback enough.
+                                        await job.cancel();
+                                        if (navigator.mounted) {
+                                          navigator.pop();
+                                        }
+                                      },
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFB3261E),
+                                  foregroundColor: Colors.white,
+                                  shape: const StadiumBorder(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 12,
+                                  ),
+                                ),
+                                child: Text(
+                                  job.isCancelRequested
+                                      ? 'Cancelling…'
+                                      : 'Cancel',
+                                ),
+                              ),
+                              const Spacer(),
+                              _dialogOutlinedButton(
+                                dialogContext,
+                                onPressed: () =>
+                                    Navigator.of(dialogContext).pop(),
+                                child: const Text('Hide'),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+
+    _fnInstallDialogOpen = false;
+    if (!mounted) return;
+    final current = _fnInstallJob;
+    if (current == null) return;
+    if (current.isFinished) {
+      _fnInstallJob = null;
+    } else {
+      // Hand progress off to the bottom-right toast.
+      _fnToastSignature = '';
+      _showFnInstallToast(current);
+    }
+  }
+
+  Widget _fnStatTile(
+    BuildContext dialogContext, {
+    required String label,
+    required String value,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: _adaptiveScrimColor(
+            dialogContext,
+            darkAlpha: 0.08,
+            lightAlpha: 0.14,
+          ),
+          border: Border.all(color: _onSurface(dialogContext, 0.1)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.3,
+                color: _onSurface(dialogContext, 0.55),
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w800,
+                color: _onSurface(dialogContext, 0.92),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -23922,7 +26232,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Import an existing build from the top right of the screen, using the + button or, clicking the download button to browse the build archive.',
+                      'Import an existing build from the top right of the screen, using the + button or, clicking the download button to install any Fortnite version.',
                       style: TextStyle(
                         fontSize: 14,
                         height: 1.25,
@@ -24753,7 +27063,8 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     }).toList();
     final allCount = typeSearchMods.length;
     final installedCount = typeSearchMods.where(_isAtlasModInstalled).length;
-    // "Recent" = mods whose catalog entry was updated within the last 7 days.
+    // "Recent" = mods added or updated within the last 7 days (new mods carry
+    // their added/first-seen time as lastUpdated).
     final recentCutoffMs =
         DateTime.now().millisecondsSinceEpoch -
         const Duration(days: 7).inMilliseconds;
@@ -24819,6 +27130,14 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       onTap: _modsLoading
           ? null
           : () => unawaited(_loadModsLibrary(forceRefresh: true)),
+    );
+    final updateAll = _versionCardAction(
+      icon: Icons.upgrade_rounded,
+      tooltip: 'Update all mods',
+      busy: _updatingAllAtlasMods,
+      onTap: (_updatingAllAtlasMods || _modsLoading)
+          ? null
+          : () => unawaited(_updateAllAtlasMods()),
     );
     final clearInstalled = _versionCardAction(
       icon: Icons.delete_sweep_rounded,
@@ -24922,6 +27241,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                   recentCount: recentCount,
                                   search: search,
                                   refresh: refresh,
+                                  updateAll: updateAll,
                                   clearInstalled: clearInstalled,
                                   sort: sort,
                                 ),
@@ -25081,6 +27401,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     required int recentCount,
     required Widget search,
     required Widget refresh,
+    required Widget updateAll,
     required Widget clearInstalled,
     required Widget sort,
   }) {
@@ -25121,6 +27442,8 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
         const SizedBox(width: 8),
         refresh,
         const SizedBox(width: 8),
+        updateAll,
+        const SizedBox(width: 8),
         sort,
         const SizedBox(width: 8),
         Expanded(child: search),
@@ -25141,7 +27464,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
           children: [
             chips,
             const Spacer(),
-            SizedBox(width: 404, child: tools),
+            SizedBox(width: 448, child: tools),
           ],
         );
       },
@@ -25514,6 +27837,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 520;
         final dpr = MediaQuery.devicePixelRatioOf(context);
+        const updateColor = Color(0xFFE8A23D);
         // Square cover tile: full card height, identical crop for every card
         // (matches the library build cards).
         const coverWidth = _mediaCardHeight;
@@ -25557,12 +27881,11 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
           ],
         );
 
-        // Pills are fully metadata-driven: the optional version pill and any
+        // Pills are metadata-driven: the optional version pill and any
         // free-form tags from the mod's metadata.json. Tags are capped by the
         // card's width so the pill row rarely wraps; overflow collapses into
-        // a "+N" pill (the details dialog shows the full list). "Installed"
-        // is launcher runtime state and sits right after the version so tags
-        // can never push it out of view.
+        // a "+N" pill (the details dialog shows the full list). Runtime
+        // install/update state lives in the trailing circular status control.
         final maxVisibleTags = constraints.maxWidth >= 700
             ? 3
             : constraints.maxWidth >= 560
@@ -25582,16 +27905,31 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                 icon: Icons.sell_rounded,
                 prominent: true,
               ),
-            if (updateAvailable)
-              _modPill(
-                'Update',
-                icon: Icons.upgrade_rounded,
-                color: const Color(0xFFE8A23D),
-              ),
             for (final tag in visibleTags) _modPill(tag),
             if (hiddenTagCount > 0) _modPill('+$hiddenTagCount'),
           ],
         );
+        final statusTooltip = updateAvailable
+            ? 'Update available - view mod'
+            : installed
+            ? 'Installed - view mod'
+            : 'View mod';
+        final statusFillColor = updateAvailable
+            ? updateColor.withValues(alpha: 0.94)
+            : installed
+            ? secondary.withValues(alpha: 0.92)
+            : _adaptiveScrimColor(context, darkAlpha: 0.22, lightAlpha: 0.24);
+        final statusBorderColor = updateAvailable
+            ? updateColor
+            : installed
+            ? secondary.withValues(alpha: 0.95)
+            : onSurface.withValues(alpha: 0.22);
+        final statusIcon = updateAvailable
+            ? Icons.upgrade_rounded
+            : installed
+            ? Icons.check_rounded
+            : Icons.chevron_right_rounded;
+        final statusIsActive = installed || updateAvailable;
 
         // Card text carries explicit shadows: the card body stays dark over
         // its art even inside a light panel, so these must bypass the panel
@@ -25748,9 +28086,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                   Expanded(child: details),
                                   const SizedBox(width: 10),
                                   Tooltip(
-                                    message: installed
-                                        ? 'Installed — view mod'
-                                        : 'View mod',
+                                    message: statusTooltip,
                                     child: AnimatedContainer(
                                       duration: const Duration(
                                         milliseconds: 180,
@@ -25760,31 +28096,17 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                       height: 32,
                                       decoration: BoxDecoration(
                                         shape: BoxShape.circle,
-                                        // Installed state lives here as a blue
-                                        // check instead of a pill on the card.
-                                        color: installed
-                                            ? secondary.withValues(alpha: 0.92)
-                                            : _adaptiveScrimColor(
-                                                context,
-                                                darkAlpha: 0.22,
-                                                lightAlpha: 0.24,
-                                              ),
+                                        // Runtime install/update state lives
+                                        // here instead of adding status pills.
+                                        color: statusFillColor,
                                         border: Border.all(
-                                          color: installed
-                                              ? secondary.withValues(
-                                                  alpha: 0.95,
-                                                )
-                                              : onSurface.withValues(
-                                                  alpha: 0.22,
-                                                ),
+                                          color: statusBorderColor,
                                         ),
                                       ),
                                       child: Icon(
-                                        installed
-                                            ? Icons.check_rounded
-                                            : Icons.chevron_right_rounded,
-                                        size: installed ? 18 : 24,
-                                        color: installed
+                                        statusIcon,
+                                        size: statusIsActive ? 18 : 24,
+                                        color: statusIsActive
                                             ? Colors.white
                                             : onSurface.withValues(alpha: 0.88),
                                       ),
@@ -29103,7 +31425,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
 
     setState(() => _downloadingBackend = backend);
     _toastProgress(
-      'Preparing ${backend.label} download...',
+      'Downloading ${backend.label}...',
       progress: null,
       indeterminate: true,
     );
@@ -32666,23 +34988,83 @@ foreach ($app in $appPaths) {
             LayoutBuilder(
               builder: (context, constraints) {
                 final stacked = constraints.maxWidth < 560;
-                final dropdown = DropdownButtonFormField<NavigationBarLocation>(
-                  initialValue: _settings.navigationBarLocation,
-                  decoration: _backendFieldDecoration(),
-                  items: _navigationBarLocationDropdownOrder.map((location) {
-                    return DropdownMenuItem<NavigationBarLocation>(
-                      value: location,
-                      child: Text(location.label),
+                final selectedPreset = _matchingThemePreset();
+                final dropdown = DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'themePresetDropdown:${selectedPreset?.name ?? ''}:${_themePresets.length}',
+                  ),
+                  initialValue: selectedPreset?.name,
+                  decoration: _backendFieldDecoration(hintText: 'Custom'),
+                  selectedItemBuilder: (context) {
+                    return _themePresets.map((preset) {
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          preset.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      );
+                    }).toList();
+                  },
+                  items: _themePresets.map((preset) {
+                    final canDelete = !_isDefaultThemePresetName(preset.name);
+                    return DropdownMenuItem<String>(
+                      value: preset.name,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              preset.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (canDelete)
+                            Builder(
+                              builder: (itemContext) {
+                                // Nudge the icon into the menu item's own
+                                // right padding so it hugs the menu edge.
+                                return Transform.translate(
+                                  offset: const Offset(10, 0),
+                                  child: Tooltip(
+                                    message: 'Delete preset',
+                                    child: IconButton(
+                                      onPressed: () {
+                                        Navigator.of(itemContext).pop();
+                                        unawaited(_deleteThemePreset(preset));
+                                      },
+                                      icon: const Icon(
+                                        Icons.delete_outline_rounded,
+                                        size: 16,
+                                      ),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(
+                                        minWidth: 28,
+                                        minHeight: 28,
+                                      ),
+                                      color: Theme.of(
+                                        itemContext,
+                                      ).colorScheme.onSurface.withValues(
+                                        alpha: 0.62,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                        ],
+                      ),
                     );
                   }).toList(),
-                  onChanged: (location) {
-                    if (location == null) return;
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        navigationBarLocation: location,
-                      );
-                    });
-                    unawaited(_saveSettings(toast: false));
+                  onChanged: (name) {
+                    if (name == null) return;
+                    for (final preset in _themePresets) {
+                      if (preset.name == name) {
+                        unawaited(_applyThemePreset(preset));
+                        break;
+                      }
+                    }
                   },
                 );
 
@@ -32692,10 +35074,10 @@ foreach ($app in $appPaths) {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Navigation Bar Location'),
+                        const Text('Theme Presets'),
                         const SizedBox(height: 3),
                         Text(
-                          'Move the location of the navigation bar.',
+                          'Save the current theme or switch between saved presets.',
                           style: TextStyle(
                             color: Theme.of(
                               context,
@@ -32703,7 +35085,13 @@ foreach ($app in $appPaths) {
                           ),
                         ),
                         const SizedBox(height: 10),
-                        SizedBox(width: double.infinity, child: dropdown),
+                        Row(
+                          children: [
+                            _createThemePresetButton(),
+                            const SizedBox(width: 8),
+                            Expanded(child: dropdown),
+                          ],
+                        ),
                       ],
                     ),
                   );
@@ -32711,11 +35099,18 @@ foreach ($app in $appPaths) {
 
                 return ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                  title: const Text('Navigation Bar Location'),
+                  title: const Text('Theme Presets'),
                   subtitle: const Text(
-                    'Move the location of the navigation bar.',
+                    'Save the current theme or switch between saved presets.',
                   ),
-                  trailing: SizedBox(width: 170, child: dropdown),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _createThemePresetButton(),
+                      const SizedBox(width: 8),
+                      SizedBox(width: 170, child: dropdown),
+                    ],
+                  ),
                 );
               },
             ),
@@ -32784,6 +35179,63 @@ foreach ($app in $appPaths) {
                       SizedBox(width: 170, child: dropdown),
                     ],
                   ),
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked = constraints.maxWidth < 560;
+                final dropdown = DropdownButtonFormField<NavigationBarLocation>(
+                  initialValue: _settings.navigationBarLocation,
+                  decoration: _backendFieldDecoration(),
+                  items: _navigationBarLocationDropdownOrder.map((location) {
+                    return DropdownMenuItem<NavigationBarLocation>(
+                      value: location,
+                      child: Text(location.label),
+                    );
+                  }).toList(),
+                  onChanged: (location) {
+                    if (location == null) return;
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        navigationBarLocation: location,
+                      );
+                    });
+                    unawaited(_saveSettings(toast: false));
+                  },
+                );
+
+                if (stacked) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Navigation Bar Location'),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Move the location of the navigation bar.',
+                          style: TextStyle(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurface.withValues(alpha: 0.72),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(width: double.infinity, child: dropdown),
+                      ],
+                    ),
+                  );
+                }
+
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text('Navigation Bar Location'),
+                  subtitle: const Text(
+                    'Move the location of the navigation bar.',
+                  ),
+                  trailing: SizedBox(width: 170, child: dropdown),
                 );
               },
             ),
@@ -33061,7 +35513,7 @@ foreach ($app in $appPaths) {
               },
               title: const Text('Update Files on Launch'),
               subtitle: const Text(
-                'Refresh launcher-managed default DLLs and update your installed Paks and library DLLs when Link opens. Custom DLL paths are never changed.',
+                'Refresh launcher-managed default DLLs when Link opens. Installed mods update manually from the Mods tab. Custom DLL paths are never changed.',
               ),
             ),
             const SizedBox(height: 8),
@@ -33409,6 +35861,21 @@ foreach ($app in $appPaths) {
               _CreditProjectLink(
                 label: 'Neonite',
                 url: 'https://github.com/HybridFNBR/Neonite',
+              ),
+            ],
+          ),
+          _CreditProfileData(
+            name: 'Rodney',
+            handle: '@derrod',
+            role: 'Manifest Installer',
+            githubUrl: 'https://github.com/derrod',
+            avatarUrl: 'https://github.com/derrod.png?size=240',
+            description:
+                'Created Legendary, the open-source Epic Games launcher whose manifest and chunk format work powers the ATLAS version installer.',
+            projects: <_CreditProjectLink>[
+              _CreditProjectLink(
+                label: 'Legendary',
+                url: 'https://github.com/legendary-gl/legendary',
               ),
             ],
           ),
@@ -34979,18 +37446,17 @@ class _AtlasParticleFieldState extends State<_AtlasParticleField>
 
   double _effectiveOpacityMultiplier(double intensity) {
     final x = intensity.clamp(0.0, 2.0).toDouble();
-    // Calibrated to backend feel:
-    // 0% -> 0.0, 100% -> 1.0, 200% -> 2.6 (stronger high-end response).
-    final curved = (0.30 * x * x) + (0.70 * x);
-    return curved.clamp(0.0, 2.6);
+    // Calibrated so 100% matches what the old 200% rendered:
+    // 0% -> 0.0, 100% -> 2.6, 200% -> 5.2.
+    return (2.6 * x).clamp(0.0, 5.2);
   }
 
   int _desiredParticleCount(double intensity) {
     final clamped = intensity.clamp(0.0, 2.0).toDouble();
     // Keep density scaling true to slider semantics: 200% = 2x 100%.
-    const baseCount = 190; // 100% => 190 particles
+    const baseCount = 380; // 100% => 380 particles (the old 200% density)
     final count = (baseCount * clamped).round();
-    return count.clamp(0, 380);
+    return count.clamp(0, 760);
   }
 
   @override
@@ -36386,7 +38852,10 @@ class _AtlasModEntry {
   final String dataSlot;
   final int lastUpdatedEpochMs;
 
-  _AtlasModEntry copyWith({int? lastUpdatedEpochMs}) {
+  _AtlasModEntry copyWith({
+    List<_AtlasModFile>? files,
+    int? lastUpdatedEpochMs,
+  }) {
     return _AtlasModEntry(
       id: id,
       type: type,
@@ -36402,7 +38871,7 @@ class _AtlasModEntry {
       images: images,
       media: media,
       sourceUrl: sourceUrl,
-      files: files,
+      files: files ?? this.files,
       dependencies: dependencies,
       dataSlot: dataSlot,
       lastUpdatedEpochMs: lastUpdatedEpochMs ?? this.lastUpdatedEpochMs,
@@ -37160,6 +39629,193 @@ class _DllPreset {
       'memoryPatcherPath': memoryPatcherPath,
       'gameServerFilePath': gameServerFilePath,
       'largePakPatcherFilePath': largePakPatcherFilePath,
+    };
+  }
+}
+
+class _ThemePreset {
+  const _ThemePreset({
+    required this.name,
+    required this.createdAtEpochMs,
+    required this.updatedAtEpochMs,
+    required this.navigationBarLocation,
+    required this.panelGlassStyle,
+    required this.panelGlassColorValue,
+    required this.panelGlassOpacity,
+    required this.popupBackgroundBlurEnabled,
+    required this.backgroundImagePath,
+    required this.backgroundBlur,
+    required this.backgroundParticlesOpacity,
+  });
+
+  final String name;
+  final int createdAtEpochMs;
+  final int updatedAtEpochMs;
+  final NavigationBarLocation navigationBarLocation;
+  final PanelGlassStyle panelGlassStyle;
+  final int panelGlassColorValue;
+  final double panelGlassOpacity;
+  final bool popupBackgroundBlurEnabled;
+  final String backgroundImagePath;
+  final double backgroundBlur;
+  final double backgroundParticlesOpacity;
+
+  factory _ThemePreset.fromSettings(
+    String name,
+    LauncherSettings settings, {
+    int? createdAtEpochMs,
+    int? updatedAtEpochMs,
+  }) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return _ThemePreset(
+      name: name.trim(),
+      createdAtEpochMs: createdAtEpochMs ?? now,
+      updatedAtEpochMs: updatedAtEpochMs ?? now,
+      navigationBarLocation: settings.navigationBarLocation,
+      panelGlassStyle: settings.panelGlassStyle,
+      panelGlassColorValue: settings.panelGlassColorValue,
+      panelGlassOpacity: settings.panelGlassOpacity,
+      popupBackgroundBlurEnabled: settings.popupBackgroundBlurEnabled,
+      backgroundImagePath: settings.backgroundImagePath.trim(),
+      backgroundBlur: settings.backgroundBlur,
+      backgroundParticlesOpacity: settings.backgroundParticlesOpacity,
+    );
+  }
+
+  _ThemePreset copyWith({String? name}) {
+    return _ThemePreset(
+      name: name ?? this.name,
+      createdAtEpochMs: createdAtEpochMs,
+      updatedAtEpochMs: updatedAtEpochMs,
+      navigationBarLocation: navigationBarLocation,
+      panelGlassStyle: panelGlassStyle,
+      panelGlassColorValue: panelGlassColorValue,
+      panelGlassOpacity: panelGlassOpacity,
+      popupBackgroundBlurEnabled: popupBackgroundBlurEnabled,
+      backgroundImagePath: backgroundImagePath,
+      backgroundBlur: backgroundBlur,
+      backgroundParticlesOpacity: backgroundParticlesOpacity,
+    );
+  }
+
+  bool matchesSettings(LauncherSettings settings) {
+    bool closeTo(double left, double right) => (left - right).abs() < 0.005;
+    return navigationBarLocation == settings.navigationBarLocation &&
+        panelGlassStyle == settings.panelGlassStyle &&
+        panelGlassColorValue == settings.panelGlassColorValue &&
+        closeTo(panelGlassOpacity, settings.panelGlassOpacity) &&
+        popupBackgroundBlurEnabled == settings.popupBackgroundBlurEnabled &&
+        backgroundImagePath == settings.backgroundImagePath.trim() &&
+        closeTo(backgroundBlur, settings.backgroundBlur) &&
+        closeTo(backgroundParticlesOpacity, settings.backgroundParticlesOpacity);
+  }
+
+  factory _ThemePreset.fromJson(Map<String, dynamic> json) {
+    int asInt(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
+    double asDouble(dynamic value, double fallback) {
+      if (value is num) return value.toDouble();
+      if (value is String) return double.tryParse(value) ?? fallback;
+      return fallback;
+    }
+
+    bool asBool(dynamic value, bool fallback) {
+      if (value is bool) return value;
+      if (value is num) return value != 0;
+      if (value is String) {
+        final lowered = value.toLowerCase();
+        if (lowered == 'true' || lowered == '1') return true;
+        if (lowered == 'false' || lowered == '0') return false;
+      }
+      return fallback;
+    }
+
+    NavigationBarLocation asNavigationBarLocation(dynamic value) {
+      final raw = (value ?? '').toString().toLowerCase().trim();
+      if (raw == 'left') return NavigationBarLocation.left;
+      if (raw == 'right') return NavigationBarLocation.right;
+      return NavigationBarLocation.top;
+    }
+
+    PanelGlassStyle asPanelGlassStyle(dynamic value) {
+      final raw = (value ?? '').toString().toLowerCase().trim();
+      if (raw == 'soft') return PanelGlassStyle.soft;
+      if (raw == 'solid') return PanelGlassStyle.solid;
+      return PanelGlassStyle.frosted;
+    }
+
+    int asColorValue(dynamic value, int fallback) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) {
+        var raw = value.trim();
+        if (raw.isEmpty) return fallback;
+        raw = raw
+            .replaceFirst(RegExp(r'^#'), '')
+            .replaceFirst(RegExp(r'^0x', caseSensitive: false), '');
+        if (raw.length == 6) raw = 'FF$raw';
+        if (raw.length == 8) {
+          return int.tryParse(raw, radix: 16) ?? fallback;
+        }
+      }
+      return fallback;
+    }
+
+    final createdAtEpochMs = asInt(json['createdAtEpochMs'], 0);
+    final updatedAtEpochMs = asInt(json['updatedAtEpochMs'], createdAtEpochMs);
+
+    return _ThemePreset(
+      name: (json['name'] ?? '').toString().trim(),
+      createdAtEpochMs: createdAtEpochMs,
+      updatedAtEpochMs: updatedAtEpochMs,
+      navigationBarLocation: asNavigationBarLocation(
+        json['navigationBarLocation'],
+      ),
+      panelGlassStyle: asPanelGlassStyle(json['panelGlassStyle']),
+      panelGlassColorValue: asColorValue(
+        json['panelGlassColor'] ?? json['panelGlassColorValue'],
+        _defaultPanelGlassColorValue,
+      ),
+      panelGlassOpacity: asDouble(
+        json['panelGlassOpacity'],
+        1.0,
+      ).clamp(0.35, 1.40).toDouble(),
+      popupBackgroundBlurEnabled: asBool(
+        json['popupBackgroundBlurEnabled'],
+        true,
+      ),
+      backgroundImagePath: (json['backgroundImagePath'] ?? '')
+          .toString()
+          .trim(),
+      backgroundBlur: asDouble(
+        json['backgroundBlur'],
+        5,
+      ).clamp(0, 30).toDouble(),
+      backgroundParticlesOpacity: asDouble(
+        json['backgroundParticlesOpacity'],
+        1.0,
+      ).clamp(0, 2).toDouble(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'name': name,
+      'createdAtEpochMs': createdAtEpochMs,
+      'updatedAtEpochMs': updatedAtEpochMs,
+      'navigationBarLocation': navigationBarLocation.name,
+      'panelGlassStyle': panelGlassStyle.name,
+      'panelGlassColor': _colorValueToHex(panelGlassColorValue),
+      'panelGlassOpacity': panelGlassOpacity,
+      'popupBackgroundBlurEnabled': popupBackgroundBlurEnabled,
+      'backgroundImagePath': backgroundImagePath,
+      'backgroundBlur': backgroundBlur,
+      'backgroundParticlesOpacity': backgroundParticlesOpacity,
     };
   }
 }

@@ -1,4 +1,4 @@
-<!-- version: 2.0.0 -->
+<!-- version: 2.0.1 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,9 +15,9 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Any media type as your wallpaper
-- Custom navigation bar to your preference (up, left, and right)
-- Fixed performance issues
-- Changing the colors of your UI
+- Full locker athena profile added to NeoniteV2 (Requires profile deletion)
+- Added manifest installer, mainly used for higher builds
+- Mods now require manual updating for safety
+- Added theme presets
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

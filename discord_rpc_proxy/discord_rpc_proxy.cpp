@@ -779,6 +779,7 @@ extern "C" __declspec(dllexport) void __cdecl Discord_Initialize(
 
 extern "C" __declspec(dllexport) void __cdecl Discord_Shutdown() {
   const auto fn = ResolveExport<FnDiscord_Shutdown>("Discord_Shutdown");
+  ClearActivityWithButton();
   if (fn != nullptr) {
     fn();
   }
@@ -795,14 +796,13 @@ extern "C" __declspec(dllexport) void __cdecl Discord_UpdatePresence(
     const DiscordRichPresence* presence) {
   const auto fn =
       ResolveExport<FnDiscord_UpdatePresence>("Discord_UpdatePresence");
-  if (fn == nullptr) {
-    AppendLog("Discord_UpdatePresence skipped: forward export not found.");
-    return;
-  }
 
   if (presence == nullptr) {
     AppendLog("Discord_UpdatePresence called with null presence.");
-    fn(nullptr);
+    ClearActivityWithButton();
+    if (fn != nullptr) {
+      fn(nullptr);
+    }
     return;
   }
 
@@ -832,7 +832,12 @@ extern "C" __declspec(dllexport) void __cdecl Discord_UpdatePresence(
         ", smallImageKey=" + SafeText(patched.smallImageKey) +
         ", smallImageText=" + SafeText(patched.smallImageText) + ")");
   }
-  fn(&patched);
+  if (fn != nullptr) {
+    fn(&patched);
+  } else {
+    AppendLog("Discord_UpdatePresence forward export not found; using IPC only.");
+  }
+  PushActivityWithButton(patched);
 }
 
 extern "C" __declspec(dllexport) void __cdecl Discord_ClearPresence() {
@@ -840,6 +845,7 @@ extern "C" __declspec(dllexport) void __cdecl Discord_ClearPresence() {
   if (fn != nullptr) {
     fn();
   }
+  ClearActivityWithButton();
 }
 
 extern "C" __declspec(dllexport) void __cdecl Discord_Respond(
@@ -865,7 +871,11 @@ extern "C" __declspec(dllexport) void __cdecl Discord_Register(
     const char* command) {
   const auto fn = ResolveExport<FnDiscord_Register>("Discord_Register");
   if (fn != nullptr) {
-    fn(applicationId, command);
+    const char* effectiveAppId = applicationId;
+    if (kOverrideApplicationId[0] != '\0') {
+      effectiveAppId = kOverrideApplicationId;
+    }
+    fn(effectiveAppId, command);
   }
 }
 
@@ -875,6 +885,10 @@ extern "C" __declspec(dllexport) void __cdecl Discord_RegisterSteamGame(
   const auto fn = ResolveExport<FnDiscord_RegisterSteamGame>(
       "Discord_RegisterSteamGame");
   if (fn != nullptr) {
-    fn(applicationId, steamId);
+    const char* effectiveAppId = applicationId;
+    if (kOverrideApplicationId[0] != '\0') {
+      effectiveAppId = kOverrideApplicationId;
+    }
+    fn(effectiveAppId, steamId);
   }
 }

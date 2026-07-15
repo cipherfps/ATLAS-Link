@@ -18,11 +18,13 @@ module.exports.routes = {
         skipAssets: false
     },
     'GET /account/api/public/account/': 'AuthController.publicAccount',
-    'GET /account/api/public/account/token': 'ApiController.token',
     'GET /account/api/public/account/:accountId/externalAuths': 'AuthController.externalAuths',
     'POST /publickey/v2/publickey': 'AuthController.publicKey',
     'POST /epic/oauth/v2/tokenInfo': 'AuthController.tokenInfo',
-    'POST /auth/v1/turn/credentials': 'AuthController.credentials'
+    'POST /auth/v1/turn/credentials': 'AuthController.credentials',
+    'GET /account/api/oauth/exchange': 'AuthController.exchange',
+    'POST /epic/oauth/v2/revoke': 'AuthController.revoke',
+    'POST /api/v1/installation/login': 'ApiController.noContent'
 
 
 }

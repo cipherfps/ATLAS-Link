@@ -154,6 +154,9 @@ flutter test
 
 This builds the Flutter Windows release, compiles embedded backend wrappers, and copies `update-notes.md` plus backend assets into the release output.
 
+The build command also rebuilds the bundled Discord RPC proxy DLL and copies it
+to `atlas_link_flutter/assets/dlls/discord-rpc.dll`.
+
 ### Build The Setup Installer
 
 ```powershell
@@ -163,6 +166,7 @@ This builds the Flutter Windows release, compiles embedded backend wrappers, and
 The installer script:
 
 - Resolves the app version from `atlas_link_flutter/pubspec.yaml`.
+- Rebuilds the bundled Discord RPC proxy DLL.
 - Builds embedded backend executables.
 - Runs `flutter clean`.
 - Builds the Windows release.

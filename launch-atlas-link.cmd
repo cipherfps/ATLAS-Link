@@ -27,6 +27,10 @@ if /I "%MODE%"=="run" (
 )
 
 if /I "%MODE%"=="build" (
+  echo [ATLAS-Link Flutter] Building Discord RPC proxy DLL...
+  call "%~dp0discord_rpc_proxy\build-proxy.cmd"
+  if errorlevel 1 exit /b %errorlevel%
+
   echo [ATLAS-Link Flutter] Building embedded backend executables...
   powershell -ExecutionPolicy Bypass -File "tool\build_backend_exes.ps1"
   if errorlevel 1 exit /b %errorlevel%

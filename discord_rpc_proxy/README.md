@@ -32,13 +32,15 @@ Notes:
 
 ## Build
 
-1. Open a Visual Studio Developer Command Prompt.
-2. Run:
+Run from a normal Command Prompt or PowerShell session:
 
 ```bat
 cd discord_rpc_proxy
 build-proxy.cmd
 ```
+
+The build script auto-detects Visual Studio C++ Build Tools with `vswhere` when
+`cl.exe` is not already on `PATH`.
 
 That outputs:
 
