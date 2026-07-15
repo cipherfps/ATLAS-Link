@@ -1,4 +1,4 @@
-<!-- version: 2.0.1 -->
+<!-- version: 2.0.2 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -18,6 +18,7 @@ Markdown Quick Key
 - Full locker athena profile added to NeoniteV2 (Requires profile deletion)
 - Added manifest installer, mainly used for higher builds
 - Mods now require manual updating for safety
+- Fixed mod update times
 - Added theme presets
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

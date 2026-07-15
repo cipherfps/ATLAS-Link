@@ -1066,8 +1066,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.1';
-  static const String _launcherBuildLabel = 'Stable 2.0.1';
+  static const String _launcherVersion = '2.0.2';
+  static const String _launcherBuildLabel = 'Stable 2.0.2';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -3881,11 +3881,20 @@ class _LauncherScreenState extends State<LauncherScreen>
   /// files have no blob SHA in the ATLAS-Resources tree, so without this the
   /// launcher could never detect the author's re-uploads as updates. The
   /// GitHub API exposes a per-asset sha256 digest that changes exactly when
-  /// the asset is replaced; the asset's updated time also feeds the mod's
-  /// lastUpdated so "Recent" ordering follows external releases too.
+  /// the asset is replaced.
+  ///
+  /// For mods whose installable files are all release-hosted, the asset's
+  /// upload time is the authoritative lastUpdated (the ATLAS-Resources folder
+  /// commit only reflects metadata edits, not the DLL itself). When the
+  /// release lookup fails (commonly GitHub API rate limiting), the fingerprint
+  /// and date from the previous successful load are reused via
+  /// [cachedModsById] so update detection and "Last Updated" don't silently
+  /// degrade to the resources folder's commit time.
   Future<void> _applyGithubReleaseAssetFingerprints(
-    List<_AtlasModEntry> mods,
-  ) async {
+    List<_AtlasModEntry> mods, {
+    Map<String, _AtlasModEntry> cachedModsById =
+        const <String, _AtlasModEntry>{},
+  }) async {
     // One API call per distinct release, shared across all mods in this load.
     final releaseCache = <String, Map<String, dynamic>?>{};
 
@@ -3915,31 +3924,57 @@ class _LauncherScreenState extends State<LauncherScreen>
       var changed = false;
       var latestAssetMs = 0;
       final files = List<_AtlasModFile>.of(mod.files);
+      var allReleaseHosted = files.isNotEmpty;
       for (var f = 0; f < files.length; f++) {
         final file = files[f];
-        if (file.sha.trim().isNotEmpty) continue;
         final match = _githubReleaseAssetUrlRe.firstMatch(
           file.downloadUrl.trim(),
         );
-        if (match == null) continue;
+        if (match == null) {
+          allReleaseHosted = false;
+          continue;
+        }
+        if (file.sha.trim().isNotEmpty) continue;
         final release = await releaseFor(
           match.group(1)!,
           match.group(2)!,
           Uri.decodeComponent(match.group(3)!),
         );
-        if (release == null) continue;
-        final assets = release['assets'];
-        if (assets is! List) continue;
-        final assetName = Uri.decodeComponent(match.group(4)!).toLowerCase();
         Map<String, dynamic>? asset;
-        for (final entry in assets) {
-          if (entry is Map<String, dynamic> &&
-              (entry['name'] ?? '').toString().toLowerCase() == assetName) {
-            asset = entry;
-            break;
+        if (release != null) {
+          final assets = release['assets'];
+          if (assets is List) {
+            final assetName = Uri.decodeComponent(
+              match.group(4)!,
+            ).toLowerCase();
+            for (final entry in assets) {
+              if (entry is Map<String, dynamic> &&
+                  (entry['name'] ?? '').toString().toLowerCase() ==
+                      assetName) {
+                asset = entry;
+                break;
+              }
+            }
           }
         }
-        if (asset == null) continue;
+        if (asset == null) {
+          // Lookup failed (rate limit/offline). Reuse the previous successful
+          // load's fingerprint and date so detection stays content-based.
+          final cachedMod = cachedModsById[mod.id];
+          if (cachedMod == null) continue;
+          for (final cachedFile in cachedMod.files) {
+            if (cachedFile.downloadUrl.trim() == file.downloadUrl.trim() &&
+                cachedFile.sha.trim().isNotEmpty) {
+              files[f] = file.withSha(cachedFile.sha);
+              changed = true;
+              if (cachedMod.lastUpdatedEpochMs > latestAssetMs) {
+                latestAssetMs = cachedMod.lastUpdatedEpochMs;
+              }
+              break;
+            }
+          }
+          continue;
+        }
         final digest = (asset['digest'] ?? '').toString().trim();
         final fingerprint = digest.isNotEmpty
             ? digest
@@ -3953,7 +3988,12 @@ class _LauncherScreenState extends State<LauncherScreen>
             0;
         if (updatedMs > latestAssetMs) latestAssetMs = updatedMs;
       }
-      if (changed) {
+      if (allReleaseHosted && latestAssetMs > 0) {
+        // Every installable file lives on an external release, so its asset
+        // upload time is the mod's true "last updated" — even when older than
+        // the resources folder commit (metadata/screenshot edits).
+        mods[i] = mod.copyWith(files: files, lastUpdatedEpochMs: latestAssetMs);
+      } else if (changed) {
         mods[i] = mod.copyWith(
           files: files,
           lastUpdatedEpochMs: latestAssetMs > mod.lastUpdatedEpochMs
@@ -4967,7 +5007,10 @@ class _LauncherScreenState extends State<LauncherScreen>
         final mods = await _loadModsLibraryFromGitHub(
           cachedModsById: cachedModsById,
         );
-        await _applyGithubReleaseAssetFingerprints(mods);
+        await _applyGithubReleaseAssetFingerprints(
+          mods,
+          cachedModsById: cachedModsById,
+        );
         _stampFirstSeenAtlasMods(mods, cachedModsById);
         _sortAtlasMods(mods);
         await _saveModsLibraryCache(mods);
@@ -4989,7 +5032,10 @@ class _LauncherScreenState extends State<LauncherScreen>
             fallbackMods,
             cachedModsById,
           );
-          await _applyGithubReleaseAssetFingerprints(fallbackMods);
+          await _applyGithubReleaseAssetFingerprints(
+            fallbackMods,
+            cachedModsById: cachedModsById,
+          );
           _stampFirstSeenAtlasMods(fallbackMods, cachedModsById);
         }
         if (fallbackMods.isEmpty) {
