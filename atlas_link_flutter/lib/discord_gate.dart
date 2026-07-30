@@ -24,9 +24,12 @@ class DiscordGate {
   String? _logoDataUri;
 
   /// Run the login. [openUrl] is injected so this stays Flutter-free/testable;
-  /// the launcher passes its own URL opener.
+  /// the launcher passes its own URL opener. [username] is the ATLAS profile
+  /// name — the same value that feeds `-AUTH_LOGIN` and the mesh hostname — so
+  /// the gate records the name operators actually see in game.
   Future<DiscordGateResult> login({
     required String gateUrl,
+    required String username,
     required Future<void> Function(Uri uri) openUrl,
     Duration timeout = const Duration(minutes: 3),
     String? logoDataUri,
@@ -87,7 +90,11 @@ class DiscordGate {
     });
 
     final loginUri = Uri.parse('$base/login').replace(
-      queryParameters: {'port': '${server.port}', 'state': state},
+      queryParameters: {
+        'port': '${server.port}',
+        'state': state,
+        'name': username.trim(),
+      },
     );
 
     try {
@@ -155,6 +162,8 @@ String _friendly(String reason) {
       return "you don't have the required role yet.";
     case 'account_too_new':
       return 'your Discord account is too new.';
+    case 'banned':
+      return 'you are banned from the ATLAS Network.';
     case 'rate_limited':
       return 'you already connected recently, try again later.';
     case 'discord_denied':

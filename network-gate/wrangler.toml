@@ -9,14 +9,29 @@ compatibility_date = "2024-11-01"
 preview_urls = false
 workers_dev = true
 
-# Per-user rate-limit storage. Create the namespace once with:
-#   npx wrangler kv namespace create RATE_LIMIT
-# then paste the printed id below.
+# Worker storage: rate-limit markers, ban records, and the mint ledger all live
+# in this one namespace. The binding was renamed RATE_LIMIT -> DB when bans and
+# the ledger moved in; the id is UNCHANGED so existing data carries over.
 [[kv_namespaces]]
-binding = "RATE_LIMIT"
+binding = "DB"
 id = "5e0e316bc26944c19f73352da65b827c"
 
-# Non-secret config (safe to commit). Secrets are set separately — see README.
+# Cron trigger -> the worker's scheduled() handler, which sweeps every device
+# holding a banned IP off the mesh. Tailscale's policy file is accept-only (no
+# deny rule), so this sweep IS the enforcement of an IP ban.
+#
+# Verified against Cloudflare's docs before committing to one minute:
+#   * Cron Triggers are available on the Workers FREE plan — the limits page
+#     lists "Number of Cron Triggers per account" as 5 on Workers Free (250 on
+#     Workers Paid). This worker uses 1 of those 5.
+#   * "* * * * *" ("At every minute") is a documented supported expression, so
+#     one minute is the finest granularity offered and is what we use.
+#   * Free-plan CPU per cron invocation is 10 ms. The sweep is almost entirely
+#     time spent awaiting the Tailscale API, and I/O wait is not CPU time.
+[triggers]
+crons = ["* * * * *"]
+
+# Non-secret config (safe to commit). Secrets are set separately — see below.
 [vars]
 WORKER_PUBLIC_URL = "https://atlas-network-gate.atlas-ogfortnite.workers.dev"
 DISCORD_GUILD_ID = "1469866169635962884"
@@ -25,7 +40,8 @@ DISCORD_MIN_ACCOUNT_AGE_DAYS = "7"   # reject Discord accounts newer than 7 days
 TAILSCALE_TAILNET = "-"              # "-" = the OAuth client's own tailnet
 TAILSCALE_TAG = "tag:atlas-mesh"
 KEY_EXPIRY_SECONDS = "300"           # minted key is unusable after 5 minutes
-RATE_LIMIT_SECONDS = "60"            # min seconds between keys per user (anti-spam; Discord+role is the real gate)
+RATE_LIMIT_SECONDS = "60"            # min seconds between keys per Discord account
+ADMIN_DISCORD_IDS = "313400412050817027,829001261100957747"  # comma-separated Discord user IDs allowed into /admin; empty = admin panel disabled
 
 # Secrets (DO NOT put these here — set them with `wrangler secret put NAME`):
 #   DISCORD_CLIENT_ID
@@ -33,3 +49,13 @@ RATE_LIMIT_SECONDS = "60"            # min seconds between keys per user (anti-s
 #   TAILSCALE_OAUTH_CLIENT_ID
 #   TAILSCALE_OAUTH_CLIENT_SECRET
 #   STATE_SECRET
+#
+# Operator setup for the admin panel:
+#   1. Discord dev portal -> OAuth2 -> add a second redirect URI:
+#      <WORKER_PUBLIC_URL>/admin/callback
+#   2. Tailscale admin console -> Trust credentials -> edit the existing OAuth
+#      client -> add scope devices:core (write) with tag tag:atlas-mesh
+#      (scopes are editable since Oct 2025; without this, the kick/ban device
+#      removal calls 403).
+#   3. Fill in ADMIN_DISCORD_IDS above.
+#   4. npx wrangler deploy

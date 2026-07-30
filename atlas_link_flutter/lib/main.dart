@@ -19,7 +19,6 @@ import 'package:flutter_acrylic/flutter_acrylic.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:media_kit/media_kit.dart' as media_kit;
 import 'package:media_kit_video/media_kit_video.dart' as media_kit_video;
-import 'package:video_player/video_player.dart';
 import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
@@ -29,6 +28,7 @@ import 'fortnite_installer.dart';
 import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 import 'mesh_controller.dart';
+import 'resilient_json_store.dart';
 import 'tailscale_mesh.dart';
 
 String _joinAtlasBackendInstallPath(List<String> pieces) {
@@ -1066,8 +1066,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.2';
-  static const String _launcherBuildLabel = 'Stable 2.0.2';
+  static const String _launcherVersion = '2.0.4';
+  static const String _launcherBuildLabel = 'Stable 2.0.4';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1403,6 +1403,7 @@ class _LauncherScreenState extends State<LauncherScreen>
 
   late Directory _dataDir;
   late File _settingsFile;
+  late ResilientJsonStore _settingsStore;
   late File _installStateFile;
   late File _launcherContentCacheFile;
   late File _modsLibraryCacheFile;
@@ -1451,6 +1452,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     WidgetsBinding.instance.addObserver(this);
     _mesh = MeshController(logger: (message) => _log('tailscale', message));
     _mesh.addListener(_handleMeshChanged);
+    _mesh.onRemoved = _handleMeshRemoved;
     _appExitListener = AppLifecycleListener(
       onExitRequested: _handleAppExitRequest,
     );
@@ -1487,6 +1489,22 @@ class _LauncherScreenState extends State<LauncherScreen>
     setState(() {});
   }
 
+  /// Fired once, by the background removal watch, when this device leaves the
+  /// tailnet for good — deleted server-side (kicked or banned), or Tailscale
+  /// turned off on this PC — with or without a menu open. The controller has
+  /// already flipped to disconnected and cleaned up local Tailscale state; the
+  /// accompanying `notifyListeners` repaints the Network button and drops an
+  /// open Network dialog to its disconnected state, so all that is left here is
+  /// telling the player why. The wording comes from the controller because a
+  /// self-inflicted disconnect must not read like a ban.
+  void _handleMeshRemoved() {
+    if (!mounted) return;
+    final message = _mesh.errorMessage;
+    _toast(
+      message.isEmpty ? 'You were removed from the ATLAS Network.' : message,
+    );
+  }
+
   /// Blocks the window close button while a mod download is running so it isn't
   /// discarded by accident. (A force-kill is still handled on next launch by
   /// [_recoverInterruptedModInstalls].)
@@ -1508,6 +1526,10 @@ class _LauncherScreenState extends State<LauncherScreen>
     // Leave the Tailscale network on close so nobody lingers in a room while
     // ATLAS is shut.
     await _mesh.shutdown();
+    if (_storageReady) {
+      await _settingsStore.flush();
+      _checkpointActivePlaytime(syncSave: true);
+    }
     return AppExitResponse.exit;
   }
 
@@ -1556,6 +1578,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _savedBackendSearchController.dispose();
     _modsSearchController.dispose();
     _meshSearchController.dispose();
+    _mesh.onRemoved = null;
     _mesh.removeListener(_handleMeshChanged);
     _mesh.dispose();
     _libraryScrollController.dispose();
@@ -2908,6 +2931,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _dataDir = preferredDataDir;
     await _dataDir.create(recursive: true);
     _settingsFile = File(_joinPath([_dataDir.path, 'settings.json']));
+    _settingsStore = ResilientJsonStore(_settingsFile);
     _installStateFile = File(_joinPath([_dataDir.path, 'install_state.json']));
     _launcherContentCacheFile = File(
       _joinPath([_dataDir.path, 'launcher_content_cache.json']),
@@ -3949,8 +3973,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             ).toLowerCase();
             for (final entry in assets) {
               if (entry is Map<String, dynamic> &&
-                  (entry['name'] ?? '').toString().toLowerCase() ==
-                      assetName) {
+                  (entry['name'] ?? '').toString().toLowerCase() == assetName) {
                 asset = entry;
                 break;
               }
@@ -7292,24 +7315,31 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   Future<void> _loadSettings() async {
-    if (!await _settingsFile.exists()) {
+    final loadResult = await _settingsStore.load();
+    final decoded = loadResult.data;
+    if (decoded == null) {
       _settingsRawFileData = <String, dynamic>{};
       _settings = LauncherSettings.defaults();
+      if (loadResult.status == ResilientJsonLoadStatus.invalid) {
+        final quarantine = loadResult.quarantinedPath;
+        _log(
+          'settings',
+          'Invalid settings file. Loaded defaults. '
+              '${quarantine == null ? '' : 'Preserved corrupt file at $quarantine. '}'
+              '${loadResult.error ?? ''}',
+        );
+      }
       await _migrateAppearanceSettingsFileIfNeeded();
       return;
     }
     try {
-      final raw = await _settingsFile.readAsString();
-      final decoded = jsonDecode(raw);
-      if (decoded is Map<String, dynamic>) {
-        _settingsRawFileData = Map<String, dynamic>.from(decoded);
-        _settings = LauncherSettings.fromJson(decoded);
-      } else if (decoded is Map) {
-        _settingsRawFileData = decoded.cast<String, dynamic>();
-        _settings = LauncherSettings.fromJson(decoded.cast<String, dynamic>());
-      } else {
-        _settingsRawFileData = <String, dynamic>{};
-        _settings = LauncherSettings.defaults();
+      _settingsRawFileData = Map<String, dynamic>.from(decoded);
+      _settings = LauncherSettings.fromJson(decoded);
+      if (loadResult.status == ResilientJsonLoadStatus.recovered) {
+        _log(
+          'settings',
+          'Recovered settings.json from ${loadResult.recoveredFromPath}.',
+        );
       }
       _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
       await _migrateAppearanceSettingsFileIfNeeded();
@@ -7415,8 +7445,7 @@ class _LauncherScreenState extends State<LauncherScreen>
   }
 
   bool _isDefaultThemePresetName(String name) {
-    return name.trim().toLowerCase() ==
-        _defaultThemePresetName.toLowerCase();
+    return name.trim().toLowerCase() == _defaultThemePresetName.toLowerCase();
   }
 
   Future<void> _loadThemePresets() async {
@@ -7476,12 +7505,11 @@ class _LauncherScreenState extends State<LauncherScreen>
       _defaultThemePresetName.toLowerCase(),
       _defaultThemePreset,
     );
-    final defaultPreset = byName.remove(
-      _defaultThemePresetName.toLowerCase(),
-    )!;
+    final defaultPreset = byName.remove(_defaultThemePresetName.toLowerCase())!;
     final rest = byName.values.toList()
       ..sort(
-        (left, right) => left.createdAtEpochMs.compareTo(right.createdAtEpochMs),
+        (left, right) =>
+            left.createdAtEpochMs.compareTo(right.createdAtEpochMs),
       );
     return <_ThemePreset>[defaultPreset, ...rest];
   }
@@ -7642,8 +7670,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     if (_jsonDeepEquals(_settingsRawFileData, mergedPayload)) {
       return;
     }
-    final pretty = const JsonEncoder.withIndent('  ').convert(mergedPayload);
-    await _settingsFile.writeAsString(pretty, flush: true);
+    await _settingsStore.writeObject(mergedPayload);
     _settingsRawFileData = Map<String, dynamic>.from(mergedPayload);
     _log(
       'settings',
@@ -8056,8 +8083,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     _syncSavedBackendsForActiveProfile();
     _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
     final payload = _buildMergedSettingsPayload();
-    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
-    await _settingsFile.writeAsString(pretty, flush: true);
+    await _settingsStore.writeObject(payload);
     _settingsRawFileData = Map<String, dynamic>.from(payload);
   }
 
@@ -8066,9 +8092,8 @@ class _LauncherScreenState extends State<LauncherScreen>
     _syncSavedBackendsForActiveProfile();
     _settings = _settingsWithSynchronizedOverallPlaytime(_settings);
     final payload = _buildMergedSettingsPayload();
-    final pretty = const JsonEncoder.withIndent('  ').convert(payload);
     try {
-      _settingsFile.writeAsStringSync(pretty, flush: true);
+      _settingsStore.writeObjectSync(payload);
       _settingsRawFileData = Map<String, dynamic>.from(payload);
     } catch (_) {
       // Ignore shutdown save failures.
@@ -14486,7 +14511,9 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     // and poll live while it's visible if we're already connected.
     unawaited(_mesh.loadConfig());
     if (_mesh.connected) {
-      _mesh.startPolling();
+      // Step the background removal watch up to the live cadence while the
+      // peer list is on screen.
+      _mesh.startPolling(fast: true);
       // Pick up an ATLAS profile name change made since last time and re-publish
       // it (with the Connecting indicator) so it propagates to everyone.
       unawaited(_mesh.syncIdentity(_settings.username));
@@ -14564,6 +14591,11 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                           Widget body;
                           if (!_mesh.tailscaleInstalled) {
                             body = _meshInstallBody(onSurface);
+                          } else if (!_mesh.connected &&
+                              _mesh.errorKind == MeshErrorKind.banned) {
+                            // A ban is permanent — show the dead end instead of
+                            // a Try Again button that can only fail.
+                            body = _meshBannedBody(onSurface);
                           } else if (_mesh.loadingConfig &&
                               !_mesh.connected &&
                               !canConnect) {
@@ -14585,7 +14617,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                     : await _mesh.connect(
                                         username: _settings.username,
                                       );
-                                if (ok) _mesh.startPolling();
+                                if (ok) _mesh.startPolling(fast: true);
                               }),
                               discord: _mesh.gateEnabled,
                             );
@@ -14646,6 +14678,52 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
+                                // The Tailscale CLI has stopped answering. As
+                                // far as anyone knows we are still on the
+                                // network, so this is a notice that the list is
+                                // going stale — never a disconnect.
+                                if (_mesh.tailscaleUnreachable) ...[
+                                  const SizedBox(height: 10),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 9,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(
+                                        0xFFF59E0B,
+                                      ).withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: const Color(
+                                          0xFFF59E0B,
+                                        ).withValues(alpha: 0.28),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.cloud_off_rounded,
+                                          size: 18,
+                                          color: Color(0xFFF59E0B),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            _mesh.errorMessage,
+                                            style: TextStyle(
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w600,
+                                              color: onSurface.withValues(
+                                                alpha: 0.82,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ],
                             ],
                           );
@@ -14702,7 +14780,10 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
         },
       );
     } finally {
-      _mesh.stopPolling();
+      // Don't stop outright — fall back to the cheap background watch so a
+      // player who gets kicked mid-game still finds out. It self-cancels when
+      // the controller is no longer connected.
+      _mesh.resumeWatch();
     }
   }
 
@@ -14902,6 +14983,24 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     );
   }
 
+  /// Terminal state for an account the gate refused as banned. Unlike every
+  /// other failure here there is no action: a ban sticks until an operator
+  /// lifts it, so the dialog says so plainly rather than offering a retry that
+  /// can only fail again. Restarting the launcher clears it, which is how an
+  /// unbanned player gets back in.
+  Widget _meshBannedBody(Color onSurface) {
+    return _meshCenteredBody(
+      icon: Icons.block_rounded,
+      iconColor: const Color(0xFFEF4444),
+      title: 'You are banned',
+      message: _mesh.errorMessage.isEmpty
+          ? 'You are banned from the ATLAS Network.'
+          : '${_mesh.errorMessage} If you think this is a mistake, contact an '
+                'ATLAS admin on Discord.',
+      onSurface: onSurface,
+    );
+  }
+
   /// Run the "Connect with Discord" flow: open the browser at the ATLAS gate,
   /// wait for the per-user key it mints, then join the mesh with it. Returns
   /// true once connected. Failures surface as a toast.
@@ -14919,11 +15018,20 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     final result =
         await DiscordGate(logger: (m) => debugPrint('[discord-gate] $m')).login(
           gateUrl: _mesh.gateUrl,
+          // Declare the same name that feeds -AUTH_LOGIN and the mesh hostname,
+          // so what admins see in the panel is what players see in game.
+          username: _settings.username,
           openUrl: (uri) => _openUrl(uri.toString()),
           logoDataUri: logoDataUri,
         );
+    // The browser hop can take minutes — the launcher may be gone by now.
+    if (!mounted) return false;
     if (!result.ok) {
-      _toast(_meshGateErrorMessage(result.error));
+      final message = _meshGateErrorMessage(result.error);
+      _toast(message);
+      // A ban is permanent, so it also becomes a terminal state in the dialog —
+      // the toast alone would fade and leave a Connect button that can't work.
+      if (result.error == 'banned') _mesh.noteGateBan(message);
       return false;
     }
     return _mesh.connectWithAuthKey(
@@ -14942,6 +15050,8 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
         return 'Your Discord account is too new to join the network.';
       case 'rate_limited':
         return 'You connected recently, please try again later.';
+      case 'banned':
+        return 'You are banned from the ATLAS Network.';
       case 'discord_denied':
         return 'Discord login was cancelled.';
       case 'timeout':
@@ -18415,9 +18525,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     try {
       final nextPresets =
           _themePresets
-              .where(
-                (preset) => preset.name.trim().toLowerCase() != lowerName,
-              )
+              .where((preset) => preset.name.trim().toLowerCase() != lowerName)
               .toList()
             ..add(nextPreset);
       await _saveThemePresets(nextPresets);
@@ -19199,7 +19307,11 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     );
 
     await deleteFile(_installStateFile);
-    await deleteFile(_settingsFile);
+    try {
+      await _settingsStore.deleteArtifacts();
+    } catch (_) {
+      // Ignore settings cleanup failures (locks, permissions, etc.).
+    }
     await deleteFile(_dllPresetsFile);
     await deleteFile(_themePresetsFile);
     await deleteFile(_modsLibraryCacheFile);
@@ -23066,13 +23178,13 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
   String _fnToastSignature = '';
 
   /// "Speed" maps to how many chunks download in parallel.
-  static const List<({String id, String label, int workers})>
-  _fnSpeedPresets = [
-    (id: 'slow', label: 'Slow', workers: 4),
-    (id: 'balanced', label: 'Balanced', workers: 8),
-    (id: 'fast', label: 'Fast', workers: 16),
-    (id: 'max', label: 'Maximum', workers: 32),
-  ];
+  static const List<({String id, String label, int workers})> _fnSpeedPresets =
+      [
+        (id: 'slow', label: 'Slow', workers: 4),
+        (id: 'balanced', label: 'Balanced', workers: 8),
+        (id: 'fast', label: 'Fast', workers: 16),
+        (id: 'max', label: 'Maximum', workers: 32),
+      ];
 
   FortniteInstallService _ensureFnInstallService() {
     return _fnInstallService ??= FortniteInstallService(
@@ -24621,8 +24733,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
-                              if (job.phase ==
-                                  FortniteInstallPhase.failed) ...[
+                              if (job.phase == FortniteInstallPhase.failed) ...[
                                 _dialogOutlinedButton(
                                   dialogContext,
                                   onPressed: () {
@@ -24637,9 +24748,8 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                   FortniteInstallPhase.completed) ...[
                                 _dialogOutlinedButton(
                                   dialogContext,
-                                  onPressed: () => unawaited(
-                                    _openPath(job.gameFolderPath),
-                                  ),
+                                  onPressed: () =>
+                                      unawaited(_openPath(job.gameFolderPath)),
                                   child: const Text('Open Folder'),
                                 ),
                                 const SizedBox(width: 8),
@@ -35089,11 +35199,10 @@ foreach ($app in $appPaths) {
                                         minWidth: 28,
                                         minHeight: 28,
                                       ),
-                                      color: Theme.of(
-                                        itemContext,
-                                      ).colorScheme.onSurface.withValues(
-                                        alpha: 0.62,
-                                      ),
+                                      color: Theme.of(itemContext)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.62),
                                     ),
                                   ),
                                 );
@@ -37145,14 +37254,12 @@ class _AtlasBackgroundMedia extends StatefulWidget {
 }
 
 class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
-  VideoPlayerController? _controller;
-  media_kit.Player? _fallbackPlayer;
-  media_kit_video.VideoController? _fallbackController;
-  StreamSubscription<String>? _fallbackErrorSubscription;
+  media_kit.Player? _player;
+  media_kit_video.VideoController? _controller;
+  StreamSubscription<String>? _errorSubscription;
   String? _activeSource;
   bool _videoVisible = false;
   bool _videoFailed = false;
-  bool _usingMediaKitFallback = false;
   int _loadGeneration = 0;
 
   @override
@@ -37168,11 +37275,6 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
         oldWidget.videoSource != widget.videoSource) {
       _syncVideoSource();
     }
-  }
-
-  bool _hasDecodedVideo(VideoPlayerController controller) {
-    final value = controller.value;
-    return value.isInitialized && value.size.width > 0 && value.size.height > 0;
   }
 
   bool _hasDecodedMediaKitVideo(media_kit.Player player) {
@@ -37243,28 +37345,44 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
     }
   }
 
-  void _disposeVideoPlayerController() {
-    final controller = _controller;
+  Future<void> _disposePlayer() async {
+    final subscription = _errorSubscription;
+    _errorSubscription = null;
+    final player = _player;
+    _player = null;
     _controller = null;
-    if (controller != null) {
-      unawaited(controller.dispose());
-    }
-  }
-
-  void _disposeMediaKitFallback() {
-    unawaited(_fallbackErrorSubscription?.cancel());
-    _fallbackErrorSubscription = null;
-    final player = _fallbackPlayer;
-    _fallbackPlayer = null;
-    _fallbackController = null;
+    await subscription?.cancel();
     if (player != null) {
-      unawaited(player.dispose());
+      try {
+        await player.dispose();
+      } catch (_) {
+        // The static wallpaper remains usable if native teardown fails.
+      }
     }
   }
 
-  void _disposeControllers() {
-    _disposeVideoPlayerController();
-    _disposeMediaKitFallback();
+  Future<void> _failPlayer(
+    media_kit.Player player, {
+    required int generation,
+    required String message,
+  }) async {
+    if (_player != player || generation != _loadGeneration) return;
+    _player = null;
+    _controller = null;
+    final subscription = _errorSubscription;
+    _errorSubscription = null;
+    await subscription?.cancel();
+    try {
+      await player.dispose();
+    } catch (_) {
+      // The static wallpaper is already available; disposal is best-effort.
+    }
+    if (!mounted || generation != _loadGeneration) return;
+    widget.onStatus?.call(message);
+    setState(() {
+      _videoVisible = false;
+      _videoFailed = true;
+    });
   }
 
   void _syncVideoSource() {
@@ -37275,9 +37393,8 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
       setState(() {
         _videoVisible = false;
         _videoFailed = false;
-        _usingMediaKitFallback = false;
       });
-      _disposeControllers();
+      unawaited(_disposePlayer());
       return;
     }
     if (_activeSource == source && !_videoFailed) return;
@@ -37290,72 +37407,28 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
     setState(() {
       _videoVisible = false;
       _videoFailed = false;
-      _usingMediaKitFallback = false;
     });
-    _disposeControllers();
-    VideoPlayerController? controller;
-    try {
-      controller = _atlasCreateVideoController(source);
-      _controller = controller;
-      await controller.initialize().timeout(const Duration(seconds: 20));
-      final ready = _hasDecodedVideo(controller);
-      if (ready) {
-        await controller.setVolume(0);
-        await controller.setLooping(true);
-        await controller.play();
-      }
-      if (!mounted ||
-          generation != _loadGeneration ||
-          widget.videoSource != source ||
-          !widget.enabled) {
-        if (_controller == controller) _controller = null;
-        unawaited(controller.dispose());
-        return;
-      }
-      if (ready) {
-        widget.onStatus?.call('Wallpaper opened with video_player_win.');
-        setState(() {
-          _videoVisible = true;
-          _videoFailed = false;
-          _usingMediaKitFallback = false;
-        });
-        return;
-      }
-      widget.onStatus?.call(
-        'video_player_win opened wallpaper without video frames; trying media-kit fallback.',
-      );
-      if (_controller == controller) _controller = null;
-      unawaited(controller.dispose());
-      await _openMediaKitFallback(source, generation: generation);
-    } catch (error) {
-      if (_controller == controller) _controller = null;
-      unawaited(controller?.dispose());
-      if (!mounted || generation != _loadGeneration) return;
-      widget.onStatus?.call(
-        'video_player_win failed to open wallpaper: $error. Trying media-kit fallback.',
-      );
-      await _openMediaKitFallback(source, generation: generation);
+    await _disposePlayer();
+    if (!mounted ||
+        generation != _loadGeneration ||
+        widget.videoSource != source ||
+        !widget.enabled) {
+      return;
     }
-  }
-
-  Future<void> _openMediaKitFallback(
-    String source, {
-    required int generation,
-  }) async {
-    _disposeMediaKitFallback();
     media_kit.Player? player;
     try {
       player = media_kit.Player();
-      _fallbackPlayer = player;
-      _fallbackController = media_kit_video.VideoController(player);
-      _fallbackErrorSubscription = player.stream.error.listen((error) {
-        widget.onStatus?.call('media-kit wallpaper error: $error');
-        if (!mounted || generation != _loadGeneration) return;
-        setState(() {
-          _videoVisible = false;
-          _videoFailed = true;
-          _usingMediaKitFallback = false;
-        });
+      _player = player;
+      _controller = media_kit_video.VideoController(player);
+      _errorSubscription = player.stream.error.listen((error) {
+        unawaited(
+          _failPlayer(
+            player!,
+            generation: generation,
+            message:
+                'Wallpaper video stopped: $error. Using static background.',
+          ),
+        );
       });
       await player.setVolume(0);
       await player.setPlaylistMode(media_kit.PlaylistMode.loop);
@@ -37370,49 +37443,49 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
           generation != _loadGeneration ||
           widget.videoSource != source ||
           !widget.enabled) {
-        if (_fallbackPlayer == player) {
-          _fallbackPlayer = null;
-          _fallbackController = null;
+        if (_player == player) {
+          _player = null;
+          _controller = null;
         }
-        unawaited(player.dispose());
+        await player.dispose();
         return;
       }
       if (ready) {
-        widget.onStatus?.call('Wallpaper opened with media-kit fallback.');
+        widget.onStatus?.call('Wallpaper opened with media-kit.');
         setState(() {
           _videoVisible = true;
           _videoFailed = false;
-          _usingMediaKitFallback = true;
         });
         return;
       }
-      widget.onStatus?.call(
-        'media-kit fallback opened wallpaper without video frames.',
+      await _failPlayer(
+        player,
+        generation: generation,
+        message: 'Wallpaper video produced no frames. Using static background.',
       );
-      setState(() {
-        _videoVisible = false;
-        _videoFailed = true;
-        _usingMediaKitFallback = false;
-      });
     } catch (error) {
-      if (_fallbackPlayer == player) {
-        _fallbackPlayer = null;
-        _fallbackController = null;
+      if (player != null && _player == player) {
+        await _failPlayer(
+          player,
+          generation: generation,
+          message: 'Wallpaper video failed: $error. Using static background.',
+        );
+      } else if (mounted && generation == _loadGeneration) {
+        widget.onStatus?.call(
+          'Wallpaper video failed: $error. Using static background.',
+        );
+        setState(() {
+          _videoVisible = false;
+          _videoFailed = true;
+        });
       }
-      unawaited(player?.dispose());
-      if (!mounted || generation != _loadGeneration) return;
-      widget.onStatus?.call('media-kit wallpaper fallback failed: $error');
-      setState(() {
-        _videoVisible = false;
-        _videoFailed = true;
-        _usingMediaKitFallback = false;
-      });
     }
   }
 
   @override
   void dispose() {
-    _disposeControllers();
+    _loadGeneration++;
+    unawaited(_disposePlayer());
     super.dispose();
   }
 
@@ -37434,12 +37507,7 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
       return fallback;
     }
     final controller = _controller;
-    final fallbackController = _fallbackController;
-    if (_usingMediaKitFallback) {
-      if (fallbackController == null) return fallback;
-    } else if (controller == null || !controller.value.isInitialized) {
-      return fallback;
-    }
+    if (controller == null) return fallback;
 
     return Stack(
       fit: StackFit.expand,
@@ -37450,24 +37518,14 @@ class _AtlasBackgroundMediaState extends State<_AtlasBackgroundMedia> {
             opacity: _videoVisible ? 1 : 0,
             duration: const Duration(milliseconds: 260),
             curve: Curves.easeOutCubic,
-            child: _usingMediaKitFallback
-                ? media_kit_video.Video(
-                    controller: fallbackController!,
-                    fit: BoxFit.cover,
-                    filterQuality: FilterQuality.high,
-                    controls: media_kit_video.NoVideoControls,
-                    onEnterFullscreen: () async {},
-                    onExitFullscreen: () async {},
-                  )
-                : FittedBox(
-                    fit: BoxFit.cover,
-                    clipBehavior: Clip.hardEdge,
-                    child: SizedBox(
-                      width: controller!.value.size.width,
-                      height: controller.value.size.height,
-                      child: VideoPlayer(controller),
-                    ),
-                  ),
+            child: media_kit_video.Video(
+              controller: controller,
+              fit: BoxFit.cover,
+              filterQuality: FilterQuality.high,
+              controls: media_kit_video.NoVideoControls,
+              onEnterFullscreen: () async {},
+              onExitFullscreen: () async {},
+            ),
           ),
         ),
       ],
@@ -38565,43 +38623,6 @@ String _atlasPlayableVideoUrl(String value) {
     return Uri.file(trimmed).toString();
   }
   return trimmed;
-}
-
-VideoPlayerController _atlasCreateVideoController(String value) {
-  final source = _atlasPlayableVideoUrl(value);
-  if (source.startsWith('asset:///')) {
-    final asset = source.substring('asset:///'.length);
-    if (Platform.isWindows) {
-      final file = File(_atlasBundledAssetPath(asset));
-      if (file.existsSync()) return VideoPlayerController.file(file);
-    }
-    return VideoPlayerController.asset(asset);
-  }
-  if (source.startsWith('assets/')) {
-    if (Platform.isWindows) {
-      final file = File(_atlasBundledAssetPath(source));
-      if (file.existsSync()) return VideoPlayerController.file(file);
-    }
-    return VideoPlayerController.asset(source);
-  }
-
-  final uri = Uri.tryParse(source);
-  if (uri != null && uri.hasScheme) {
-    if (uri.scheme.toLowerCase() == 'file') {
-      return VideoPlayerController.file(
-        File(uri.toFilePath(windows: Platform.isWindows)),
-      );
-    }
-    return VideoPlayerController.networkUrl(uri);
-  }
-
-  if (source.startsWith(r'\\') ||
-      RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(source) ||
-      File(source).existsSync()) {
-    return VideoPlayerController.file(File(source));
-  }
-
-  return VideoPlayerController.networkUrl(Uri.parse(source));
 }
 
 String _atlasMediaKitVideoSource(String value) {
@@ -39753,7 +39774,10 @@ class _ThemePreset {
         popupBackgroundBlurEnabled == settings.popupBackgroundBlurEnabled &&
         backgroundImagePath == settings.backgroundImagePath.trim() &&
         closeTo(backgroundBlur, settings.backgroundBlur) &&
-        closeTo(backgroundParticlesOpacity, settings.backgroundParticlesOpacity);
+        closeTo(
+          backgroundParticlesOpacity,
+          settings.backgroundParticlesOpacity,
+        );
   }
 
   factory _ThemePreset.fromJson(Map<String, dynamic> json) {

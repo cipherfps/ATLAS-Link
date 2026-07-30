@@ -1,0 +1,313 @@
+// =============================================================================
+// ATLAS Network — Tailscale access policy (REFERENCE COPY ONLY)
+// =============================================================================
+//
+//   !!! THIS FILE DOES NOTHING ON ITS OWN. NOTHING READS IT AT RUNTIME. !!!
+//
+//   It is checked in only so the intended tailnet policy is reviewable in git.
+//   To actually take effect it MUST be pasted, by hand, into:
+//
+//       Tailscale admin console  ->  Access Controls  ->  (edit the policy file)
+//       https://login.tailscale.com/admin/acls/file
+//
+//   Paste it, press "Save", and fix up the operator identity below FIRST
+//   (see "group:atlas-admins") or you will lock yourself out of your own
+//   devices. Read that note in full: being in group:atlas-admins does NOT give
+//   you admin reach from a PC that joined through the launcher, because the
+//   tag on that PC replaces your user identity. Nothing in the launcher, the
+//   network-gate Worker, or CI applies this file. Whenever you change it here,
+//   re-paste it there.
+//
+// -----------------------------------------------------------------------------
+// WHY THIS EXISTS
+// -----------------------------------------------------------------------------
+// A brand-new tailnet ships with this default rule:
+//
+//     { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+//
+// That means every ATLAS player's node can reach EVERY OTHER PLAYER'S ENTIRE PC
+// on every port — SMB/file shares (445), RDP (3389), WinRM (5985), local dev
+// servers, printers, everything. Players are anonymous strangers from Discord,
+// not colleagues. The "acls" block below REPLACES that allow-all with the three
+// rules ATLAS actually needs (two player-to-player port rules plus the operator
+// escape hatch; ICMP needs no rule of its own — see below). Do not re-add the
+// allow-all rule.
+//
+// -----------------------------------------------------------------------------
+// PORTS — every number below was read out of this repo, with the source cited.
+// Nothing is opened on a guess.
+//
+// The line numbers were re-verified against the working tree the last time this
+// file was touched, but main.dart and worker.js move constantly. The quoted
+// symbol or literal on each line is the real anchor: if a number no longer
+// lands on the quoted text, search for the text, don't assume the port changed.
+// -----------------------------------------------------------------------------
+// TCP 3551  LawinServer / "ATLAS Backend" HTTP backend.
+//           - atlas_link_flutter/assets/backend/lawinserver/index.js:28-29
+//               const port = process.env.PORT || 3551;  -> express.listen(port)
+//           - atlas_link_flutter/lib/main.dart:725
+//               static const int defaultBackendPort = 3551;   (BackendProxyRouting)
+//           - atlas_link_flutter/lib/main.dart:41288  remoteBackendPort: 3551
+//               (the shipped LauncherSettings defaults)
+//           Crosses the mesh: main.dart:16463 _useMeshPeerAsRemoteBackend()
+//           points remoteBackendHost at peer.tailscaleIp (main.dart:16470) and
+//           dials remoteBackendPort; main.dart:8893-8947
+//           (_resolveBackendProxyTarget / _pingBackend) opens plain HTTP(S) to
+//           that host:port over TCP.
+//
+// TCP 5595  Neonite V2 HTTP backend (the other embedded backend choice).
+//           - atlas_link_flutter/assets/backend/neonite_v2/app.js:74-75
+//               sails.lift({ port: 5595, ... })
+//           - atlas_link_flutter/lib/main.dart:815
+//               EmbeddedBackendType.neoniteV2.defaultPort => 5595
+//           Same remote-backend path as 3551 — a player hosting Neonite hands
+//           out <tailscale-ip>:5595.
+//
+// UDP 7777  Fortnite game server (the actual match traffic).
+//           - atlas_link_flutter/lib/main.dart:1080
+//               static const int _defaultGameServerPort = 7777;
+//           - It is UDP, not TCP: main.dart:11254-11268 _pingGameServerPort()
+//               uses RawDatagramSocket.bind(...) + socket.send(...) to probe it.
+//           - assets/backend/lawinserver/Config/config.ini:21 (under the
+//               [GameServer] section opened at :15)
+//               port=7777      <- what the matchmaker hands to joining clients
+//           - assets/backend/lawinserver/structure/matchmaking.js:40-41
+//               "serverAddress": config.GameServer.ip,
+//               "serverPort": Number(config.GameServer.port)
+//
+// ICMP      NO RULE IS NEEDED AND NONE IS WRITTEN BELOW. Tailscale does not
+//           accept "icmp" as a "proto" value in an "acls" entry — the documented
+//           list is igmp, ipv4/ip-in-ip, tcp, egp, igp, udp, gre, esp, ah, sctp,
+//           plus raw IANA numbers 1-255. ICMP is handled out of band instead:
+//           "If traffic is allowed for a given pair of IP addresses, then ICMP
+//           will also be allowed."  (Syntax reference for the tailnet policy
+//           file, https://tailscale.com/docs/reference/syntax/policy-file)
+//           Because the two rules below already allow tag:atlas-mesh ->
+//           tag:atlas-mesh traffic, `ping <peer-ip>` and `tailscale ping`
+//           between player nodes already work. Do not add a "proto": "icmp"
+//           rule to "acls" — it is undocumented syntax and may be rejected on
+//           save. Do not "fix" that by dropping the proto field either: a rule
+//           with no proto applies to ALL TCP and UDP traffic, which is exactly
+//           the allow-all this file exists to remove.
+//
+// DELIBERATELY *NOT* OPENED (found while auditing, left closed on purpose):
+//   TCP 80  — LawinServer's XMPP + matchmaker WebSocket
+//             (assets/backend/lawinserver/structure/xmpp.js:8  const port = 80).
+//             It is never contacted across the mesh: the URL handed to the game
+//             is always loopback —
+//               lawinserver/structure/matchmaking.js:18  "ws://127.0.0.1"
+//               neonite_v2/api/controllers/MatchMakingController.js:57
+//                                                        "ws://localhost:80"
+//               lawinserver/CloudStorage/DefaultEngine.ini:4  ws://127.0.0.1
+//             Opening 80 tailnet-wide would expose every player's local web
+//             server for no benefit.
+//   UDP 15009 — advertised as "BEACONPORT_i" in the fake session payload
+//             (lawinserver/structure/matchmaking.js:59) but no code in this repo
+//             connects to it, so it stays shut. IF (and only if) joins start
+//             failing at the beacon step, add "tag:atlas-mesh:15009" to the UDP
+//             rule below — do not add it pre-emptively.
+//
+// IF PLAYERS CHANGE THEIR PORTS: both are user-editable in launcher settings —
+// the game server port (main.dart:8256 _effectiveGameServerPort, from
+// _settings.hostPort) and the remote backend port (_settings.remoteBackendPort).
+// A player who moves off the defaults will be blocked by this policy until the
+// new port is added here. That is the intended trade-off; widen it explicitly.
+//
+// TAG NAME: "tag:atlas-mesh" is not arbitrary — it is exactly what the gate
+// Worker stamps on every key it mints. The literal appears in FOUR places, and
+// renaming it anywhere means renaming it in all four:
+//   1. network-gate/wrangler.toml:41  TAILSCALE_TAG = "tag:atlas-mesh"
+//   2. network-gate/src/worker.js:1081, inside mintTailscaleKey() (declared at
+//        :1076) — the tag actually stamped onto each minted auth key:
+//        const tag = (env.TAILSCALE_TAG || 'tag:atlas-mesh').trim();
+//   3. network-gate/src/worker.js:1116, inside tailscaleDevices() (declared at
+//        :1114) — the filter that decides which devices the admin panel can
+//        see, kick and ban, and which ones the banned-IP sweep can remove.
+//        SAME default string, second occurrence:
+//        const tag = (env.TAILSCALE_TAG || 'tag:atlas-mesh').trim();
+//   4. this file (tagOwners + every src/dst below).
+// Miss #3 and the mint keeps working while the admin panel and the banned-IP
+// sweep silently see zero devices — i.e. bans stop being enforced with no error
+// anywhere. The wrangler.toml var overrides both worker.js defaults at once, so
+// in practice you set it there and update this file — but if you edit the
+// fallback literal in worker.js, edit BOTH copies.
+// =============================================================================
+{
+  // ---------------------------------------------------------------------------
+  // Who you are. EDIT THIS LINE before saving.
+  // ---------------------------------------------------------------------------
+  // Replace the placeholder with the Tailscale login(s) of the operator(s) —
+  // the same identity you sign in to the admin console with, exactly as it is
+  // shown under Users (e.g. "you@github", "cipherzplayz@gmail.com"). Group
+  // members must be real users of this tailnet; a placeholder will be rejected
+  // on save, which is deliberate — it forces you to fill this in.
+  //
+  //   *** READ THIS — group membership does NOT follow you onto a tagged PC ***
+  //
+  // The last ACL rule gives group:atlas-admins access to everything, but that
+  // rule matches a DEVICE only if the device still carries your user identity.
+  // Any PC that joined the mesh through the ATLAS launcher does not: the gate
+  // Worker mints a key tagged tag:atlas-mesh, and per Tailscale's docs
+  // "Applying a tag to a device removes any user-based authentication" and
+  // "The identity used for any Tailscale connection by a tagged device is the
+  // set of tags assigned to the device."
+  //   https://tailscale.com/docs/features/tags
+  //   https://tailscale.com/docs/concepts/tailscale-identity
+  // So from your own launcher-connected PC you are NOT an admin. You are a
+  // player: 3551/5595 TCP and 7777 UDP to other players, nothing else. This
+  // fails silently — no error, connections just hang or refuse.
+  //
+  // To actually have admin reach, pick one:
+  //   (a) BEST — use a device that is NOT tagged. Install Tailscale on your
+  //       admin machine and sign in normally (`tailscale up`, browser login,
+  //       no key from the launcher). That device carries your user identity,
+  //       so it matches group:atlas-admins and the last rule applies. Do not
+  //       join that machine through the launcher; if you already did, open
+  //       Admin console -> Machines -> that device -> ... -> Edit ACL tags and
+  //       remove tag:atlas-mesh, then re-authenticate it as yourself.
+  //   (b) Name the specific device instead. Uncomment the "hosts" block and the
+  //       matching ACL rule at the bottom of "acls" and put that machine's
+  //       100.x address in. src accepts a Tailscale IP or a host alias, and an
+  //       IP matches regardless of tags. Caveat: launcher-joined devices are
+  //       ephemeral (worker.js:1097, in mintTailscaleKey, sets ephemeral: true),
+  //       so they are deleted on disconnect and the address is not guaranteed
+  //       stable across one — only pin an address on a machine you joined
+  //       yourself and intend to keep. Option (a) needs no maintenance;
+  //       prefer it.
+  // Either way, keep group:atlas-admins filled in and correct: it is what makes
+  // option (a) work, and it is checked on save.
+  //
+  // NOTE: an ACL can never lock you out of the admin console itself, so a
+  // mistake here is always fixable from https://login.tailscale.com/admin/acls.
+  "groups": {
+    "group:atlas-admins": [
+      "REPLACE-ME@example.com",
+    ],
+  },
+
+  // ---------------------------------------------------------------------------
+  // Optional: a name for one specific machine (option (b) above).
+  // ---------------------------------------------------------------------------
+  // "hosts" maps a human-friendly name to a Tailscale IP or CIDR, and that name
+  // is usable as an ACL "src". Matching by address is the only way to give admin
+  // reach to a machine that carries tag:atlas-mesh, because the tag has replaced
+  // its user identity. Uncomment this together with the last rule in "acls", and
+  // use the device's real 100.x address from Admin console -> Machines.
+  // "hosts": {
+  //   "atlas-operator-pc": "100.101.102.103",
+  // },
+
+  // ---------------------------------------------------------------------------
+  // Who may attach tag:atlas-mesh to a device.
+  // ---------------------------------------------------------------------------
+  // The gate Worker's Tailscale OAuth client mints auth keys carrying this tag,
+  // so the tag MUST be listed here or every mint 4xx's and nobody can join.
+  // An OAuth client is authorized by having the tag in its own scope
+  // (Admin console -> Trust credentials -> edit the OAuth client -> devices:core
+  // write, tag tag:atlas-mesh — see network-gate/wrangler.toml:56-59) plus this
+  // entry.
+  // "autogroup:admin" = any tailnet admin, which covers an OAuth client created
+  // by an admin; group:atlas-admins is listed too so the named operator(s) can
+  // tag devices by hand for testing.
+  "tagOwners": {
+    "tag:atlas-mesh": [
+      "autogroup:admin",
+      "group:atlas-admins",
+    ],
+  },
+
+  // ---------------------------------------------------------------------------
+  // The actual access rules. THIS REPLACES THE DEFAULT ALLOW-ALL.
+  // Anything not listed here is denied — that is the whole point.
+  // ---------------------------------------------------------------------------
+  "acls": [
+    // Players -> players: HTTP backends only (LawinServer 3551, Neonite 5595).
+    // Used when someone picks a peer as their remote backend.
+    {
+      "action": "accept",
+      "src": ["tag:atlas-mesh"],
+      "proto": "tcp",
+      "dst": [
+        "tag:atlas-mesh:3551",
+        "tag:atlas-mesh:5595",
+      ],
+    },
+
+    // Players -> players: the game server itself. UDP only.
+    {
+      "action": "accept",
+      "src": ["tag:atlas-mesh"],
+      "proto": "udp",
+      "dst": ["tag:atlas-mesh:7777"],
+    },
+
+    // NO ICMP RULE HERE ON PURPOSE. ping / `tailscale ping` between player
+    // nodes already works: Tailscale allows ICMP for any pair of IPs that is
+    // allowed to exchange traffic at all, and the two rules above allow exactly
+    // that. "proto": "icmp" is not documented for "acls" entries and may be
+    // rejected on save; see the ICMP note in the header before adding one.
+
+    // Operator escape hatch: full access to the whole tailnet, so you can debug
+    // and run your own machines.
+    // THIS ONLY MATCHES UNTAGGED DEVICES SIGNED IN AS A MEMBER OF THE GROUP.
+    // A PC that joined through the ATLAS launcher carries tag:atlas-mesh, which
+    // replaces its user identity, so this rule will NOT match it — see the long
+    // note on group:atlas-admins at the top of this file for the two fixes.
+    // To narrow this (recommended once things are stable), replace "*:*" with
+    // the specific destinations you need, e.g. ["tag:atlas-mesh:*"]. To hand a
+    // second person admin reach, add their login to group:atlas-admins above
+    // rather than adding a rule here.
+    {
+      "action": "accept",
+      "src": ["group:atlas-admins"],
+      "dst": ["*:*"],
+    },
+
+    // Option (b) from the group:atlas-admins note — admin reach from one named
+    // machine, matched by address so a tag cannot shadow it. Uncomment BOTH
+    // this rule and the "hosts" block above, and put the real 100.x address in.
+    // Leave it commented out unless you are actually using it; an unused
+    // allow-all-from-a-stale-address is a liability, not a safety net.
+    // {
+    //   "action": "accept",
+    //   "src": ["atlas-operator-pc"],
+    //   "dst": ["*:*"],
+    // },
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Self-checks. The admin console runs these on save and refuses to save if a
+  // rule stops matching. They are optional documentation-with-teeth — they
+  // change no access on their own.
+  // Syntax checked against the policy-file reference: a test entry takes src,
+  // srcPostureAttrs, proto, accept and deny, and src accepts a tag exactly like
+  // an ACL src does. So the tag-as-src and the proto field below are both
+  // documented and safe to keep.
+  // There is deliberately no ICMP test here. The docs' ICMP test example uses
+  // "proto": "icmp" with port 0, but this policy grants ICMP implicitly (via
+  // the TCP/UDP rules) rather than with a rule of its own, so a test asserting
+  // it would be asserting behaviour this file does not itself express.
+  // ---------------------------------------------------------------------------
+  "tests": [
+    {
+      "src": "tag:atlas-mesh",
+      "proto": "tcp",
+      "accept": [
+        "tag:atlas-mesh:3551",
+        "tag:atlas-mesh:5595",
+      ],
+      // The whole reason this file exists: no lateral movement into a player's
+      // SMB shares or Remote Desktop.
+      "deny": [
+        "tag:atlas-mesh:445",
+        "tag:atlas-mesh:3389",
+        "tag:atlas-mesh:5985",
+      ],
+    },
+    {
+      "src": "tag:atlas-mesh",
+      "proto": "udp",
+      "accept": ["tag:atlas-mesh:7777"],
+    },
+  ],
+}
