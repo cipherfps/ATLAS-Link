@@ -1,4 +1,4 @@
-<!-- version: 2.0.4 -->
+<!-- version: 2.0.3 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,11 +15,7 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fixed random launcher hangs caused by the Windows wallpaper video backend
-- Full locker athena profile added to NeoniteV2 (Requires profile deletion)
-- Added manifest installer, mainly used for higher builds
-- Mods now require manual updating for safety
-- Fixed mod update times
-- Added theme presets
+- Fix Retrac Pak Installation
+- ATLAS Network warning prompt on closing launcher
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

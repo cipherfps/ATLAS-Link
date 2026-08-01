@@ -22,6 +22,7 @@ import 'package:media_kit_video/media_kit_video.dart' as media_kit_video;
 import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
+import 'atlas_mod_metadata_support.dart';
 import 'build_import.dart';
 import 'discord_gate.dart';
 import 'fortnite_installer.dart';
@@ -1058,7 +1059,12 @@ class _LaunchAuthCredentials {
 }
 
 class LauncherScreen extends StatefulWidget {
-  const LauncherScreen({super.key});
+  const LauncherScreen({super.key, @visibleForTesting this.meshController});
+
+  /// Test seam for exercising native close requests while network-connected.
+  /// The screen owns and disposes an injected controller just like its default.
+  @visibleForTesting
+  final MeshController? meshController;
 
   @override
   State<LauncherScreen> createState() => _LauncherScreenState();
@@ -1066,8 +1072,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.4';
-  static const String _launcherBuildLabel = 'Stable 2.0.4';
+  static const String _launcherVersion = '2.0.3';
+  static const String _launcherBuildLabel = 'Stable 2.0.3';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1429,9 +1435,10 @@ class _LauncherScreenState extends State<LauncherScreen>
   // files may be incomplete, or for a patched EXE the stock executable is
   // temporarily moved aside).
   Set<String> _modInstallTargetVersionIds = <String>{};
-  // Intercepts the window close button so we can warn before discarding a
-  // mod download in progress.
+  // Intercepts the window close button so we can warn before discarding a mod
+  // download or disconnecting from the ATLAS Network.
   AppLifecycleListener? _appExitListener;
+  Future<AppExitResponse>? _appExitRequestInFlight;
   _AtlasModType _modsType = _AtlasModType.pak;
   _ModsInstalledFilter _modsInstalledFilter = _ModsInstalledFilter.all;
   _ModsSortMode _modsSortMode = _ModsSortMode.highestFirst;
@@ -1450,7 +1457,9 @@ class _LauncherScreenState extends State<LauncherScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _mesh = MeshController(logger: (message) => _log('tailscale', message));
+    _mesh =
+        widget.meshController ??
+        MeshController(logger: (message) => _log('tailscale', message));
     _mesh.addListener(_handleMeshChanged);
     _mesh.onRemoved = _handleMeshRemoved;
     _appExitListener = AppLifecycleListener(
@@ -1505,15 +1514,35 @@ class _LauncherScreenState extends State<LauncherScreen>
     );
   }
 
-  /// Blocks the window close button while a mod download is running so it isn't
-  /// discarded by accident. (A force-kill is still handled on next launch by
+  /// Shares one close flow across repeated title-bar clicks so confirmations
+  /// cannot stack and shutdown work cannot run more than once.
+  Future<AppExitResponse> _handleAppExitRequest() {
+    final inFlight = _appExitRequestInFlight;
+    if (inFlight != null) return inFlight;
+
+    late final Future<AppExitResponse> request;
+    request = _performAppExitRequest().whenComplete(() {
+      if (identical(_appExitRequestInFlight, request)) {
+        _appExitRequestInFlight = null;
+      }
+    });
+    _appExitRequestInFlight = request;
+    return request;
+  }
+
+  /// Blocks the window close button while a mod download is running and asks
+  /// connected players before taking their ATLAS Network connection down.
+  /// (A force-kill is still handled on next launch by
   /// [_recoverInterruptedModInstalls].)
-  Future<AppExitResponse> _handleAppExitRequest() async {
+  Future<AppExitResponse> _performAppExitRequest() async {
     if (_atlasModBusy) {
       _toast(
         'A mod is still downloading, cancel it (✕) or let it '
         'finish before closing',
       );
+      return AppExitResponse.cancel;
+    }
+    if (_mesh.connected && !await _confirmCloseAndDisconnect()) {
       return AppExitResponse.cancel;
     }
     // Closing ATLAS interrupts (not cancels) a version install: files and
@@ -1531,6 +1560,91 @@ class _LauncherScreenState extends State<LauncherScreen>
       _checkpointActivePlaytime(syncSave: true);
     }
     return AppExitResponse.exit;
+  }
+
+  Future<bool> _confirmCloseAndDisconnect() async {
+    if (!mounted) return false;
+    final confirmed = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close launcher',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        return SafeArea(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 560),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                  decoration: BoxDecoration(
+                    color: _dialogSurfaceColor(dialogContext),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: _onSurface(dialogContext, 0.1)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _dialogShadowColor(dialogContext),
+                        blurRadius: 30,
+                        offset: const Offset(0, 16),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Are you sure you want to close the launcher?',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: _onSurface(dialogContext, 0.96),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'You are currently connected to the ATLAS Network. '
+                        'Closing the launcher will remove your connection. '
+                        'Do you want to continue?',
+                        style: TextStyle(
+                          color: _onSurface(dialogContext, 0.84),
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          _dialogCancelButton(
+                            dialogContext,
+                            onPressed: () =>
+                                Navigator.of(dialogContext).pop(false),
+                          ),
+                          const Spacer(),
+                          FilledButton.icon(
+                            onPressed: () =>
+                                Navigator.of(dialogContext).pop(true),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFFB3261E),
+                              foregroundColor: Colors.white,
+                            ),
+                            icon: const Icon(Icons.logout_rounded),
+                            label: const Text('Close and Disconnect'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: _dialogPopupTransition,
+    );
+    return confirmed == true;
   }
 
   @override
@@ -3809,6 +3923,18 @@ class _LauncherScreenState extends State<LauncherScreen>
     return _atlasResourcesRawUrl(base.isEmpty ? relative : '$base/$relative');
   }
 
+  String _resolveAtlasModMetadataFileUrl(
+    String value,
+    String folderPath,
+    String filesBaseUrl,
+  ) {
+    return AtlasModMetadataSupport.resolveFileUrl(
+      reference: value,
+      filesBaseUrl: filesBaseUrl,
+      fallbackUrl: _resolveAtlasResourceUrl(value, folderPath),
+    );
+  }
+
   String _stringFromJson(
     Map<String, dynamic> json,
     List<String> keys, [
@@ -3846,6 +3972,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     Map<String, dynamic> metadata,
     String folderPath,
   ) {
+    final filesBaseUrl = AtlasModMetadataSupport.filesBaseUrl(metadata);
     final raw =
         metadata['files'] ?? metadata['downloads'] ?? metadata['download'];
     final items = raw is List
@@ -3860,8 +3987,12 @@ class _LauncherScreenState extends State<LauncherScreen>
       String relativePath = '';
       if (item is String) {
         relativePath = item.trim();
-        url = _resolveAtlasResourceUrl(relativePath, folderPath);
         name = _basename(relativePath);
+        url = _resolveAtlasModMetadataFileUrl(
+          relativePath,
+          folderPath,
+          filesBaseUrl,
+        );
       } else if (item is Map) {
         final map = item.cast<dynamic, dynamic>();
         relativePath = (map['path'] ?? map['file'] ?? map['relativePath'] ?? '')
@@ -3875,10 +4006,17 @@ class _LauncherScreenState extends State<LauncherScreen>
                     '')
                 .toString()
                 .trim();
-        if (url.isEmpty && relativePath.isNotEmpty) {
-          url = _resolveAtlasResourceUrl(relativePath, folderPath);
-        }
         name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        if (url.isEmpty) {
+          final reference = relativePath.isNotEmpty ? relativePath : name;
+          if (reference.isNotEmpty) {
+            url = _resolveAtlasModMetadataFileUrl(
+              reference,
+              folderPath,
+              filesBaseUrl,
+            );
+          }
+        }
         if (name.isEmpty) {
           name = _basename(relativePath.isEmpty ? url : relativePath);
         }
@@ -3887,7 +4025,11 @@ class _LauncherScreenState extends State<LauncherScreen>
       files.add(
         _AtlasModFile(
           name: name,
-          downloadUrl: _resolveAtlasResourceUrl(url, folderPath),
+          downloadUrl: _resolveAtlasModMetadataFileUrl(
+            url,
+            folderPath,
+            filesBaseUrl,
+          ),
           relativePath: relativePath,
         ),
       );
@@ -4741,6 +4883,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     Map<String, dynamic> metadata,
     Directory folder,
   ) {
+    final filesBaseUrl = AtlasModMetadataSupport.filesBaseUrl(metadata);
     final raw =
         metadata['files'] ?? metadata['downloads'] ?? metadata['download'];
     final items = raw is List
@@ -4756,9 +4899,15 @@ class _LauncherScreenState extends State<LauncherScreen>
       if (item is String) {
         relativePath = item.trim();
         final lower = relativePath.toLowerCase();
-        url = lower.startsWith('http://') || lower.startsWith('https://')
+        final fallbackUrl =
+            lower.startsWith('http://') || lower.startsWith('https://')
             ? relativePath
             : _joinPath([folder.path, relativePath.replaceAll('/', '\\')]);
+        url = AtlasModMetadataSupport.resolveFileUrl(
+          reference: relativePath,
+          filesBaseUrl: filesBaseUrl,
+          fallbackUrl: fallbackUrl,
+        );
         name = _basename(relativePath);
       } else if (item is Map) {
         final map = item.cast<dynamic, dynamic>();
@@ -4773,10 +4922,26 @@ class _LauncherScreenState extends State<LauncherScreen>
                     '')
                 .toString()
                 .trim();
-        if (url.isEmpty && relativePath.isNotEmpty) {
-          url = _joinPath([folder.path, relativePath.replaceAll('/', '\\')]);
-        }
         name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        if (url.isEmpty) {
+          final reference = relativePath.isNotEmpty ? relativePath : name;
+          if (reference.isNotEmpty) {
+            url = AtlasModMetadataSupport.resolveFileUrl(
+              reference: reference,
+              filesBaseUrl: filesBaseUrl,
+              fallbackUrl: _joinPath([
+                folder.path,
+                reference.replaceAll('/', '\\'),
+              ]),
+            );
+          }
+        } else {
+          url = AtlasModMetadataSupport.resolveFileUrl(
+            reference: url,
+            filesBaseUrl: filesBaseUrl,
+            fallbackUrl: url,
+          );
+        }
         if (name.isEmpty) {
           name = _basename(relativePath.isEmpty ? url : relativePath);
         }
