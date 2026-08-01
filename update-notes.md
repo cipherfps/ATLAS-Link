@@ -1,4 +1,4 @@
-<!-- version: 2.0.3 -->
+<!-- version: 2.0.4 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,7 +15,7 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Fix Retrac Pak Installation
-- ATLAS Network warning prompt on closing launcher
+- Patched Mod Installer Resumes
+- Downloaded DLLs now point you to their Data Management selector
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)

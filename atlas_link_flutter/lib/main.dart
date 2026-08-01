@@ -30,6 +30,7 @@ import 'launcher_content.dart';
 import 'launcher_discord_rpc.dart';
 import 'mesh_controller.dart';
 import 'resilient_json_store.dart';
+import 'resumable_downloader.dart';
 import 'tailscale_mesh.dart';
 
 String _joinAtlasBackendInstallPath(List<String> pieces) {
@@ -1072,8 +1073,8 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.3';
-  static const String _launcherBuildLabel = 'Stable 2.0.3';
+  static const String _launcherVersion = '2.0.4';
+  static const String _launcherBuildLabel = 'Stable 2.0.4';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -5508,7 +5509,8 @@ class _LauncherScreenState extends State<LauncherScreen>
   ///    `<name>$_exeBackupSuffix` before downloading. If the real executable is
   ///    now missing, the patched download never finished — restore the backup so
   ///    the build can still launch.
-  ///  - Orphaned `<file>.part` temp files from any interrupted download.
+  ///  - Interrupted downloads with valid resume metadata are kept so a large
+  ///    mod can continue later. Legacy/invalid partial files are removed.
   Future<void> _recoverInterruptedModInstalls() async {
     Future<void> sweep(String dirPath, {required bool restoreExe}) async {
       final dir = Directory(dirPath);
@@ -5523,12 +5525,28 @@ class _LauncherScreenState extends State<LauncherScreen>
         if (entity is! File) continue;
         final path = entity.path;
         final lower = path.toLowerCase();
-        // Drop leftover partial downloads.
+        // Keep only partials with matching resume metadata. A .part file is
+        // never loaded by Fortnite, so retaining a validated one is safe.
         if (lower.endsWith('.part')) {
-          try {
-            await entity.delete();
-            _log('mods', 'Removed orphaned partial download: $path');
-          } catch (_) {}
+          if (await ResumableDownloader.isResumablePart(entity)) {
+            _log('mods', 'Preserved resumable partial download: $path');
+          } else {
+            try {
+              await entity.delete();
+              final metadata = ResumableDownloader.metadataFileForPart(entity);
+              if (await metadata.exists()) await metadata.delete();
+              _log('mods', 'Removed invalid partial download: $path');
+            } catch (_) {}
+          }
+          continue;
+        }
+        if (lower.endsWith('.part.meta')) {
+          final partPath = path.substring(0, path.length - '.meta'.length);
+          if (!File(partPath).existsSync()) {
+            try {
+              await entity.delete();
+            } catch (_) {}
+          }
           continue;
         }
         // Restore a stock executable whose patch never finished downloading.
@@ -6194,6 +6212,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             resolveShareLinks: true,
             rejectHtmlResponse: true,
             isCancelled: () => _cancelModDownload,
+            keepPartialOnFailure: true,
           );
           // Mark the slot so this specific patch is distinguishable from the
           // stock executable (and from other patched EXEs).
@@ -6217,6 +6236,9 @@ class _LauncherScreenState extends State<LauncherScreen>
         sourceLastUpdatedEpochMs: mod.lastUpdatedEpochMs,
         filesFingerprint: _atlasModFilesFingerprint(mod),
         dataSlot: mod.dataSlot,
+        dllSelectorNoticePending:
+            mod.type == _AtlasModType.dll &&
+            _DataDllSlot.resolve(mod.dataSlot) != null,
       );
       await _saveInstalledMods();
       if (mounted) setState(() {});
@@ -6705,6 +6727,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             resolveShareLinks: true,
             rejectHtmlResponse: true,
             isCancelled: () => _cancelModDownload,
+            keepPartialOnFailure: true,
           );
           if (mod.type == _AtlasModType.exe) {
             await _writeExeMarker(destination.path, mod.id);
@@ -22940,17 +22963,18 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       _configuredDllPathMissing(_settings.gameServerFilePath);
 
   bool get _showSettingsAlertBadge =>
-      _bundledDllDefaultsUpdateAvailable || _hasMissingConfiguredDllPaths;
+      _bundledDllDefaultsUpdateAvailable ||
+      _hasMissingConfiguredDllPaths ||
+      _hasPendingDllSelectorNotice;
 
   String get _dataManagementButtonTooltip {
-    final hasUpdate = _bundledDllDefaultsUpdateAvailable;
-    final hasMissing = _hasMissingConfiguredDllPaths;
-    if (hasUpdate && hasMissing) {
-      return 'Data Management (DLL Updates and Missing DLL Warnings)';
-    }
-    if (hasUpdate) return 'Data Management (DLL Update Available)';
-    if (hasMissing) return 'Data Management (Missing DLL Warning)';
-    return 'Data Management';
+    final alerts = <String>[];
+    if (_hasPendingDllSelectorNotice) alerts.add('New DLL Ready');
+    if (_bundledDllDefaultsUpdateAvailable) alerts.add('DLL Update Available');
+    if (_hasMissingConfiguredDllPaths) alerts.add('Missing DLL Warning');
+    return alerts.isEmpty
+        ? 'Data Management'
+        : 'Data Management (${alerts.join(', ')})';
   }
 
   Widget _settingsActionIcon() {
@@ -32867,6 +32891,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     // Polled during the transfer; returning true aborts the download (the
     // partial file is dropped and [_kModDownloadCancelled] is thrown).
     bool Function()? isCancelled,
+    // Mod files can be several gigabytes, so retain a validated partial after
+    // transient failures and resume it on the next attempt/launcher session.
+    bool keepPartialOnFailure = false,
   }) async {
     if (isCancelled?.call() ?? false) throw _kModDownloadCancelled;
     final trimmed = url.trim();
@@ -32874,6 +32901,7 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     if (uri?.scheme.toLowerCase() == 'file') {
       final source = File(uri!.toFilePath());
       final length = await source.exists() ? await source.length() : 0;
+      await ResumableDownloader.discardPartial(destination);
       await source.copy(destination.path);
       onProgress?.call(length, length);
       return;
@@ -32882,73 +32910,34 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       final source = File(trimmed);
       if (await source.exists()) {
         final length = await source.length();
+        await ResumableDownloader.discardPartial(destination);
         await source.copy(destination.path);
         onProgress?.call(length, length);
         return;
       }
     }
 
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20)
-      ..userAgent = 'ATLAS-Link';
-    // Download to a temp file and atomically swap it into place on success, so
-    // an interrupted or stalled download can never leave a partial/corrupt file
-    // at the destination.
-    final partFile = File('${destination.path}.part');
-    IOSink? sink;
     try {
       final effectiveUrl = resolveShareLinks
           ? await _resolveModDownloadUrl(trimmed)
           : trimmed;
-      final request = await client.getUrl(Uri.parse(effectiveUrl));
-      request.followRedirects = true;
-      request.maxRedirects = 8;
-      final response = await request.close();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw 'Download failed (HTTP ${response.statusCode}).';
-      }
-      if (rejectHtmlResponse) {
-        final mime = response.headers.contentType?.mimeType.toLowerCase() ?? '';
-        if (mime == 'text/html' || mime == 'application/xhtml+xml') {
-          throw 'Download did not return a file (got an HTML page). Use a '
-              'direct download link.';
-        }
-      }
-      sink = partFile.openWrite();
-      final totalBytes = response.contentLength > 0
-          ? response.contentLength
-          : null;
-      var receivedBytes = 0;
-      // Idle timeout: if no data arrives for a while, fail instead of hanging
-      // forever on a stalled connection.
-      await for (final chunk in response.timeout(const Duration(seconds: 60))) {
-        if (isCancelled?.call() ?? false) throw _kModDownloadCancelled;
-        sink.add(chunk);
-        receivedBytes += chunk.length;
-        onProgress?.call(receivedBytes, totalBytes);
-      }
-      await sink.flush();
-      await sink.close();
-      sink = null;
-      if (await destination.exists()) {
-        await destination.delete();
-      }
-      await partFile.rename(destination.path);
-    } catch (_) {
-      // Drop the partial temp file; leave any existing destination untouched.
-      try {
-        await sink?.close();
-      } catch (_) {}
-      sink = null;
-      try {
-        if (await partFile.exists()) await partFile.delete();
-      } catch (_) {}
-      rethrow;
-    } finally {
-      try {
-        await sink?.close();
-      } catch (_) {}
-      client.close(force: true);
+      await const ResumableDownloader().download(
+        Uri.parse(effectiveUrl),
+        destination,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+        rejectHtmlResponse: rejectHtmlResponse,
+        keepPartialOnFailure: keepPartialOnFailure,
+        onRetry: (attempt, delay, error) {
+          _log(
+            'download',
+            'Retrying ${_basename(destination.path)} from its saved offset '
+                'in ${delay.inMilliseconds}ms (attempt $attempt): $error',
+          );
+        },
+      );
+    } on ResumableDownloadCancelled {
+      throw _kModDownloadCancelled;
     }
   }
 
@@ -34520,24 +34509,78 @@ foreach ($app in $appPaths) {
   /// Installed DLL mods assigned to [slot], paired with the on-disk `.dll` to
   /// use. Slot assignment comes from the install record's `dataSlot`, falling
   /// back to the catalog entry for installs made before slot tracking existed.
+  _DataDllSlot? _installedDllDataSlot(_InstalledAtlasMod installed) {
+    if (installed.type != _AtlasModType.dll) return null;
+    var slotValue = installed.dataSlot.trim();
+    if (slotValue.isEmpty) {
+      for (final mod in _modsLibrary) {
+        if (mod.id == installed.id) {
+          slotValue = mod.dataSlot.trim();
+          break;
+        }
+      }
+    }
+    return slotValue.isEmpty ? null : _DataDllSlot.resolve(slotValue);
+  }
+
+  bool _dllSelectorNoticePendingFor(_DataDllSlot slot) {
+    for (final installed in _installedModsById.values) {
+      if (!installed.dllSelectorNoticePending ||
+          _installedDllDataSlot(installed) != slot) {
+        continue;
+      }
+      final hasDll = installed.installedFilePaths.any(
+        (path) =>
+            path.toLowerCase().endsWith('.dll') && File(path).existsSync(),
+      );
+      if (hasDll) return true;
+    }
+    return false;
+  }
+
+  bool get _hasPendingDllSelectorNotice =>
+      _DataDllSlot.values.any(_dllSelectorNoticePendingFor);
+
+  Future<void> _acknowledgeDllSelectorNotice(_DataDllSlot slot) async {
+    final pendingIds = _installedModsById.entries
+        .where(
+          (entry) =>
+              entry.value.dllSelectorNoticePending &&
+              _installedDllDataSlot(entry.value) == slot,
+        )
+        .map((entry) => entry.key)
+        .toList();
+    if (pendingIds.isEmpty) return;
+
+    void clearPending() {
+      for (final id in pendingIds) {
+        final installed = _installedModsById[id];
+        if (installed != null) {
+          _installedModsById[id] = installed.copyWith(
+            dllSelectorNoticePending: false,
+          );
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(clearPending);
+    } else {
+      clearPending();
+    }
+    try {
+      await _saveInstalledMods();
+    } catch (error) {
+      _log('mods', 'Failed to save DLL selector notice state: $error');
+    }
+  }
+
   List<({_InstalledAtlasMod mod, String dllPath})> _installedDllsForSlot(
     _DataDllSlot slot,
   ) {
     final result = <({_InstalledAtlasMod mod, String dllPath})>[];
     for (final installed in _installedModsById.values) {
-      if (installed.type != _AtlasModType.dll) continue;
-      var slotValue = installed.dataSlot.trim();
-      if (slotValue.isEmpty) {
-        for (final mod in _modsLibrary) {
-          if (mod.id == installed.id) {
-            slotValue = mod.dataSlot.trim();
-            break;
-          }
-        }
-      }
-      if (slotValue.isEmpty || _DataDllSlot.resolve(slotValue) != slot) {
-        continue;
-      }
+      if (_installedDllDataSlot(installed) != slot) continue;
       final dllPath = installed.installedFilePaths.firstWhere(
         (path) =>
             path.toLowerCase().endsWith('.dll') && File(path).existsSync(),
@@ -34575,6 +34618,10 @@ foreach ($app in $appPaths) {
     TextEditingController controller,
     ValueChanged<String> onChanged,
   ) async {
+    // Opening the matching picker is the acknowledgement: the user has now
+    // reached the place where the newly downloaded DLL can be selected.
+    await _acknowledgeDllSelectorNotice(slot);
+    if (!mounted) return;
     var candidates = _installedDllsForSlot(slot);
     var currentPath = controller.text.trim().toLowerCase();
     var searchQuery = '';
@@ -34907,6 +34954,7 @@ foreach ($app in $appPaths) {
     final looksLikeDll = hasValue ? lowerPath.endsWith('.dll') : true;
     final showMissing = hasValue && looksLikeDll && !exists;
     final showTypeWarning = hasValue && !looksLikeDll;
+    final showDownloadedDllNotice = _dllSelectorNoticePendingFor(slot);
 
     Widget? statusIcon;
     if (showMissing) {
@@ -34954,17 +35002,39 @@ foreach ($app in $appPaths) {
         ),
         const SizedBox(width: 8),
         if (statusIcon != null) ...[statusIcon, const SizedBox(width: 8)],
-        IconButton(
-          onPressed: () =>
-              unawaited(_pickInstalledDllForSlot(slot, controller, onChanged)),
-          tooltip: 'Choose from installed DLL mods',
-          icon: const Icon(Icons.expand_more_rounded, size: 20),
-          style: IconButton.styleFrom(
-            minimumSize: const Size(42, 42),
-            backgroundColor: onSurface.withValues(alpha: 0.06),
-            foregroundColor: onSurface.withValues(alpha: 0.9),
-            side: BorderSide(color: onSurface.withValues(alpha: 0.14)),
-          ),
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              key: ValueKey<String>('installed-dll-selector-${slot.name}'),
+              onPressed: () => unawaited(
+                _pickInstalledDllForSlot(slot, controller, onChanged),
+              ),
+              tooltip: showDownloadedDllNotice
+                  ? 'New DLL downloaded - choose it here'
+                  : 'Choose from installed DLL mods',
+              icon: const Icon(Icons.expand_more_rounded, size: 20),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(42, 42),
+                backgroundColor: onSurface.withValues(alpha: 0.06),
+                foregroundColor: onSurface.withValues(alpha: 0.9),
+                side: BorderSide(color: onSurface.withValues(alpha: 0.14)),
+              ),
+            ),
+            if (showDownloadedDllNotice)
+              Positioned(
+                top: -3,
+                right: -3,
+                child: IgnorePointer(
+                  child: KeyedSubtree(
+                    key: ValueKey<String>(
+                      'installed-dll-selector-notice-${slot.name}',
+                    ),
+                    child: _atlasUpdateBadge(size: 14),
+                  ),
+                ),
+              ),
+          ],
         ),
         const SizedBox(width: 6),
         IconButton(
@@ -35967,6 +36037,28 @@ foreach ($app in $appPaths) {
               },
             ),
             const SizedBox(height: 14),
+            if (_hasPendingDllSelectorNotice) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD93025).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFD93025).withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Text(
+                  'A newly downloaded DLL mod is ready. Click the marked "!" selector beside its Data Management slot to see and select it.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: _onSurface(context, 0.9),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (_bundledDllDefaultsUpdateAvailable) ...[
               Container(
                 width: double.infinity,
@@ -39280,6 +39372,7 @@ class _InstalledAtlasMod {
     this.sourceLastUpdatedEpochMs = 0,
     this.filesFingerprint = '',
     this.dataSlot = '',
+    this.dllSelectorNoticePending = false,
   });
 
   final String id;
@@ -39290,6 +39383,9 @@ class _InstalledAtlasMod {
   // catalog entry at install time so the slot picker works without the catalog
   // loaded). Empty for non-DLL mods or mods that don't declare a slot.
   final String dataSlot;
+  // Set after a successful fresh DLL download and cleared when the user opens
+  // that DLL's matching selector in Data Management.
+  final bool dllSelectorNoticePending;
   // Kept for backwards compatibility (first install target).
   final String targetVersionId;
   // Every build this mod was installed to. A pak mod can target multiple
@@ -39315,6 +39411,7 @@ class _InstalledAtlasMod {
     int? sourceLastUpdatedEpochMs,
     String? filesFingerprint,
     String? dataSlot,
+    bool? dllSelectorNoticePending,
   }) {
     return _InstalledAtlasMod(
       id: id,
@@ -39329,6 +39426,8 @@ class _InstalledAtlasMod {
           sourceLastUpdatedEpochMs ?? this.sourceLastUpdatedEpochMs,
       filesFingerprint: filesFingerprint ?? this.filesFingerprint,
       dataSlot: dataSlot ?? this.dataSlot,
+      dllSelectorNoticePending:
+          dllSelectorNoticePending ?? this.dllSelectorNoticePending,
     );
   }
 
@@ -39376,6 +39475,7 @@ class _InstalledAtlasMod {
       sourceLastUpdatedEpochMs: asInt(json['sourceLastUpdatedEpochMs'], 0),
       filesFingerprint: (json['filesFingerprint'] ?? '').toString(),
       dataSlot: (json['dataSlot'] ?? '').toString().trim(),
+      dllSelectorNoticePending: json['dllSelectorNoticePending'] == true,
     );
   }
 
@@ -39392,6 +39492,7 @@ class _InstalledAtlasMod {
       'sourceLastUpdatedEpochMs': sourceLastUpdatedEpochMs,
       'filesFingerprint': filesFingerprint,
       'dataSlot': dataSlot,
+      'dllSelectorNoticePending': dllSelectorNoticePending,
     };
   }
 }
