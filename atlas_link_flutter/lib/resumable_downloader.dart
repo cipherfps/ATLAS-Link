@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 typedef DownloadProgressCallback =
     void Function(int receivedBytes, int? totalBytes);
@@ -24,15 +25,18 @@ class ResumableDownloadCancelled implements Exception {
 class ResumableDownloader {
   const ResumableDownloader({
     this.rangeChunkBytes = 16 * 1024 * 1024,
+    this.parallelConnections = 1,
     this.maxConsecutiveFailures = 8,
     this.connectionTimeout = const Duration(seconds: 20),
     this.idleTimeout = const Duration(seconds: 60),
     this.initialRetryDelay = const Duration(milliseconds: 500),
     this.maximumRetryDelay = const Duration(seconds: 12),
   }) : assert(rangeChunkBytes > 0),
+       assert(parallelConnections > 0),
        assert(maxConsecutiveFailures > 0);
 
   final int rangeChunkBytes;
+  final int parallelConnections;
   final int maxConsecutiveFailures;
   final Duration connectionTimeout;
   final Duration idleTimeout;
@@ -58,6 +62,50 @@ class ResumableDownloader {
 
   static Future<void> discardPartial(File destination) =>
       _deleteResumeFiles(partFileFor(destination));
+
+  /// Best-effort remote length discovery using a one-byte ranged GET. Some mod
+  /// origins intentionally reject HEAD while serving GET ranges, so callers
+  /// must not use HEAD as the availability or size check.
+  Future<int?> probeTotalBytes(
+    Uri uri, {
+    bool rejectHtmlResponse = false,
+    bool Function()? isCancelled,
+  }) async {
+    _throwIfCancelled(isCancelled);
+    final client = HttpClient()
+      ..autoUncompress = false
+      ..connectionTimeout = connectionTimeout
+      ..userAgent = 'ATLAS-Link';
+    try {
+      final request = await client.getUrl(uri);
+      request.followRedirects = true;
+      request.maxRedirects = 8;
+      request.persistentConnection = false;
+      request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      final response = await request.close();
+      _throwIfCancelled(isCancelled);
+
+      if (response.statusCode == HttpStatus.partialContent) {
+        _rejectHtmlIfNeeded(response, rejectHtmlResponse, uri);
+        return _ContentRange.parse(
+          response.headers.value(HttpHeaders.contentRangeHeader),
+        )?.total;
+      }
+      if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+        return _parseUnsatisfiedTotal(
+          response.headers.value(HttpHeaders.contentRangeHeader),
+        );
+      }
+      if (response.statusCode == HttpStatus.ok) {
+        _rejectHtmlIfNeeded(response, rejectHtmlResponse, uri);
+        return response.contentLength > 0 ? response.contentLength : null;
+      }
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
 
   Future<void> download(
     Uri uri,
@@ -89,6 +137,7 @@ class ResumableDownloader {
 
     var consecutiveFailures = 0;
     var consecutiveRestarts = 0;
+    var parallelRangesDisabled = false;
     try {
       while (true) {
         _throwIfCancelled(isCancelled);
@@ -107,6 +156,25 @@ class ResumableDownloader {
         }
 
         try {
+          if (!parallelRangesDisabled &&
+              parallelConnections > 1 &&
+              knownTotal != null &&
+              metadata?.ifRangeValidator != null &&
+              knownTotal - offset > rangeChunkBytes) {
+            metadata = await _downloadRemainingRangesParallel(
+              uri,
+              partFile,
+              metadata!,
+              onProgress: onProgress,
+              onRetry: onRetry,
+              isCancelled: isCancelled,
+              rejectHtmlResponse: rejectHtmlResponse,
+            );
+            await _promotePartial(partFile, metadataFile, destination);
+            onProgress?.call(knownTotal, knownTotal);
+            return;
+          }
+
           final result = await _downloadNextRange(
             uri,
             partFile,
@@ -127,6 +195,11 @@ class ResumableDownloader {
             return;
           }
           consecutiveFailures = 0;
+        } on _ParallelRangeUnavailable {
+          await _deleteResumeFiles(partFile);
+          metadata = null;
+          consecutiveFailures = 0;
+          parallelRangesDisabled = true;
         } on _RestartDownload {
           await _deleteResumeFiles(partFile);
           metadata = null;
@@ -140,19 +213,19 @@ class ResumableDownloader {
         } on ResumableDownloadCancelled {
           rethrow;
         } catch (error) {
-          final currentLength = await partFile.exists()
-              ? await partFile.length()
-              : 0;
-          final madeProgress = currentLength > offset;
           if (!_isRetryable(error)) {
             await _deleteResumeFiles(partFile);
             rethrow;
           }
 
-          consecutiveFailures = madeProgress ? 0 : consecutiveFailures + 1;
+          // A response that dribbles a few bytes and disconnects is still a
+          // failed request. Resetting here whenever the part grew allowed such
+          // an origin to retry forever. A fully completed range resets this
+          // counter on the success path above.
+          consecutiveFailures++;
           if (consecutiveFailures >= maxConsecutiveFailures) rethrow;
 
-          final retryOrdinal = math.max(1, consecutiveFailures);
+          final retryOrdinal = consecutiveFailures;
           final delay = _retryDelay(retryOrdinal);
           onRetry?.call(retryOrdinal, delay, error);
           await _cancellableDelay(delay, isCancelled);
@@ -166,6 +239,183 @@ class ResumableDownloader {
       if (!keepPartialOnFailure) await _deleteResumeFiles(partFile);
       rethrow;
     }
+  }
+
+  /// Downloads the known remainder in parallel range batches while keeping
+  /// [partFile] as a strictly contiguous prefix. Responses are buffered only
+  /// for the current batch and appended in byte order after every range has
+  /// passed its Content-Range and length checks. That keeps the existing simple
+  /// resume format valid even if the process exits between batches.
+  Future<_ResumeMetadata> _downloadRemainingRangesParallel(
+    Uri uri,
+    File partFile,
+    _ResumeMetadata metadata, {
+    DownloadProgressCallback? onProgress,
+    DownloadRetryCallback? onRetry,
+    bool Function()? isCancelled,
+    required bool rejectHtmlResponse,
+  }) async {
+    final totalBytes = metadata.totalBytes!;
+    var offset = await partFile.length();
+
+    while (offset < totalBytes) {
+      _throwIfCancelled(isCancelled);
+      final ranges = <_RequestedRange>[];
+      var nextStart = offset;
+      while (ranges.length < parallelConnections && nextStart < totalBytes) {
+        final end = math.min(totalBytes - 1, nextStart + rangeChunkBytes - 1);
+        ranges.add(_RequestedRange(nextStart, end));
+        nextStart = end + 1;
+      }
+
+      var failures = 0;
+      late List<_BufferedRange> completed;
+      while (true) {
+        _throwIfCancelled(isCancelled);
+        final receivedByStart = <int, int>{};
+        onProgress?.call(offset, totalBytes);
+        final client = HttpClient()
+          ..autoUncompress = false
+          ..connectionTimeout = connectionTimeout
+          ..maxConnectionsPerHost = parallelConnections
+          ..userAgent = 'ATLAS-Link';
+
+        try {
+          completed = await Future.wait(
+            ranges.map(
+              (range) => _downloadBufferedRange(
+                client,
+                uri,
+                range,
+                metadata,
+                rejectHtmlResponse: rejectHtmlResponse,
+                isCancelled: isCancelled,
+                onProgress: (received) {
+                  receivedByStart[range.start] = received;
+                  final bufferedBytes = receivedByStart.values.fold<int>(
+                    0,
+                    (sum, value) => sum + value,
+                  );
+                  onProgress?.call(offset + bufferedBytes, totalBytes);
+                },
+              ),
+            ),
+            eagerError: true,
+          );
+          client.close(force: true);
+          break;
+        } on ResumableDownloadCancelled {
+          client.close(force: true);
+          rethrow;
+        } on _RestartDownload {
+          client.close(force: true);
+          rethrow;
+        } catch (error) {
+          client.close(force: true);
+          if (!_isRetryable(error)) rethrow;
+          failures++;
+          if (failures >= maxConsecutiveFailures) rethrow;
+          final delay = _retryDelay(failures);
+          onRetry?.call(failures, delay, error);
+          await _cancellableDelay(delay, isCancelled);
+        }
+      }
+
+      completed.sort((a, b) => a.start.compareTo(b.start));
+      final sink = partFile.openWrite(mode: FileMode.append);
+      try {
+        for (final range in completed) {
+          sink.add(range.bytes);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+
+      final expectedLength = ranges.last.end + 1;
+      final actualLength = await partFile.length();
+      if (actualLength != expectedLength) {
+        throw FileSystemException(
+          'Parallel range assembly produced $actualLength of '
+          '$expectedLength bytes.',
+          partFile.path,
+        );
+      }
+      offset = actualLength;
+      onProgress?.call(offset, totalBytes);
+    }
+
+    return metadata;
+  }
+
+  Future<_BufferedRange> _downloadBufferedRange(
+    HttpClient client,
+    Uri uri,
+    _RequestedRange range,
+    _ResumeMetadata metadata, {
+    required bool rejectHtmlResponse,
+    bool Function()? isCancelled,
+    required void Function(int receivedBytes) onProgress,
+  }) async {
+    _throwIfCancelled(isCancelled);
+    final request = await client.getUrl(uri);
+    request.followRedirects = true;
+    request.maxRedirects = 8;
+    request.persistentConnection = true;
+    request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+    request.headers.set(
+      HttpHeaders.rangeHeader,
+      'bytes=${range.start}-${range.end}',
+    );
+    final validator = metadata.ifRangeValidator;
+    if (validator != null) {
+      request.headers.set(HttpHeaders.ifRangeHeader, validator);
+    }
+
+    final response = await request.close();
+    if (response.statusCode == HttpStatus.ok ||
+        response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+      // A stale validator or an origin that stopped honoring ranges makes
+      // out-of-order batching unsafe. Let the outer loop discard the prefix and
+      // retry through the existing single-response path.
+      throw const _ParallelRangeUnavailable();
+    }
+    if (response.statusCode != HttpStatus.partialContent) {
+      throw _DownloadHttpException(
+        response.statusCode,
+        uri,
+        retryable: _retryableStatusCodes.contains(response.statusCode),
+      );
+    }
+
+    _rejectHtmlIfNeeded(response, rejectHtmlResponse, uri);
+    final contentRange = _ContentRange.parse(
+      response.headers.value(HttpHeaders.contentRangeHeader),
+    );
+    if (contentRange == null ||
+        contentRange.start != range.start ||
+        contentRange.end != range.end ||
+        contentRange.total != metadata.totalBytes) {
+      throw const _ParallelRangeUnavailable();
+    }
+
+    final builder = BytesBuilder(copy: false);
+    var received = 0;
+    await for (final chunk in response.timeout(idleTimeout)) {
+      _throwIfCancelled(isCancelled);
+      builder.add(chunk);
+      received += chunk.length;
+      onProgress(received);
+    }
+    final expected = range.end - range.start + 1;
+    if (received != expected) {
+      throw HttpException(
+        'Connection closed before the requested range was received '
+        '($received of $expected bytes).',
+        uri: uri,
+      );
+    }
+    return _BufferedRange(range.start, range.end, builder.takeBytes());
   }
 
   Future<_RangeResult> _downloadNextRange(
@@ -437,6 +687,19 @@ class _RangeResult {
   final bool complete;
 }
 
+class _RequestedRange {
+  const _RequestedRange(this.start, this.end);
+
+  final int start;
+  final int end;
+}
+
+class _BufferedRange extends _RequestedRange {
+  const _BufferedRange(super.start, super.end, this.bytes);
+
+  final Uint8List bytes;
+}
+
 class _ContentRange {
   const _ContentRange({
     required this.start,
@@ -548,6 +811,10 @@ class _DownloadHttpException implements Exception {
 
 class _RestartDownload implements Exception {
   const _RestartDownload();
+}
+
+class _ParallelRangeUnavailable implements Exception {
+  const _ParallelRangeUnavailable();
 }
 
 const Set<int> _retryableStatusCodes = <int>{

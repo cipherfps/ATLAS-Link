@@ -3986,6 +3986,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       String name = '';
       String url = '';
       String relativePath = '';
+      int? sizeBytes;
       if (item is String) {
         relativePath = item.trim();
         name = _basename(relativePath);
@@ -4008,6 +4009,15 @@ class _LauncherScreenState extends State<LauncherScreen>
                 .toString()
                 .trim();
         name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        final rawSize =
+            map['sizeBytes'] ??
+            map['size'] ??
+            map['bytes'] ??
+            map['contentLength'];
+        sizeBytes = rawSize is num
+            ? rawSize.toInt()
+            : int.tryParse(rawSize?.toString() ?? '');
+        if (sizeBytes != null && sizeBytes <= 0) sizeBytes = null;
         if (url.isEmpty) {
           final reference = relativePath.isNotEmpty ? relativePath : name;
           if (reference.isNotEmpty) {
@@ -4032,6 +4042,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             filesBaseUrl,
           ),
           relativePath: relativePath,
+          sizeBytes: sizeBytes,
         ),
       );
     }
@@ -4239,6 +4250,10 @@ class _LauncherScreenState extends State<LauncherScreen>
             name: (entry['name'] ?? '').toString(),
             downloadUrl: (entry['download_url'] ?? '').toString(),
             relativePath: (entry['path'] ?? '').toString(),
+            sizeBytes: switch (entry['size']) {
+              final num value when value > 0 => value.toInt(),
+              _ => null,
+            },
           ),
         )
         .where(
@@ -4897,6 +4912,7 @@ class _LauncherScreenState extends State<LauncherScreen>
       String name = '';
       String url = '';
       String relativePath = '';
+      int? sizeBytes;
       if (item is String) {
         relativePath = item.trim();
         final lower = relativePath.toLowerCase();
@@ -4924,6 +4940,15 @@ class _LauncherScreenState extends State<LauncherScreen>
                 .toString()
                 .trim();
         name = (map['name'] ?? map['fileName'] ?? '').toString().trim();
+        final rawSize =
+            map['sizeBytes'] ??
+            map['size'] ??
+            map['bytes'] ??
+            map['contentLength'];
+        sizeBytes = rawSize is num
+            ? rawSize.toInt()
+            : int.tryParse(rawSize?.toString() ?? '');
+        if (sizeBytes != null && sizeBytes <= 0) sizeBytes = null;
         if (url.isEmpty) {
           final reference = relativePath.isNotEmpty ? relativePath : name;
           if (reference.isNotEmpty) {
@@ -4949,7 +4974,12 @@ class _LauncherScreenState extends State<LauncherScreen>
       }
       if (name.isEmpty || url.isEmpty) continue;
       files.add(
-        _AtlasModFile(name: name, downloadUrl: url, relativePath: relativePath),
+        _AtlasModFile(
+          name: name,
+          downloadUrl: url,
+          relativePath: relativePath,
+          sizeBytes: sizeBytes,
+        ),
       );
     }
     return files;
@@ -5007,6 +5037,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             name: _basename(file.path),
             downloadUrl: file.path,
             relativePath: _basename(file.path),
+            sizeBytes: file.lengthSync(),
           ),
         )
         .toList();
@@ -6064,6 +6095,129 @@ class _LauncherScreenState extends State<LauncherScreen>
     }
   }
 
+  Future<List<int?>> _probeAtlasModFileSizes(List<_AtlasModFile> files) async {
+    final sizes = List<int?>.filled(files.length, null);
+    var nextIndex = 0;
+    const probe = ResumableDownloader(
+      connectionTimeout: Duration(seconds: 12),
+      idleTimeout: Duration(seconds: 12),
+    );
+
+    Future<void> worker() async {
+      while (true) {
+        if (_cancelModDownload) throw _kModDownloadCancelled;
+        final index = nextIndex++;
+        if (index >= files.length) return;
+        final file = files[index];
+        if (file.sizeBytes != null && file.sizeBytes! > 0) {
+          sizes[index] = file.sizeBytes;
+          continue;
+        }
+
+        try {
+          final effectiveUrl = await _resolveModDownloadUrl(file.downloadUrl);
+          final uri = Uri.tryParse(effectiveUrl.trim());
+          if (uri?.scheme.toLowerCase() == 'file') {
+            final source = File(uri!.toFilePath());
+            if (await source.exists()) sizes[index] = await source.length();
+          } else if (uri != null &&
+              (uri.scheme == 'http' || uri.scheme == 'https')) {
+            sizes[index] = await probe.probeTotalBytes(
+              uri,
+              rejectHtmlResponse: true,
+              isCancelled: () => _cancelModDownload,
+            );
+          } else {
+            final source = File(effectiveUrl);
+            if (await source.exists()) sizes[index] = await source.length();
+          }
+        } on ResumableDownloadCancelled {
+          throw _kModDownloadCancelled;
+        } catch (error) {
+          // Size discovery is an accuracy enhancement, not an availability
+          // gate. The real transfer below still reports its own exact total.
+          _log('download', 'Could not probe ${file.name}: $error');
+        }
+      }
+    }
+
+    await Future.wait(
+      List<Future<void>>.generate(min(3, files.length), (_) => worker()),
+    );
+    return sizes;
+  }
+
+  void _showAtlasModTransferProgress({
+    required String action,
+    required String modName,
+    required String fileName,
+    required int receivedBytes,
+    required int? reportedFileBytes,
+    required int? expectedFileBytes,
+    required int completedBytes,
+    required int? expectedAggregateBytes,
+    required int itemIndex,
+    required int itemCount,
+    required _ModDownloadRateTracker rate,
+    required VoidCallback onCancel,
+  }) {
+    final fileBytes = reportedFileBytes != null && reportedFileBytes > 0
+        ? reportedFileBytes
+        : expectedFileBytes;
+    final safeReceived = max(0, receivedBytes);
+    final forceRender = fileBytes != null && safeReceived >= fileBytes;
+    if (!rate.record(safeReceived, forceRender: forceRender)) return;
+
+    final fileProgress = fileBytes == null || fileBytes <= 0
+        ? null
+        : (safeReceived / fileBytes).clamp(0.0, 1.0);
+    final aggregateReceived =
+        completedBytes +
+        (fileBytes == null ? safeReceived : min(safeReceived, fileBytes));
+    final aggregateProgress =
+        expectedAggregateBytes == null || expectedAggregateBytes <= 0
+        ? null
+        : (aggregateReceived / expectedAggregateBytes).clamp(0.0, 1.0);
+    final displayProgress = aggregateProgress ?? fileProgress;
+
+    String percentLabel(double value) {
+      final percent = value * 100;
+      final digits = percent > 0 && percent < 10 ? 1 : 0;
+      return '${percent.toStringAsFixed(digits)}%';
+    }
+
+    final parts = <String>['$action "$modName"...'];
+    if (displayProgress != null) parts.add(percentLabel(displayProgress));
+    parts.add(fileName);
+    parts.add(
+      fileBytes == null
+          ? _formatByteSize(safeReceived)
+          : '${_formatByteSize(safeReceived)} / ${_formatByteSize(fileBytes)}',
+    );
+
+    final bytesPerSecond = rate.bytesPerSecond;
+    if (bytesPerSecond != null && bytesPerSecond >= 1) {
+      parts.add('${_formatByteSize(bytesPerSecond.round())}/s');
+      final remainingBytes = expectedAggregateBytes != null
+          ? max(0, expectedAggregateBytes - aggregateReceived)
+          : fileBytes == null
+          ? 0
+          : max(0, fileBytes - safeReceived);
+      if (remainingBytes > 0) {
+        final etaSeconds = (remainingBytes / bytesPerSecond).ceil();
+        parts.add('${_formatTrackedPlaytime(etaSeconds)} left');
+      }
+    }
+    if (itemCount > 1) parts.add('file $itemIndex/$itemCount');
+
+    _toastProgress(
+      parts.join(' | '),
+      progress: displayProgress,
+      indeterminate: displayProgress == null,
+      onCancel: onCancel,
+    );
+  }
+
   Future<void> _installAtlasMod(
     _AtlasModEntry mod, {
     bool resolveDependencies = true,
@@ -6159,6 +6313,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final installedPaths = <String>[];
     final totalDownloads = targetDirectories.length * mod.files.length;
     var completed = 0;
+    var completedBytes = 0;
     _cancelModDownload = false;
     // Lock the build(s) this mod is downloading into until it's done.
     _setModInstallTargetVersionIds(targetVersionIds);
@@ -6170,6 +6325,14 @@ class _LauncherScreenState extends State<LauncherScreen>
       onCancel: onCancel,
     );
     try {
+      final expectedFileSizes = await _probeAtlasModFileSizes(mod.files);
+      final allFileSizesKnown = expectedFileSizes.every(
+        (size) => size != null && size > 0,
+      );
+      final expectedAggregateBytes = allFileSizesKnown
+          ? expectedFileSizes.whereType<int>().fold<int>(0, (a, b) => a + b) *
+                targetDirectories.length
+          : null;
       for (final directoryPath in targetDirectories) {
         final targetDirectory = Directory(directoryPath);
         await targetDirectory.create(recursive: true);
@@ -6186,26 +6349,24 @@ class _LauncherScreenState extends State<LauncherScreen>
             _forgetConflictingExeInstall(destination.path, mod.id);
           }
           final base = completed;
+          final catalogFileIndex = base % mod.files.length;
+          final rate = _ModDownloadRateTracker();
           await _downloadToFile(
             file.downloadUrl,
             destination,
             onProgress: (received, total) {
-              final fileProgress = total == null || total <= 0
-                  ? 0.0
-                  : (received / total).clamp(0.0, 1.0);
-              final progress = totalDownloads == 0
-                  ? null
-                  : (base + fileProgress) / totalDownloads;
-              final pct = progress == null
-                  ? ''
-                  : ' ${(progress * 100).round()}%';
-              final count = totalDownloads > 1
-                  ? ' (${base + 1}/$totalDownloads)'
-                  : '';
-              _toastProgress(
-                'Downloading "${mod.name}"...$pct$count',
-                progress: progress,
-                indeterminate: false,
+              _showAtlasModTransferProgress(
+                action: 'Downloading',
+                modName: mod.name,
+                fileName: file.name,
+                receivedBytes: received,
+                reportedFileBytes: total,
+                expectedFileBytes: expectedFileSizes[catalogFileIndex],
+                completedBytes: completedBytes,
+                expectedAggregateBytes: expectedAggregateBytes,
+                itemIndex: base + 1,
+                itemCount: totalDownloads,
+                rate: rate,
                 onCancel: onCancel,
               );
             },
@@ -6214,6 +6375,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             isCancelled: () => _cancelModDownload,
             keepPartialOnFailure: true,
           );
+          completedBytes += await destination.length();
           // Mark the slot so this specific patch is distinguishable from the
           // stock executable (and from other patched EXEs).
           if (mod.type == _AtlasModType.exe) {
@@ -6659,6 +6821,7 @@ class _LauncherScreenState extends State<LauncherScreen>
     final installedPaths = <String>[];
     final totalDownloads = targetDirectories.length * mod.files.length;
     var completed = 0;
+    var completedBytes = 0;
     _cancelModDownload = false;
     // Lock the build(s) this mod is downloading into until it's done.
     _setModInstallTargetVersionIds(targetVersionIds);
@@ -6670,6 +6833,14 @@ class _LauncherScreenState extends State<LauncherScreen>
       onCancel: onCancel,
     );
     try {
+      final expectedFileSizes = await _probeAtlasModFileSizes(mod.files);
+      final allFileSizesKnown = expectedFileSizes.every(
+        (size) => size != null && size > 0,
+      );
+      final expectedAggregateBytes = allFileSizesKnown
+          ? expectedFileSizes.whereType<int>().fold<int>(0, (a, b) => a + b) *
+                targetDirectories.length
+          : null;
       for (final directoryPath in targetDirectories) {
         final directory = Directory(directoryPath);
         await directory.create(recursive: true);
@@ -6701,26 +6872,24 @@ class _LauncherScreenState extends State<LauncherScreen>
             await _backupOriginalExe(destination);
           }
           final base = completed;
+          final catalogFileIndex = base % mod.files.length;
+          final rate = _ModDownloadRateTracker();
           await _downloadToFile(
             file.downloadUrl,
             destination,
             onProgress: (received, total) {
-              final fileProgress = total == null || total <= 0
-                  ? 0.0
-                  : (received / total).clamp(0.0, 1.0);
-              final progress = totalDownloads == 0
-                  ? null
-                  : (base + fileProgress) / totalDownloads;
-              final pct = progress == null
-                  ? ''
-                  : ' ${(progress * 100).round()}%';
-              final count = totalDownloads > 1
-                  ? ' (${base + 1}/$totalDownloads)'
-                  : '';
-              _toastProgress(
-                'Updating "${mod.name}"...$pct$count',
-                progress: progress,
-                indeterminate: false,
+              _showAtlasModTransferProgress(
+                action: 'Updating',
+                modName: mod.name,
+                fileName: file.name,
+                receivedBytes: received,
+                reportedFileBytes: total,
+                expectedFileBytes: expectedFileSizes[catalogFileIndex],
+                completedBytes: completedBytes,
+                expectedAggregateBytes: expectedAggregateBytes,
+                itemIndex: base + 1,
+                itemCount: totalDownloads,
+                rate: rate,
                 onCancel: onCancel,
               );
             },
@@ -6729,6 +6898,7 @@ class _LauncherScreenState extends State<LauncherScreen>
             isCancelled: () => _cancelModDownload,
             keepPartialOnFailure: true,
           );
+          completedBytes += await destination.length();
           if (mod.type == _AtlasModType.exe) {
             await _writeExeMarker(destination.path, mod.id);
           }
@@ -32921,7 +33091,10 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       final effectiveUrl = resolveShareLinks
           ? await _resolveModDownloadUrl(trimmed)
           : trimmed;
-      await const ResumableDownloader().download(
+      final downloader = keepPartialOnFailure
+          ? const ResumableDownloader(parallelConnections: 3)
+          : const ResumableDownloader();
+      await downloader.download(
         Uri.parse(effectiveUrl),
         destination,
         onProgress: onProgress,
@@ -38828,12 +39001,56 @@ String _atlasPathBasename(String path) {
   return parts.last;
 }
 
+class _ModDownloadRateTracker {
+  DateTime? _lastSampleAt;
+  DateTime? _lastRenderAt;
+  int? _lastSampleBytes;
+  double? bytesPerSecond;
+
+  bool record(int bytes, {bool forceRender = false}) {
+    final now = DateTime.now();
+    final previousAt = _lastSampleAt;
+    final previousBytes = _lastSampleBytes;
+    if (previousAt == null || previousBytes == null) {
+      _lastSampleAt = now;
+      _lastSampleBytes = bytes;
+    } else {
+      final elapsed = now.difference(previousAt);
+      final delta = bytes - previousBytes;
+      if (delta < 0) {
+        bytesPerSecond = null;
+        _lastSampleAt = now;
+        _lastSampleBytes = bytes;
+      } else if (elapsed.inMilliseconds >= 500) {
+        if (delta > 0) {
+          final sample = delta * 1000 / elapsed.inMilliseconds;
+          bytesPerSecond = bytesPerSecond == null
+              ? sample
+              : (bytesPerSecond! * 0.7) + (sample * 0.3);
+        }
+        _lastSampleAt = now;
+        _lastSampleBytes = bytes;
+      }
+    }
+
+    final previousRender = _lastRenderAt;
+    if (!forceRender &&
+        previousRender != null &&
+        now.difference(previousRender) < const Duration(milliseconds: 250)) {
+      return false;
+    }
+    _lastRenderAt = now;
+    return true;
+  }
+}
+
 class _AtlasModFile {
   const _AtlasModFile({
     required this.name,
     required this.downloadUrl,
     required this.relativePath,
     this.sha = '',
+    this.sizeBytes,
   });
 
   final String name;
@@ -38843,12 +39060,14 @@ class _AtlasModFile {
   // detection only fires when the actual installable file changes (not when
   // metadata/screenshots in the same folder change). Empty when unknown.
   final String sha;
+  final int? sizeBytes;
 
   _AtlasModFile withSha(String value) => _AtlasModFile(
     name: name,
     downloadUrl: downloadUrl,
     relativePath: relativePath,
     sha: value,
+    sizeBytes: sizeBytes,
   );
 
   factory _AtlasModFile.fromJson(Map<String, dynamic> json) {
@@ -38857,6 +39076,11 @@ class _AtlasModFile {
       downloadUrl: (json['downloadUrl'] ?? json['url'] ?? '').toString(),
       relativePath: (json['relativePath'] ?? json['path'] ?? '').toString(),
       sha: (json['sha'] ?? '').toString(),
+      sizeBytes: switch (json['sizeBytes'] ?? json['size']) {
+        final num value when value > 0 => value.toInt(),
+        final String value => int.tryParse(value),
+        _ => null,
+      },
     );
   }
 
@@ -38866,6 +39090,7 @@ class _AtlasModFile {
       'downloadUrl': downloadUrl,
       'relativePath': relativePath,
       'sha': sha,
+      if (sizeBytes != null) 'sizeBytes': sizeBytes,
     };
   }
 }

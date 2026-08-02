@@ -23,8 +23,12 @@ void main() {
     }
   });
 
-  ResumableDownloader downloader({int chunkSize = 8}) => ResumableDownloader(
+  ResumableDownloader downloader({
+    int chunkSize = 8,
+    int parallelConnections = 1,
+  }) => ResumableDownloader(
     rangeChunkBytes: chunkSize,
+    parallelConnections: parallelConnections,
     maxConsecutiveFailures: 3,
     connectionTimeout: const Duration(seconds: 2),
     idleTimeout: const Duration(seconds: 2),
@@ -89,6 +93,60 @@ void main() {
       isFalse,
     );
   });
+
+  test('probes length with a one-byte ranged GET instead of HEAD', () async {
+    final payload = List<int>.generate(23, (index) => index);
+    String? method;
+    String? rangeHeader;
+    final uri = await listen((request) async {
+      method = request.method;
+      rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      await _sendRange(request.response, payload, 0, 0);
+    });
+
+    final total = await downloader().probeTotalBytes(uri);
+
+    expect(total, payload.length);
+    expect(method, 'GET');
+    expect(rangeHeader, 'bytes=0-0');
+  });
+
+  test(
+    'downloads known remaining ranges concurrently and appends in order',
+    () async {
+      final payload = List<int>.generate(83, (index) => (index * 31) & 0xff);
+      final requestedStarts = <int>[];
+      var active = 0;
+      var maxActive = 0;
+      final uri = await listen((request) async {
+        final range = _parseRange(
+          request.headers.value(HttpHeaders.rangeHeader)!,
+          payload.length,
+        );
+        requestedStarts.add(range.$1);
+        if (range.$1 > 0) {
+          active++;
+          maxActive = math.max(maxActive, active);
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        await _sendRange(request.response, payload, range.$1, range.$2);
+        if (range.$1 > 0) active--;
+      });
+      final destination = File('${testDirectory.path}/parallel.bin');
+
+      await downloader(
+        chunkSize: 8,
+        parallelConnections: 3,
+      ).download(uri, destination);
+
+      expect(await destination.readAsBytes(), orderedEquals(payload));
+      expect(requestedStarts.first, 0);
+      expect(maxActive, greaterThanOrEqualTo(2));
+      expect(requestedStarts.toSet(), {
+        for (var start = 0; start < payload.length; start += 8) start,
+      });
+    },
+  );
 
   test(
     'resumes at the exact saved offset after a response disconnects',
@@ -226,6 +284,44 @@ void main() {
     expect(requestedStarts[requestsBeforeResume], savedPrefixLength);
     expect(await destination.readAsBytes(), orderedEquals(payload));
   });
+
+  test(
+    'bounds retries when every failed response still writes a byte',
+    () async {
+      final payload = List<int>.generate(40, (index) => index);
+      var requests = 0;
+      final uri = await listen((request) async {
+        requests++;
+        final range = _parseRange(
+          request.headers.value(HttpHeaders.rangeHeader)!,
+          payload.length,
+        );
+        final response = request.response;
+        response.statusCode = HttpStatus.partialContent;
+        response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes ${range.$1}-${range.$2}/${payload.length}',
+        );
+        response.headers.set(HttpHeaders.etagHeader, '"dribble"');
+        response.contentLength = range.$2 - range.$1 + 1;
+        final socket = await response.detachSocket(writeHeaders: true);
+        socket.add(<int>[payload[range.$1]]);
+        await socket.flush();
+        await socket.close();
+      });
+      final destination = File('${testDirectory.path}/dribble.bin');
+
+      await expectLater(
+        downloader(
+          chunkSize: 10,
+        ).download(uri, destination, keepPartialOnFailure: true),
+        throwsA(anything),
+      );
+
+      expect(requests, 3);
+      expect(await ResumableDownloader.partFileFor(destination).length(), 3);
+    },
+  );
 
   test(
     'cancellation deletes resume files and preserves the destination',
