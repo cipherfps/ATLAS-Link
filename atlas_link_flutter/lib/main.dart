@@ -26825,9 +26825,22 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Installed Versions',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                Row(
+                  children: [
+                    Text(
+                      'Installed Versions',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '(${filteredVersions.length})',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.72),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -26845,10 +26858,23 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
 
           return Row(
             children: [
-              const Expanded(
-                child: Text(
-                  'Installed Versions',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+              Expanded(
+                child: Row(
+                  children: [
+                    Text(
+                      'Installed Versions',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '(${filteredVersions.length})',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _onSurface(context, 0.72),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               clearAllButton,
