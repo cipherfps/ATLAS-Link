@@ -105,12 +105,22 @@ class LauncherContentConfig {
           ),
           LauncherContentSlide(
             image: 'assets/images/atlas_apps.png',
-            category: 'SPOTLIGHT SUBMISSION',
+            category: 'TUTORIAL',
             title: 'ATLAS Tutorial',
             description:
                 'Watch this YouTube tutorial to learn how to use ATLAS, made by Mineluke (@mineluke)!',
             buttonLabel: 'Watch Video',
             buttonUrl: 'https://www.youtube.com/watch?v=C3pRAjzELzI',
+            imageFit: BoxFit.contain,
+          ),
+          LauncherContentSlide(
+            image: 'assets/images/jp.jpg',
+            category: 'SPOTLIGHT SUBMISSION',
+            title: 'Featured Video',
+            description:
+                'enough for you - @jp11yt',
+            buttonLabel: 'Watch Video',
+            buttonUrl: 'https://youtu.be/8ncg-ngjA3A?si=rxMAyzgpx3IqR0ad',
             imageFit: BoxFit.contain,
           ),
         ],
