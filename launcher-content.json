@@ -25,6 +25,15 @@
         "buttonUrl": "https://discord.gg/GqgakxU6bm"
       },
       {
+        "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/main/atlas_link_flutter/assets/images/spotlight/Intangible%26Juks.png",
+        "imageFit": "cover",
+        "category": "SPOTLIGHT SUBMISSION",
+        "title": "Airplanes",
+        "description": "Airplanes - Intangible & Juks (Parts were made with ATLAS!)",
+        "buttonLabel": "Watch Video",
+        "buttonUrl": "https://www.youtube.com/watch?v=zLmmVZMrs1w"
+      },
+      {
         "image": "https://raw.githubusercontent.com/cipherfps/ATLAS-Link/refs/heads/main/atlas_link_flutter/assets/images/atlas_apps.png",
         "imageFit": "contain",
         "category": "SPOTLIGHT SUBMISSION",
