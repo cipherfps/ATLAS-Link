@@ -247,6 +247,28 @@ void main() {
         );
       }
     });
+
+    test(
+      'recognizes an incomplete payload after its executable is removed',
+      () {
+        final executable = createPayloadExecutable('ATLAS Backend.exe');
+
+        expect(
+          AtlasBackendInstallSupport.isIncompleteBackendInstallationRoot(
+            tempDir.path,
+          ),
+          isFalse,
+        );
+
+        executable.deleteSync();
+        expect(
+          AtlasBackendInstallSupport.isIncompleteBackendInstallationRoot(
+            tempDir.path,
+          ),
+          isTrue,
+        );
+      },
+    );
   });
 
   group('ATLAS Backend registry values', () {

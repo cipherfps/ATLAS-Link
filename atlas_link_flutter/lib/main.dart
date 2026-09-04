@@ -256,9 +256,36 @@ class AtlasBackendInstallSupport {
     if (!_backendExecutableNames.contains(name)) return false;
 
     final root = executable.parent.path;
+    return hasBackendPayload(root);
+  }
+
+  static bool hasBackendPayload(String root) {
+    final trimmed = root.trim();
+    if (trimmed.isEmpty) return false;
     return _backendPayloadMarkers.every((parts) {
-      return File(_joinAtlasBackendInstallPath([root, ...parts])).existsSync();
+      return File(
+        _joinAtlasBackendInstallPath([trimmed, ...parts]),
+      ).existsSync();
     });
+  }
+
+  static bool isIncompleteBackendInstallationRoot(String root) {
+    final trimmed = root.trim();
+    if (!hasBackendPayload(trimmed)) return false;
+
+    for (final executableName in const <String>[
+      'ATLAS Backend.exe',
+      'ATLAS-Backend.exe',
+      'ATLAS.exe',
+      'atlas_gui_flutter.exe',
+    ]) {
+      if (File(
+        _joinAtlasBackendInstallPath([trimmed, executableName]),
+      ).existsSync()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   static bool isBackendRegistryProduct(String? displayName) {
@@ -1168,10 +1195,10 @@ class LauncherScreen extends StatefulWidget {
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   static const String _launcherName = 'ATLAS Link';
-  static const String _launcherVersion = '2.0.5';
+  static const String _launcherVersion = '2.0.6';
   static final String _launcherSessionId =
       BackendHealthProtocol.createIdentifier();
-  static const String _launcherBuildLabel = 'Stable 2.0.5';
+  static const String _launcherBuildLabel = 'Stable 2.0.6';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -10350,18 +10377,19 @@ class _LauncherScreenState extends State<LauncherScreen>
                               ],
                               const SizedBox(height: 14),
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  TextButton(
+                                  _dialogOutlinedButton(
+                                    dialogContext,
                                     onPressed: updating
                                         ? null
                                         : () =>
                                               Navigator.of(dialogContext).pop(),
                                     child: const Text('Later'),
                                   ),
-                                  const SizedBox(width: 8),
-                                  if (notes.isNotEmpty)
-                                    TextButton(
+                                  const Spacer(),
+                                  if (notes.isNotEmpty) ...[
+                                    _dialogOutlinedButton(
+                                      dialogContext,
                                       onPressed: updating
                                           ? null
                                           : () async {
@@ -10374,7 +10402,8 @@ class _LauncherScreenState extends State<LauncherScreen>
                                             },
                                       child: const Text('Update Notes'),
                                     ),
-                                  const SizedBox(width: 8),
+                                    const SizedBox(width: 8),
+                                  ],
                                   FilledButton(
                                     onPressed: updating ? null : startUpdate,
                                     style: FilledButton.styleFrom(
@@ -18098,6 +18127,11 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                   const SizedBox(height: 10),
                                   Row(
                                     children: [
+                                      _dialogCancelButton(
+                                        dialogContext,
+                                        onPressed: dismissDialogSafely,
+                                      ),
+                                      const Spacer(),
                                       if (allowBulkImport)
                                         OutlinedButton.icon(
                                           onPressed: () async {
@@ -18148,17 +18182,17 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                             ),
                                           ),
                                         ),
-                                      const Spacer(),
-                                      _dialogCancelButton(
-                                        dialogContext,
-                                        onPressed: dismissDialogSafely,
-                                      ),
                                     ],
                                   ),
                                 ] else ...[
                                   Row(
                                     children: [
                                       if (allowBulkImport) ...[
+                                        _dialogCancelButton(
+                                          dialogContext,
+                                          onPressed: dismissDialogSafely,
+                                        ),
+                                        const SizedBox(width: 8),
                                         TextButton.icon(
                                           onPressed: () => setDialogState(() {
                                             validation = '';
@@ -18170,11 +18204,6 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                           label: const Text('Back'),
                                         ),
                                         const Spacer(),
-                                        _dialogCancelButton(
-                                          dialogContext,
-                                          onPressed: dismissDialogSafely,
-                                        ),
-                                        const SizedBox(width: 8),
                                       ] else ...[
                                         _dialogCancelButton(
                                           dialogContext,
@@ -19169,14 +19198,13 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                             ),
                             const SizedBox(height: 14),
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
                               children: [
                                 _dialogCancelButton(
                                   dialogContext,
                                   onPressed: () =>
                                       Navigator.of(dialogContext).pop(null),
                                 ),
-                                const SizedBox(width: 10),
+                                const Spacer(),
                                 FilledButton.icon(
                                   onPressed: () => submit(setDialogState),
                                   style: FilledButton.styleFrom(
@@ -20470,7 +20498,6 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                             ],
                             const SizedBox(height: 16),
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
                               children: [
                                 _dialogCancelButton(
                                   dialogContext,
@@ -20480,7 +20507,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                                           dialogContext,
                                         ).maybePop(),
                                 ),
-                                const SizedBox(width: 8),
+                                const Spacer(),
                                 FilledButton.icon(
                                   onPressed: saving ? null : saveEditedPreset,
                                   style: FilledButton.styleFrom(
@@ -31675,7 +31702,11 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
       var backendExePath = await _findInstalledAtlasBackendExecutable();
       if (backendExePath == null) {
         if (showProgressToast) _toastProgressDismiss();
-        final installChoice = await _promptInstallAtlasBackend();
+        final incompleteInstallRoot =
+            _findIncompleteAtlasBackendInstallationRoot();
+        final installChoice = await _promptInstallAtlasBackend(
+          repairExistingInstall: incompleteInstallRoot != null,
+        );
         if (installChoice == 'install' && backendExePath == null) {
           // Let the dialog finish its close animation before we start I/O work.
           await Future<void>.delayed(const Duration(milliseconds: 280));
@@ -32318,7 +32349,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     await _saveSettings(toast: false);
   }
 
-  Future<String> _promptInstallAtlasBackend() async {
+  Future<String> _promptInstallAtlasBackend({
+    bool repairExistingInstall = false,
+  }) async {
     if (!mounted) return 'cancel';
     final result = await showGeneralDialog<String>(
       context: context,
@@ -32359,7 +32392,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                'ATLAS Backend Not Found',
+                                repairExistingInstall
+                                    ? 'ATLAS Backend Needs Repair'
+                                    : 'ATLAS Backend Not Found',
                                 style: TextStyle(
                                   fontSize: 25,
                                   fontWeight: FontWeight.w700,
@@ -32369,14 +32404,18 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                             ),
                             _buildVersionTag(
                               dialogContext,
-                              label: 'Missing',
+                              label: repairExistingInstall
+                                  ? 'Incomplete'
+                                  : 'Missing',
                               accent: const Color(0xFFDC3545),
                             ),
                           ],
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          'ATLAS Backend was not found in installed apps. Install it now as a normal standalone app?',
+                          repairExistingInstall
+                              ? 'ATLAS Backend files were found, but the main executable is missing or unavailable. Antivirus software may have removed or quarantined it.'
+                              : 'ATLAS Backend was not found in installed apps. Install it now as a normal standalone app?',
                           style: TextStyle(
                             color: _onSurface(dialogContext, 0.82),
                             fontWeight: FontWeight.w600,
@@ -32412,7 +32451,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Text(
-                                  'Link will download the latest installer and open setup. After setup finishes, ATLAS Link will launch it automatically.',
+                                  repairExistingInstall
+                                      ? 'Review Windows Security or your antivirus first, then choose Repair Now. Link will download the latest installer and open setup.'
+                                      : 'Link will download the latest installer and open setup. After setup finishes, ATLAS Link will launch it automatically.',
                                   style: TextStyle(
                                     color: _onSurface(dialogContext, 0.78),
                                     fontWeight: FontWeight.w600,
@@ -32425,14 +32466,13 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                         ),
                         const SizedBox(height: 16),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
                             _dialogCancelButton(
                               dialogContext,
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop('cancel'),
                             ),
-                            const SizedBox(width: 10),
+                            const Spacer(),
                             FilledButton.icon(
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop('install'),
@@ -32447,11 +32487,17 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
                                   vertical: 12,
                                 ),
                               ),
-                              icon: const Icon(
-                                Icons.download_rounded,
+                              icon: Icon(
+                                repairExistingInstall
+                                    ? Icons.build_rounded
+                                    : Icons.download_rounded,
                                 size: 18,
                               ),
-                              label: const Text('Install Now'),
+                              label: Text(
+                                repairExistingInstall
+                                    ? 'Repair Now'
+                                    : 'Install Now',
+                              ),
                             ),
                           ],
                         ),
@@ -33370,6 +33416,35 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     return _findInstalledAtlasBackendExecutableFromRegistry();
   }
 
+  String? _findIncompleteAtlasBackendInstallationRoot() {
+    final roots = <String>[];
+    final configuredPath = _settings.backendWorkingDirectory.trim();
+    if (configuredPath.isNotEmpty) {
+      roots.add(
+        configuredPath.toLowerCase().endsWith('.exe')
+            ? File(configuredPath).parent.path
+            : configuredPath,
+      );
+    }
+    roots.addAll(
+      AtlasBackendInstallSupport.installationRootCandidates(
+        Platform.environment,
+      ),
+    );
+
+    final seen = <String>{};
+    for (final root in roots) {
+      final normalized = root.toLowerCase();
+      if (!seen.add(normalized)) continue;
+      if (AtlasBackendInstallSupport.isIncompleteBackendInstallationRoot(
+        root,
+      )) {
+        return root;
+      }
+    }
+    return null;
+  }
+
   Future<String?> _scanForAtlasBackendExecutableUnder(
     String rootPath, {
     int maxDepth = 3,
@@ -34222,14 +34297,13 @@ foreach ($app in $appPaths) {
                             ),
                             const SizedBox(height: 14),
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
                               children: [
                                 _dialogCancelButton(
                                   dialogContext,
                                   onPressed: () =>
                                       Navigator.of(dialogContext).pop(null),
                                 ),
-                                const SizedBox(width: 10),
+                                const Spacer(),
                                 FilledButton.icon(
                                   onPressed: () => submit(setDialogState),
                                   style: FilledButton.styleFrom(

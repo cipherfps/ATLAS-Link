@@ -1,4 +1,4 @@
-<!-- version: 2.0.5 -->
+<!-- version: 2.0.6 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,6 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Added Compatibility for ATLAS Backend V2
+- Added a repair option for incomplete backend installations
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
