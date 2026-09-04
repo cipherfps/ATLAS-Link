@@ -23,6 +23,7 @@ import 'package:version/version.dart';
 import 'package:win32/win32.dart';
 
 import 'atlas_mod_metadata_support.dart';
+import 'backend_health_protocol.dart';
 import 'build_import.dart';
 import 'discord_gate.dart';
 import 'fortnite_installer.dart';
@@ -38,6 +39,29 @@ String _joinAtlasBackendInstallPath(List<String> pieces) {
 }
 
 class AtlasBackendInstallSupport {
+  static const String repositorySlug = 'cipherfps/ATLAS-Backend-V2';
+  static const String latestReleaseApi =
+      'https://api.github.com/repos/$repositorySlug/releases/latest';
+  static const String recentReleasesApi =
+      'https://api.github.com/repos/$repositorySlug/releases?per_page=12';
+  static const String latestReleasePage =
+      'https://github.com/$repositorySlug/releases/latest';
+  static const String installerAppId =
+      '{E473D0FA-7BDC-4B5C-80EB-CC37EE2CF043}_is1';
+
+  static const Set<String> _backendExecutableNames = <String>{
+    'atlas backend.exe',
+    'atlas-backend.exe',
+    'atlas_gui_flutter.exe',
+    'atlas.exe',
+  };
+
+  static const List<List<String>> _backendPayloadMarkers = <List<String>>[
+    <String>['backend-content.json'],
+    <String>['app.js'],
+    <String>['tools', 'node', 'node.exe'],
+  ];
+
   static bool looksLikeAtlasBackendPath(String path) {
     final normalized = path.trim().replaceAll('\\', '/').toLowerCase();
     if (normalized.isEmpty) return false;
@@ -69,6 +93,7 @@ class AtlasBackendInstallSupport {
   static String? selectInstallerUrl(dynamic assetsRaw) {
     if (assetsRaw is! List) return null;
 
+    String? versionedAtlasSetupExe;
     String? atlasSetupExe;
     String? setupExe;
     String? atlasExe;
@@ -89,9 +114,14 @@ class AtlasBackendInstallSupport {
           name.contains('setup') ||
           name.contains('installer') ||
           name.contains('install');
+      final isVersionedAtlasSetup = RegExp(
+        r'^atlas backend setup-\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?\.exe$',
+      ).hasMatch(name);
 
       if (name.endsWith('.exe')) {
-        if (isInstaller && isAtlasAsset) {
+        if (isVersionedAtlasSetup) {
+          versionedAtlasSetupExe ??= url;
+        } else if (isInstaller && isAtlasAsset) {
           atlasSetupExe ??= url;
         } else if (isInstaller) {
           setupExe ??= url;
@@ -116,7 +146,8 @@ class AtlasBackendInstallSupport {
       }
     }
 
-    return atlasSetupExe ??
+    return versionedAtlasSetupExe ??
+        atlasSetupExe ??
         setupExe ??
         atlasExe ??
         firstExe ??
@@ -140,6 +171,7 @@ class AtlasBackendInstallSupport {
     }
 
     for (final relativeParts in const <List<String>>[
+      <String>['installer', 'stage', 'ATLAS Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS-Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS.exe'],
@@ -176,6 +208,68 @@ class AtlasBackendInstallSupport {
     ]) {
       yield _joinAtlasBackendInstallPath([trimmed, ...relativeParts]);
     }
+  }
+
+  static Iterable<String> installationRootCandidates(
+    Map<String, String> environment,
+  ) sync* {
+    final localAppData = environment['LOCALAPPDATA'];
+    if (localAppData != null && localAppData.trim().isNotEmpty) {
+      for (final relativeParts in const <List<String>>[
+        <String>['Programs', 'ATLAS Backend V2'],
+        <String>['Programs', 'ATLAS Backend'],
+        <String>['Programs', 'ATLAS-Backend'],
+        <String>['ATLAS Backend V2'],
+        <String>['ATLAS Backend'],
+        <String>['ATLAS Backend', 'ATLAS Backend'],
+        <String>['ATLAS'],
+      ]) {
+        yield _joinAtlasBackendInstallPath([localAppData, ...relativeParts]);
+      }
+    }
+
+    for (final variableName in const <String>[
+      'ProgramFiles',
+      'ProgramFiles(x86)',
+    ]) {
+      final programFiles = environment[variableName];
+      if (programFiles == null || programFiles.trim().isEmpty) continue;
+      for (final directoryName in const <String>[
+        'ATLAS Backend V2',
+        'ATLAS Backend',
+        'ATLAS-Backend',
+        'ATLAS',
+      ]) {
+        yield _joinAtlasBackendInstallPath([programFiles, directoryName]);
+      }
+    }
+  }
+
+  static bool isCurrentBackendExecutable(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return false;
+    final executable = File(trimmed);
+    if (!executable.existsSync()) return false;
+    final name = executable.uri.pathSegments.isEmpty
+        ? ''
+        : executable.uri.pathSegments.last.toLowerCase();
+    if (!_backendExecutableNames.contains(name)) return false;
+
+    final root = executable.parent.path;
+    return _backendPayloadMarkers.every((parts) {
+      return File(_joinAtlasBackendInstallPath([root, ...parts])).existsSync();
+    });
+  }
+
+  static bool isBackendRegistryProduct(String? displayName) {
+    final normalized = displayName?.trim().toLowerCase() ?? '';
+    return RegExp(
+      r'^atlas backend(?: v2)?(?: \d+(?:\.\d+){1,3})?$',
+    ).hasMatch(normalized);
+  }
+
+  static String normalizeRegistryExecutablePath(String raw) {
+    return raw.trim().replaceAll('"', '').replaceFirst(RegExp(r',\s*\d+$'), '');
   }
 }
 
@@ -1073,8 +1167,11 @@ class LauncherScreen extends StatefulWidget {
 
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const String _launcherVersion = '2.0.4';
-  static const String _launcherBuildLabel = 'Stable 2.0.4';
+  static const String _launcherName = 'ATLAS Link';
+  static const String _launcherVersion = '2.0.5';
+  static final String _launcherSessionId =
+      BackendHealthProtocol.createIdentifier();
+  static const String _launcherBuildLabel = 'Stable 2.0.5';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -1179,9 +1276,9 @@ class _LauncherScreenState extends State<LauncherScreen>
     ),
   ];
   static const String _atlasBackendLatestReleaseApi =
-      'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases/latest';
+      AtlasBackendInstallSupport.latestReleaseApi;
   static const String _atlasBackendLatestReleasePage =
-      'https://github.com/cipherfps/ATLAS-Backend/releases/latest';
+      AtlasBackendInstallSupport.latestReleasePage;
   static const String _launcherDataDirName = 'ATLAS Link';
   static const String _legacyLauncherDataDirName = 'atlas-link-launcher';
   static const String _loginContinueMarker =
@@ -9032,13 +9129,20 @@ class _LauncherScreenState extends State<LauncherScreen>
     });
   }
 
-  Future<void> _refreshRuntime({bool force = false}) async {
+  Future<void> _refreshRuntime({
+    bool force = false,
+    bool explicitConnectionCheck = false,
+    String? launcherRequestId,
+  }) async {
     if (!force && _deferNonCriticalRuntimeRefresh()) return;
 
     final inFlight = _runtimeRefreshInFlight;
     if (inFlight != null) {
       await inFlight;
-      return;
+      // A routine refresh can share the result already in flight. A manual
+      // connection check must make its own tagged request so the user's click
+      // is not swallowed by the four-second background poll.
+      if (!explicitConnectionCheck) return;
     }
 
     final completer = Completer<void>();
@@ -9094,6 +9198,18 @@ class _LauncherScreenState extends State<LauncherScreen>
         ..autoUncompress = false;
       try {
         final req = await client.getUrl(uri);
+        final healthAction = BackendHealthProtocol.actionFor(
+          wasOnline: _backendOnline,
+          explicitConnectionCheck: explicitConnectionCheck,
+        );
+        final healthHeaders = BackendHealthProtocol.headersFor(
+          launcherName: _launcherName,
+          launcherVersion: _launcherVersion,
+          sessionId: _launcherSessionId,
+          action: healthAction,
+          requestId: launcherRequestId,
+        );
+        healthHeaders.forEach(req.headers.set);
         await req.close();
         if (mounted) {
           if (!_backendOnline) {
@@ -26829,7 +26945,10 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                   children: [
                     Text(
                       'Installed Versions',
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                     const SizedBox(width: 8),
                     Text(
@@ -26863,7 +26982,10 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
                   children: [
                     Text(
                       'Installed Versions',
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                     const SizedBox(width: 8),
                     Text(
@@ -31512,7 +31634,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     }
     if (_atlasBackendProcess != null) {
       _toast('ATLAS Backend is already running');
-      await _checkBackendNow();
+      await _checkBackendNowWithStatus();
       return;
     }
     if (_settings.backendConnectionType != BackendConnectionType.local) {
@@ -31619,7 +31741,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     }
     if (_atlasBackendProcess != null) {
       _toast('${_settings.embeddedBackendType.label} is already running');
-      await _checkBackendNow();
+      await _checkBackendNowWithStatus();
       return;
     }
     if (_settings.backendConnectionType != BackendConnectionType.embedded) {
@@ -31960,7 +32082,7 @@ foreach (\$process in Get-CimInstance Win32_Process -Filter \$candidateFilter) {
     }
     if (_downloadingBackend != null) return;
     if (_embeddedBackendInstalled(backend)) {
-      await _checkBackendNow();
+      await _checkBackendNowWithStatus();
       return;
     }
 
@@ -32973,7 +33095,7 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       // Fallback: scan recent releases in case /latest is missing assets, points
       // at an older tag, or the installer was attached to a different release.
       final recent = await fetchGitHubJson(
-        'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases?per_page=12',
+        AtlasBackendInstallSupport.recentReleasesApi,
       );
       if (recent is! List) return null;
 
@@ -33201,67 +33323,33 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
     if (configuredPath.isNotEmpty) {
       final normalizedConfigured = configuredPath.replaceAll('\\', '/');
       if (normalizedConfigured.toLowerCase().endsWith('.exe') &&
-          File(configuredPath).existsSync()) {
+          AtlasBackendInstallSupport.isCurrentBackendExecutable(
+            configuredPath,
+          )) {
         return configuredPath;
       }
       addWithNames(configuredPath);
     }
 
-    final localAppData = Platform.environment['LOCALAPPDATA'];
-    final programFiles = Platform.environment['ProgramFiles'];
-    final programFilesX86 = Platform.environment['ProgramFiles(x86)'];
-    addWithNames(
-      localAppData == null
-          ? null
-          : _joinPath([localAppData, 'Programs', 'ATLAS Backend']),
-    );
-    addWithNames(
-      localAppData == null
-          ? null
-          : _joinPath([localAppData, 'Programs', 'ATLAS-Backend']),
-    );
-    addWithNames(
-      localAppData == null ? null : _joinPath([localAppData, 'ATLAS Backend']),
-    );
-    addWithNames(
-      localAppData == null
-          ? null
-          : _joinPath([localAppData, 'ATLAS Backend', 'ATLAS Backend']),
-    );
-    addWithNames(
-      localAppData == null ? null : _joinPath([localAppData, 'ATLAS']),
-    );
-    addWithNames(
-      programFiles == null ? null : _joinPath([programFiles, 'ATLAS Backend']),
-    );
-    addWithNames(
-      programFiles == null ? null : _joinPath([programFiles, 'ATLAS-Backend']),
-    );
-    addWithNames(
-      programFiles == null ? null : _joinPath([programFiles, 'ATLAS']),
-    );
-    addWithNames(
-      programFilesX86 == null
-          ? null
-          : _joinPath([programFilesX86, 'ATLAS Backend']),
-    );
-    addWithNames(
-      programFilesX86 == null
-          ? null
-          : _joinPath([programFilesX86, 'ATLAS-Backend']),
-    );
-    addWithNames(
-      programFilesX86 == null ? null : _joinPath([programFilesX86, 'ATLAS']),
-    );
+    for (final root in AtlasBackendInstallSupport.installationRootCandidates(
+      Platform.environment,
+    )) {
+      addWithNames(root);
+    }
 
     final seen = <String>{};
     for (final candidate in candidates) {
       final normalized = candidate.toLowerCase();
       if (!seen.add(normalized)) continue;
-      if (File(candidate).existsSync()) return candidate;
+      if (AtlasBackendInstallSupport.isCurrentBackendExecutable(candidate)) {
+        return candidate;
+      }
     }
 
+    final localAppData = Platform.environment['LOCALAPPDATA'];
     final appData = Platform.environment['APPDATA'];
+    final programFiles = Platform.environment['ProgramFiles'];
+    final programFilesX86 = Platform.environment['ProgramFiles(x86)'];
     final scanRoots = <String>[
       if (localAppData != null && localAppData.trim().isNotEmpty)
         _joinPath([localAppData, 'Programs']),
@@ -33296,17 +33384,9 @@ while (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
       try {
         await for (final entity in current.directory.list(followLinks: false)) {
           if (entity is File) {
-            final fileName = _basename(entity.path).toLowerCase();
-            final lowerPath = entity.path.toLowerCase();
-            if (fileName.endsWith('.exe') &&
-                ((fileName.contains('atlas') && fileName.contains('backend')) ||
-                    (fileName == 'atlas_gui_flutter.exe' &&
-                        lowerPath.contains('atlas')) ||
-                    (fileName == 'atlas.exe' &&
-                        (lowerPath.contains('\\atlas backend\\') ||
-                            lowerPath.contains('/atlas backend/') ||
-                            lowerPath.contains('\\atlas-backend\\') ||
-                            lowerPath.contains('/atlas-backend/'))))) {
+            if (AtlasBackendInstallSupport.isCurrentBackendExecutable(
+              entity.path,
+            )) {
               return entity.path;
             }
           } else if (entity is Directory && current.depth < maxDepth) {
@@ -33330,7 +33410,10 @@ $paths = @(
   'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
 $entries = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
-  Where-Object { $_.DisplayName -like '*ATLAS*' }
+  Where-Object {
+    $_.PSChildName -eq '{E473D0FA-7BDC-4B5C-80EB-CC37EE2CF043}_is1' -or
+    $_.DisplayName -match '^ATLAS Backend(?: V2)?(?: [0-9]+(?:\.[0-9]+){1,3})?$'
+  }
 foreach ($entry in $entries) {
   if ($entry.DisplayIcon) {
     Write-Output $entry.DisplayIcon
@@ -33371,11 +33454,12 @@ foreach ($app in $appPaths) {
       if (result.exitCode != 0) return null;
       final lines = result.stdout.toString().split(RegExp(r'\r?\n'));
       for (final raw in lines) {
-        var candidate = raw.trim();
+        final candidate =
+            AtlasBackendInstallSupport.normalizeRegistryExecutablePath(raw);
         if (candidate.isEmpty) continue;
-        candidate = candidate.replaceAll('"', '');
-        candidate = candidate.replaceFirst(RegExp(r',\s*\d+$'), '');
-        if (File(candidate).existsSync()) return candidate;
+        if (AtlasBackendInstallSupport.isCurrentBackendExecutable(candidate)) {
+          return candidate;
+        }
       }
       return null;
     } catch (_) {
@@ -33384,11 +33468,16 @@ foreach ($app in $appPaths) {
   }
 
   Future<void> _checkBackendNow() async {
-    return _checkBackendNowWithStatus();
+    return _checkBackendNowWithStatus(
+      explicitConnectionCheck: true,
+      launcherRequestId: BackendHealthProtocol.createIdentifier(),
+    );
   }
 
   Future<void> _checkBackendNowWithStatus({
     String busyMessage = 'Checking Backend...',
+    bool explicitConnectionCheck = false,
+    String? launcherRequestId,
   }) async {
     if (_backendActionBusy) return;
     if (_settings.backendConnectionType == BackendConnectionType.remote) {
@@ -33410,7 +33499,11 @@ foreach ($app in $appPaths) {
     _toastProgress(busyMessage, progress: null, indeterminate: true);
     try {
       await _saveSettings(toast: false);
-      await _refreshRuntime(force: true);
+      await _refreshRuntime(
+        force: true,
+        explicitConnectionCheck: explicitConnectionCheck,
+        launcherRequestId: launcherRequestId,
+      );
       if (!mounted) return;
       final configured =
           '${_effectiveBackendHost()}:${_effectiveBackendPort()}';

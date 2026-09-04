@@ -1,4 +1,4 @@
-<!-- version: 2.0.4 -->
+<!-- version: 2.0.5 -->
 <!--
 Markdown Quick Key
 - Headings: `#`, `##`, `###`
@@ -15,7 +15,6 @@ Markdown Quick Key
 ---
 
 # Improvements
-- Patched Mod Installer Resumes
-- Downloaded DLLs now point you to their Data Management selector
+- Added Compatibility for ATLAS Backend V2
 
 [Full Release Notes](https://github.com/cipherfps/ATLAS-Link/releases)
