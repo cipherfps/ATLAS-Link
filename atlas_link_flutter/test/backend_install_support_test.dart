@@ -5,10 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('AtlasBackendInstallSupport.selectInstallerUrl', () {
-    test('prefers the versioned V2 setup exe over other assets', () {
+    test('prefers the versioned ATLAS setup exe over other assets', () {
       final selected = AtlasBackendInstallSupport.selectInstallerUrl([
         {
-          'name': 'ATLAS Backend Installer-1.5.5.msi',
+          'name': 'ATLAS-Backend-1.5.5.msi',
           'browser_download_url': 'https://example.com/backend-legacy.msi',
         },
         {
@@ -20,12 +20,12 @@ void main() {
           'browser_download_url': 'https://example.com/backend-app.exe',
         },
         {
-          'name': 'ATLAS Backend Setup-2.0.0.exe',
-          'browser_download_url': 'https://example.com/backend-v2-setup.exe',
+          'name': 'ATLAS.Backend.Setup-1.6.8.exe',
+          'browser_download_url': 'https://example.com/backend-setup.exe',
         },
       ]);
 
-      expect(selected, 'https://example.com/backend-v2-setup.exe');
+      expect(selected, 'https://example.com/backend-setup.exe');
     });
 
     test('prefers installer exes over plain backend executables', () {
@@ -35,7 +35,7 @@ void main() {
           'browser_download_url': 'https://example.com/backend-app.exe',
         },
         {
-          'name': 'ATLAS Backend Setup-1.5.6.exe',
+          'name': 'ATLAS.Backend.Setup-1.6.8.exe',
           'browser_download_url': 'https://example.com/backend-setup.exe',
         },
       ]);
@@ -46,7 +46,7 @@ void main() {
     test('falls back to msi when that is the only installer asset', () {
       final selected = AtlasBackendInstallSupport.selectInstallerUrl([
         {
-          'name': 'ATLAS Backend Installer-1.5.5.msi',
+          'name': 'ATLAS-Backend-1.5.5.msi',
           'browser_download_url': 'https://example.com/backend-legacy.msi',
         },
       ]);
@@ -56,29 +56,29 @@ void main() {
   });
 
   group('ATLAS Backend release endpoints', () {
-    test('all point to the V2 repository', () {
+    test('all point to the original backend repository', () {
       expect(
         AtlasBackendInstallSupport.latestReleaseApi,
-        'https://api.github.com/repos/cipherfps/ATLAS-Backend-V2/releases/latest',
+        'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases/latest',
       );
       expect(
         AtlasBackendInstallSupport.recentReleasesApi,
-        'https://api.github.com/repos/cipherfps/ATLAS-Backend-V2/releases?per_page=12',
+        'https://api.github.com/repos/cipherfps/ATLAS-Backend/releases?per_page=12',
       );
       expect(
         AtlasBackendInstallSupport.latestReleasePage,
-        'https://github.com/cipherfps/ATLAS-Backend-V2/releases/latest',
+        'https://github.com/cipherfps/ATLAS-Backend/releases/latest',
+      );
+      expect(
+        AtlasBackendInstallSupport.installerAppId,
+        '{8C7FECAB-4CE9-43A5-9BB4-3BCE5AF7FB7F}_is1',
       );
     });
   });
 
   group('AtlasBackendInstallSupport.executableCandidatesForRoot', () {
-    test('includes the staged installer payload for a repo root', () {
-      final root = [
-        'C:',
-        'repo',
-        'ATLAS-Backend-V2',
-      ].join(Platform.pathSeparator);
+    test('includes the staged Inno payload for a repo root', () {
+      final root = ['C:', 'repo', 'ATLAS-Backend'].join(Platform.pathSeparator);
       final candidates = AtlasBackendInstallSupport.executableCandidatesForRoot(
         root,
       ).toList();
@@ -88,15 +88,15 @@ void main() {
         contains(
           [
             root,
-            'installer',
-            'stage',
+            'dist',
+            'ATLAS-Backend',
             'ATLAS Backend.exe',
           ].join(Platform.pathSeparator),
         ),
       );
     });
 
-    test('includes current and transitional Windows install roots', () {
+    test('includes original and transitional Windows install roots', () {
       final roots = AtlasBackendInstallSupport.installationRootCandidates({
         'LOCALAPPDATA': [
           'C:',
@@ -115,16 +115,6 @@ void main() {
       expect(
         roots,
         contains(
-          [
-            'C:',
-            'Program Files',
-            'ATLAS Backend V2',
-          ].join(Platform.pathSeparator),
-        ),
-      );
-      expect(
-        roots,
-        contains(
           ['C:', 'Program Files', 'ATLAS Backend'].join(Platform.pathSeparator),
         ),
       );
@@ -138,8 +128,20 @@ void main() {
             'AppData',
             'Local',
             'Programs',
-            'ATLAS Backend V2',
+            'ATLAS Backend',
           ].join(Platform.pathSeparator),
+        ),
+      );
+      expect(
+        roots,
+        isNot(
+          contains(
+            [
+              'C:',
+              'Program Files',
+              'ATLAS Backend V2',
+            ].join(Platform.pathSeparator),
+          ),
         ),
       );
     });
@@ -185,7 +187,7 @@ void main() {
     late Directory tempDir;
 
     setUp(() {
-      tempDir = Directory.systemTemp.createTempSync('atlas-backend-v2-test-');
+      tempDir = Directory.systemTemp.createTempSync('atlas-backend-test-');
     });
 
     tearDown(() {
@@ -193,6 +195,68 @@ void main() {
     });
 
     File createPayloadExecutable(String name) {
+      File(
+        [tempDir.path, 'package.json'].join(Platform.pathSeparator),
+      ).writeAsStringSync('{}');
+      final entrypoint = File(
+        [tempDir.path, 'src', 'index.ts'].join(Platform.pathSeparator),
+      );
+      entrypoint.parent.createSync(recursive: true);
+      entrypoint.writeAsStringSync('');
+      final bun = File(
+        [tempDir.path, 'tools', 'bun', 'bun.exe'].join(Platform.pathSeparator),
+      );
+      bun.parent.createSync(recursive: true);
+      bun.writeAsBytesSync(const <int>[0]);
+      return File([tempDir.path, name].join(Platform.pathSeparator))
+        ..writeAsBytesSync(const <int>[0]);
+    }
+
+    test('accepts the original executable only with its payload markers', () {
+      final executable = createPayloadExecutable('ATLAS Backend.exe');
+
+      expect(
+        AtlasBackendInstallSupport.isCurrentBackendExecutable(executable.path),
+        isTrue,
+      );
+
+      File(
+        [tempDir.path, 'package.json'].join(Platform.pathSeparator),
+      ).deleteSync();
+      expect(
+        AtlasBackendInstallSupport.isCurrentBackendExecutable(executable.path),
+        isFalse,
+      );
+    });
+
+    test('accepts the legacy MSI executable name with the old payload', () {
+      final executable = createPayloadExecutable('ATLAS.exe');
+
+      expect(
+        AtlasBackendInstallSupport.isCurrentBackendExecutable(executable.path),
+        isTrue,
+      );
+    });
+
+    test('rejects installers, uninstallers, and ATLAS Link', () {
+      for (final name in const <String>[
+        'atlas-backend-installer.exe',
+        'ATLAS.Backend.Setup-1.6.8.exe',
+        'unins000.exe',
+        'ATLAS Link.exe',
+      ]) {
+        final executable = createPayloadExecutable(name);
+        expect(
+          AtlasBackendInstallSupport.isCurrentBackendExecutable(
+            executable.path,
+          ),
+          isFalse,
+          reason: '$name must not be treated as the installed backend',
+        );
+      }
+    });
+
+    test('does not mistake a V2 payload for the original backend', () {
       File(
         [tempDir.path, 'backend-content.json'].join(Platform.pathSeparator),
       ).writeAsStringSync('{}');
@@ -209,43 +273,20 @@ void main() {
       );
       node.parent.createSync(recursive: true);
       node.writeAsBytesSync(const <int>[0]);
-      return File([tempDir.path, name].join(Platform.pathSeparator))
-        ..writeAsBytesSync(const <int>[0]);
-    }
+      final executable = File(
+        [tempDir.path, 'ATLAS Backend.exe'].join(Platform.pathSeparator),
+      )..writeAsBytesSync(const <int>[0]);
 
-    test('accepts the V2 executable only with its payload markers', () {
-      final executable = createPayloadExecutable('ATLAS Backend.exe');
-
-      expect(
-        AtlasBackendInstallSupport.isCurrentBackendExecutable(executable.path),
-        isTrue,
-      );
-
-      File(
-        [tempDir.path, 'backend-content.json'].join(Platform.pathSeparator),
-      ).deleteSync();
       expect(
         AtlasBackendInstallSupport.isCurrentBackendExecutable(executable.path),
         isFalse,
       );
-    });
-
-    test('rejects installers, uninstallers, and ATLAS Link', () {
-      for (final name in const <String>[
-        'atlas-backend-installer.exe',
-        'ATLAS Backend Setup-2.0.0.exe',
-        'unins000.exe',
-        'ATLAS Link.exe',
-      ]) {
-        final executable = createPayloadExecutable(name);
-        expect(
-          AtlasBackendInstallSupport.isCurrentBackendExecutable(
-            executable.path,
-          ),
-          isFalse,
-          reason: '$name must not be treated as the installed backend',
-        );
-      }
+      expect(
+        AtlasBackendInstallSupport.isIncompleteBackendInstallationRoot(
+          tempDir.path,
+        ),
+        isFalse,
+      );
     });
 
     test(
@@ -278,12 +319,22 @@ void main() {
         isTrue,
       );
       expect(
-        AtlasBackendInstallSupport.isBackendRegistryProduct('ATLAS Backend V2'),
+        AtlasBackendInstallSupport.isBackendRegistryProduct('ATLAS'),
         isTrue,
       );
       expect(
+        AtlasBackendInstallSupport.isBackendRegistryProduct('ATLAS Backend V2'),
+        isFalse,
+      );
+      expect(
         AtlasBackendInstallSupport.isBackendRegistryProduct(
-          'ATLAS Backend 2.0.0',
+          'ATLAS Backend 2.0.2',
+        ),
+        isFalse,
+      );
+      expect(
+        AtlasBackendInstallSupport.isBackendRegistryProduct(
+          'ATLAS Backend 1.6.8',
         ),
         isTrue,
       );
@@ -296,9 +347,9 @@ void main() {
     test('normalizes quoted DisplayIcon paths', () {
       expect(
         AtlasBackendInstallSupport.normalizeRegistryExecutablePath(
-          r'"C:\Program Files\ATLAS Backend V2\ATLAS Backend.exe",0',
+          r'"C:\Program Files\ATLAS Backend\ATLAS Backend.exe",0',
         ),
-        r'C:\Program Files\ATLAS Backend V2\ATLAS Backend.exe',
+        r'C:\Program Files\ATLAS Backend\ATLAS Backend.exe',
       );
     });
   });

@@ -39,7 +39,7 @@ String _joinAtlasBackendInstallPath(List<String> pieces) {
 }
 
 class AtlasBackendInstallSupport {
-  static const String repositorySlug = 'cipherfps/ATLAS-Backend-V2';
+  static const String repositorySlug = 'cipherfps/ATLAS-Backend';
   static const String latestReleaseApi =
       'https://api.github.com/repos/$repositorySlug/releases/latest';
   static const String recentReleasesApi =
@@ -47,7 +47,7 @@ class AtlasBackendInstallSupport {
   static const String latestReleasePage =
       'https://github.com/$repositorySlug/releases/latest';
   static const String installerAppId =
-      '{E473D0FA-7BDC-4B5C-80EB-CC37EE2CF043}_is1';
+      '{8C7FECAB-4CE9-43A5-9BB4-3BCE5AF7FB7F}_is1';
 
   static const Set<String> _backendExecutableNames = <String>{
     'atlas backend.exe',
@@ -57,9 +57,9 @@ class AtlasBackendInstallSupport {
   };
 
   static const List<List<String>> _backendPayloadMarkers = <List<String>>[
-    <String>['backend-content.json'],
-    <String>['app.js'],
-    <String>['tools', 'node', 'node.exe'],
+    <String>['package.json'],
+    <String>['src', 'index.ts'],
+    <String>['tools', 'bun', 'bun.exe'],
   ];
 
   static bool looksLikeAtlasBackendPath(String path) {
@@ -115,7 +115,7 @@ class AtlasBackendInstallSupport {
           name.contains('installer') ||
           name.contains('install');
       final isVersionedAtlasSetup = RegExp(
-        r'^atlas backend setup-\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?\.exe$',
+        r'^atlas[ ._-]+backend[ ._-]+setup[ ._-]+\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?\.exe$',
       ).hasMatch(name);
 
       if (name.endsWith('.exe')) {
@@ -171,7 +171,6 @@ class AtlasBackendInstallSupport {
     }
 
     for (final relativeParts in const <List<String>>[
-      <String>['installer', 'stage', 'ATLAS Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS-Backend.exe'],
       <String>['dist', 'ATLAS-Backend', 'ATLAS.exe'],
@@ -216,10 +215,8 @@ class AtlasBackendInstallSupport {
     final localAppData = environment['LOCALAPPDATA'];
     if (localAppData != null && localAppData.trim().isNotEmpty) {
       for (final relativeParts in const <List<String>>[
-        <String>['Programs', 'ATLAS Backend V2'],
         <String>['Programs', 'ATLAS Backend'],
         <String>['Programs', 'ATLAS-Backend'],
-        <String>['ATLAS Backend V2'],
         <String>['ATLAS Backend'],
         <String>['ATLAS Backend', 'ATLAS Backend'],
         <String>['ATLAS'],
@@ -235,7 +232,6 @@ class AtlasBackendInstallSupport {
       final programFiles = environment[variableName];
       if (programFiles == null || programFiles.trim().isEmpty) continue;
       for (final directoryName in const <String>[
-        'ATLAS Backend V2',
         'ATLAS Backend',
         'ATLAS-Backend',
         'ATLAS',
@@ -291,7 +287,7 @@ class AtlasBackendInstallSupport {
   static bool isBackendRegistryProduct(String? displayName) {
     final normalized = displayName?.trim().toLowerCase() ?? '';
     return RegExp(
-      r'^atlas backend(?: v2)?(?: \d+(?:\.\d+){1,3})?$',
+      r'^(?:atlas|atlas backend)(?: 1(?:\.\d+){1,3})?$',
     ).hasMatch(normalized);
   }
 
@@ -1195,10 +1191,10 @@ class LauncherScreen extends StatefulWidget {
 class _LauncherScreenState extends State<LauncherScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   static const String _launcherName = 'ATLAS Link';
-  static const String _launcherVersion = '2.0.6';
+  static const String _launcherVersion = '2.0.7';
   static final String _launcherSessionId =
       BackendHealthProtocol.createIdentifier();
-  static const String _launcherBuildLabel = 'Stable 2.0.6';
+  static const String _launcherBuildLabel = 'Stable 2.0.7';
   static const String _shippingExeName = 'FortniteClient-Win64-Shipping.exe';
   static const String _launcherExeName = 'FortniteLauncher.exe';
   static const String _eacExeName = 'FortniteClient-Win64-Shipping_EAC.exe';
@@ -33486,8 +33482,8 @@ $paths = @(
 )
 $entries = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
   Where-Object {
-    $_.PSChildName -eq '{E473D0FA-7BDC-4B5C-80EB-CC37EE2CF043}_is1' -or
-    $_.DisplayName -match '^ATLAS Backend(?: V2)?(?: [0-9]+(?:\.[0-9]+){1,3})?$'
+    $_.PSChildName -eq '{8C7FECAB-4CE9-43A5-9BB4-3BCE5AF7FB7F}_is1' -or
+    $_.DisplayName -match '^(?:ATLAS|ATLAS Backend)(?: 1(?:\.[0-9]+){1,3})?$'
   }
 foreach ($entry in $entries) {
   if ($entry.DisplayIcon) {

@@ -41,13 +41,13 @@ void main() {
     test('routine polls identify the launcher and their silent intent', () {
       final headers = BackendHealthProtocol.headersFor(
         launcherName: 'ATLAS Link',
-        launcherVersion: '2.0.6',
+        launcherVersion: '2.0.7',
         sessionId: 'session-1',
         action: BackendHealthAction.poll,
       );
 
       expect(headers[BackendHealthProtocol.nameHeader], 'ATLAS Link');
-      expect(headers[BackendHealthProtocol.versionHeader], '2.0.6');
+      expect(headers[BackendHealthProtocol.versionHeader], '2.0.7');
       expect(headers[BackendHealthProtocol.sessionHeader], 'session-1');
       expect(headers[BackendHealthProtocol.actionHeader], 'poll');
       expect(headers, isNot(contains(BackendHealthProtocol.requestIdHeader)));
@@ -84,7 +84,7 @@ void main() {
       expect(
         () => BackendHealthProtocol.headersFor(
           launcherName: 'ATLAS Link',
-          launcherVersion: '2.0.6',
+          launcherVersion: '2.0.7',
           sessionId: 'session-1',
           action: BackendHealthAction.connectionCheck,
         ),
